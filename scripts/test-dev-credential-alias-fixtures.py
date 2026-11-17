@@ -268,6 +268,11 @@ class AliasTests(unittest.TestCase):
                 aliases = iter((ALIAS, OTHER))
                 current = {}
                 def cli(env, *args, **kwargs):
+                    prompts = kwargs['prompts']
+                    self.assertEqual(prompts[-1][1] == 'n', not bool(current.get('token')))
+                    if not current.get('token'):
+                        prompt = prompts[-1][0].lstrip()
+                        self.assertIn('"' + prompt + '"', (HERE.parent / 'cli/src/login.rs').read_text(encoding='utf-8'))
                     alias = next(aliases)
                     keys.created(alias, None if version == 1 else SUPER)
                     current.update(user=USER, keyring_account=alias, token="synthetic-token", vault_version=version)
@@ -297,7 +302,8 @@ class AliasTests(unittest.TestCase):
                 self.assertEqual(child_env.get('RSRS_SUPER'), SUPER if version == 1 else None)
                 prompts = kwargs['prompts']
                 self.assertEqual(prompts[1], ('  login password: ', PASSWORD))
-                self.assertEqual(len(prompts), 2 if version == 1 else 3)
+                self.assertEqual(len(prompts), 3 if version == 1 else 4)
+                self.assertEqual(prompts[-1], ('  Merge selected local memories into this server account (skip identical bodies; keep existing records)? [y/N]: ', 'n'))
                 if version != 1:
                     self.assertEqual(prompts[2], ('  super password (A3-…): ', SUPER))
                 self.assertNotIn(SUPER, args)
@@ -342,7 +348,8 @@ class AliasTests(unittest.TestCase):
 
                     def cli(env, *args, **kwargs):
                         self.assertFalse((Path(env['RSRS_DATA_DIR']) / 'session.json').exists())
-                        self.assertEqual(kwargs['prompts'][-1], ('  original v1 Account Secret: ', factor))
+                        self.assertEqual(kwargs['prompts'][-2], ('  original v1 Account Secret: ', factor))
+                        self.assertEqual(kwargs['prompts'][-1][1], 'n')
                         self.assertNotIn(factor, args)
                         if fails:
                             raise RuntimeError('auth_failed')
@@ -660,10 +667,10 @@ class AliasTests(unittest.TestCase):
             self.assertTrue(keys.cleanup()['passed'])
             self.assertFalse(keys.values)
 
-    def test_mac_v1_probe_removes_temporary_slot_restores_session_and_keeps_failures(self):
+    def test_mac_current_probe_preserves_session_and_keeps_failures(self):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         import sqlite3
-        for failure in (None, 'show', 'cleanup'):
+        for failure in (None, 'show', 'session'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 code, salt, nonce, urk = 'A3-' + 'ab' * 18, 'cd' * 16, bytes(12), bytes(range(32))
@@ -688,29 +695,29 @@ class AliasTests(unittest.TestCase):
                         Path(args[-1]).write_text('super password: ' + code + '\n', encoding='utf-8')
                         return {}
                     probe = json.loads(session_path.read_text(encoding='utf-8'))
-                    keys.values['rsrs', 'legacy-secret:' + ALIAS] = probe.pop('secret')
-                    probe['legacy_secret_backend'] = 'native'
-                    session_path.write_text(json.dumps(probe), encoding='utf-8')
+                    self.assertEqual(probe['vault_version'], 4)
+                    self.assertEqual(probe['keyring_account'], ALIAS)
+                    self.assertNotIn('legacy_secret_backend', probe)
+                    self.assertNotIn('secret', probe)
+                    if failure == 'session':
+                        session_path.write_text(json.dumps(dict(probe, token='changed')), encoding='utf-8')
                     if failure == 'show':
                         raise RuntimeError('synthetic_show_failed')
                     return {'details': {'entry': {'content': 'text'}}}
                 smoke.cli = cli
-                remove = keys._remove
-                if failure == 'cleanup':
-                    keys._remove = lambda *args: (_ for _ in ()).throw(RuntimeError('synthetic_cleanup_failed'))
                 fixture = dict(account={'user': USER}, code=code, password=PASSWORD, id='fixture', text='text',
                                cipher=(ciphertext, nonce.hex()))
                 with patch.object(profile.keyring_backend, 'owned_path', lambda path: path):
                     if failure:
-                        with self.assertRaisesRegex(RuntimeError, '^synthetic_' + failure + '_failed$'):
+                        expected_error = '^native_consumer_session_changed$' if failure == 'session' else '^synthetic_show_failed$'
+                        with self.assertRaisesRegex(RuntimeError, expected_error):
                             smoke.verify_mac_native_credentials({'RSRS_DATA_DIR': str(root)}, fixture)
                     else:
                         for _ in range(2):
                             smoke.verify_mac_native_credentials({'RSRS_DATA_DIR': str(root)}, fixture)
                 self.assertEqual(session_path.read_bytes(), original)
                 self.assertFalse(list(root.glob('native-recovery-*.txt')))
-                self.assertEqual(('rsrs', 'legacy-secret:' + ALIAS) in keys.values, failure == 'cleanup')
-                keys._remove = remove
+                self.assertNotIn(('rsrs', 'legacy-secret:' + ALIAS), keys.values)
                 self.assertTrue(keys.cleanup()['passed'])
 
 
@@ -746,16 +753,76 @@ class SnapshotTests(unittest.TestCase):
         self.keys.track_created_login(self.session, USER, SUPER, PASSWORD)
 
     def test_exact_alias_snapshot_and_narrow_normalization(self):
-        before = {k: dict(v) for k, v in self.keys.attribute_snapshots.items()}
-        self.keys.register_current_target(self.session, USER)
-        self.assertEqual(self.keys.current_target_entries, set(before))
-        for item in self.keys.collection.items:
+        import secrets
+        registered = set()
+        for _ in range(2):
+            user = 'ci-migrate-' + secrets.token_hex(8)
+            alias = 'login-' + secrets.token_hex(16)
+            session = dict(user=user, keyring_account=alias)
+            entries = {('rsrs', prefix + alias) for prefix in ('super:', 'pass:')}
+            for prefix, value in (('super:', SUPER), ('pass:', PASSWORD)):
+                self.keys.collection.items.append(Item(self.keys.collection,
+                    self.keys.attributes('rsrs', prefix + alias), value))
+            self.keys.track_created_login(session, user, SUPER, PASSWORD)
+            before = {k: dict(v) for k, v in self.keys.attribute_snapshots.items()}
+            # A previous registration must neither block a new pair nor admit it unchecked.
+            for invalid_session, invalid_user in ((dict(session, user=USER), user),
+                    (dict(session, keyring_account=OTHER), user), (session, 'foreign')):
+                with self.assertRaises(RuntimeError):
+                    self.keys.register_current_target(invalid_session, invalid_user)
+                self.assertEqual(self.keys.current_target_entries, registered)
+            entry = ('rsrs', 'pass:' + alias)
+            snapshot = self.keys.attribute_snapshots.pop(entry)
+            with self.assertRaisesRegex(RuntimeError, 'not_verified_owned_entry'):
+                self.keys.register_current_target(session, user)
+            self.keys.attribute_snapshots[entry] = snapshot
+            self.keys.entries.remove(entry)
+            with self.assertRaisesRegex(RuntimeError, 'not_verified_owned_entry'):
+                self.keys.register_current_target(session, user)
+            self.keys.entries.add(entry)
+            item = self.keys.collection.items.pop()
+            with self.assertRaisesRegex(RuntimeError, 'not_verified_owned_entry'):
+                self.keys.register_current_target(session, user)
+            self.keys.collection.items.append(item)
+            item.attributes['extra'] = 'changed'
+            with self.assertRaisesRegex(RuntimeError, 'attributes_changed'):
+                self.keys.register_current_target(session, user)
+            del item.attributes['extra']
+            self.assertEqual(self.keys.current_target_entries, registered)
+            self.keys.register_current_target(session, user)
+            registered.update(entries)
+            self.assertEqual(self.keys.current_target_entries, registered)
+            with self.assertRaisesRegex(RuntimeError, 'registration_invalid'):
+                self.keys.register_current_target(session, user)
+            for current in self.keys.collection.items:
+                if ('rsrs', current.attributes['username']) in entries:
+                    current.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+            for prefix, value in (('super:', SUPER), ('pass:', PASSWORD)):
+                self.assertEqual(self.keys.read('rsrs', prefix + alias), value)
+            self.assertEqual(self.keys.attribute_snapshots, before)
+            del item.attributes['xdg:schema']
+            with self.assertRaisesRegex(RuntimeError, 'schema_reverted'):
+                self.keys.read('rsrs', 'pass:' + alias)
+            item.attributes['xdg:schema'] = 'foreign'
+            with self.assertRaisesRegex(RuntimeError, 'schema_not_generic'):
+                self.keys.read('rsrs', 'pass:' + alias)
             item.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
-        self.assertEqual(self.keys.read('rsrs', 'pass:' + ALIAS), PASSWORD)
-        self.assertEqual(self.keys.attribute_snapshots, before)
-        self.keys.collection.items[1].attributes['application'] = 'foreign'
-        with self.assertRaisesRegex(RuntimeError, 'attributes_mismatch'):
+            item.attributes['application'] = 'foreign'
+            with self.assertRaisesRegex(RuntimeError, 'attributes_mismatch'):
+                self.keys.read('rsrs', 'pass:' + alias)
+            item.attributes['application'] = 'rust-keyring'
+        # Tracked but unregistered credentials retain strict raw schema snapshots.
+        self.keys.collection.items[1].attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+        with self.assertRaisesRegex(RuntimeError, 'attributes_changed'):
             self.keys.read('rsrs', 'pass:' + ALIAS)
+        report = self.keys.cleanup()
+        self.assertTrue(report['passed'])
+        baseline = report['provider_schema_baseline']
+        self.assertEqual(baseline['scope'],
+                         'two_new_owned_current_credentials_per_verified_registration_only')
+        self.assertEqual(baseline['registered_entries'], 4)
+        self.assertEqual(baseline['observed_normalizations'], 4)
+        self.assertFalse(baseline['initial_raw_snapshots_overwritten'])
 
     def test_foreign_user_alias_missing_untracked_rejected(self):
         for session in (dict(user='foreign', keyring_account=ALIAS), dict(user=USER, keyring_account=OTHER), dict(user=USER)):
@@ -819,8 +886,10 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                      and node.name in ('recover_fixture_urk', 'library_state', 'snapshot',
-                                       'legacy_custody_alias', 'migrate_fixture_custody')]
+                                       'legacy_custody_alias', 'migrate_fixture_custody',
+                                       'custody_consumer_error', 'verify_fixture_custody')]
         namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing,
+                         pathlib=SimpleNamespace(Path=Path), sys=SimpleNamespace(platform='darwin'),
                          canonical_scope_path=lambda path: str(path.resolve()))
         exec(compile(ast.Module(body=functions, type_ignores=[]), '<upgrade-library-fixture>', 'exec'), namespace)
         cls.helpers = namespace
@@ -859,7 +928,9 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         from cryptography.exceptions import InvalidTag
         for version in (1, 3, 4):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
-                profile = Path(directory)
+                installation = Path(directory) / '.rsrs'
+                profile = installation / 'accounts/alternate' if version == 3 else installation
+                profile.mkdir(parents=True)
                 urk, salt, nonce = bytes(range(32)), 'ab' * 16, bytes.fromhex('cd' * 12)
                 factors = {'pass': PASSWORD, 'super': 'A3-' + '12' * 18,
                            'secret': 'original-secret', 'secret_key': 'original-secret-key'}
@@ -869,7 +940,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                            factors['pass'] if version == 1 else factors['super'],
                            factors['secret'] if version == 1 else factors['secret_key'], salt, current=current))
                     return (legacy.PREFIX if current else '') + AESGCM(kek).encrypt(nonce, key, None).hex()
-                def encrypt(current, payload=b'original record', key=urk):
+                def encrypt(current, payload=b'{"content":"original record"}', key=urk):
                     info = b'rsrs:data:v1' if current else b'onememory:data:v1'
                     return (legacy.PREFIX if current else '') + AESGCM(legacy.hkdf(key, None, info)).encrypt(nonce, payload, None).hex()
                 session = dict(vault_version=version, kdf_salt=salt, urk_nonce=nonce.hex(),
@@ -912,6 +983,48 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                         self.assertEqual(committed['keyring_backend'], backend)
                         self.assertEqual(committed['vault_version'], version)
                         self.assertFalse(set(factors) & committed.keys())
+                        if backend == 'native':
+                            config = installation / 'client.json'
+                            config.write_text(json.dumps({'data_dir': str(profile)}), encoding='utf-8')
+                            config_before = config.read_bytes()
+                            env = {'RSRS_DATA_DIR': str(installation), 'RSRS_BIN_DIR': str(installation / 'bin'),
+                                   'RSRS_RUNTIME_BIN': str(installation / 'bin/runtime/dev23/rsrs-runtime')}
+                            keys.keychain = profile / 'synthetic.keychain'
+                            keys._security = Mock(return_value=SimpleNamespace(returncode=0))
+                            def consume(command, *, env, timeout):
+                                self.assertEqual(env['RSRS_DATA_DIR'], str(installation))
+                                self.assertEqual(json.loads(config.read_bytes())['data_dir'], str(profile))
+                                self.assertEqual(env, expected_env)
+                                self.assertEqual(command, ['fixture-cli', '--json', 'show', 'original'])
+                                return SimpleNamespace(returncode=0, stderr=b'', stdout=json.dumps({
+                                    'status': 'ok', 'details': {'entry': {'content': 'original record'}}}).encode())
+                            expected_env = dict(env)
+                            verify = self.helpers['verify_fixture_custody']
+                            with patch.dict(self.helpers, captured_run=consume):
+                                receipt = verify(profile, keys, (alias, version, slots), urk, 'fixture-cli', env)
+                            self.assertEqual(receipt['consumer'], 'cli_authenticated_decryption')
+                            self.assertEqual(config.read_bytes(), config_before)
+                            self.assertEqual(snapshot(profile), current)
+                            for returncode, message in ((1, 'unlock Runtime does not own the selected profile'),
+                                                        (1, 'runtime request belongs to another installation'),
+                                                        (0, 'host session credential read failed'), (1, 'unknown')):
+                                output = SimpleNamespace(returncode=returncode,
+                                    stdout=json.dumps({'status': 'fail', 'errors': [message + ' ' + PASSWORD]}).encode(),
+                                    stderr=(SUPER + ' original record').encode())
+                                with patch.dict(self.helpers, captured_run=Mock(return_value=output)), \
+                                        self.assertRaises(AssertionError) as failed:
+                                    verify(profile, keys, (alias, version, slots), urk, 'fixture-cli', env)
+                                diagnostic = str(failed.exception)
+                                self.assertIn(message if message != 'unknown' else 'unclassified', diagnostic)
+                                self.assertNotIn(PASSWORD, diagnostic)
+                                self.assertNotIn(SUPER, diagnostic)
+                                self.assertNotIn('original record', diagnostic)
+                            config.write_text(json.dumps({'data_dir': str(profile / 'wrong')}), encoding='utf-8')
+                            child = Mock()
+                            with patch.dict(self.helpers, captured_run=child), \
+                                    self.assertRaisesRegex(AssertionError, 'account is not selected'):
+                                verify(profile, keys, (alias, version, slots), urk, 'fixture-cli', env)
+                            child.assert_not_called()
                         self.assertTrue(keys.cleanup()['passed'])
                         self.assertFalse(keys.values)
                         (profile / 'session.json').write_bytes(before[2])
@@ -1000,6 +1113,52 @@ class OriginalFactorTests(unittest.TestCase):
         for code in ('existing_target_data_overwritten', 'existing_target_session_overwritten'):
             self.assertIn(code, body)
         self.assertIn('self.read_entry(current_env,', body)
+        seed = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'seed')
+        seed_text = ast.unparse(seed)
+        for removed in ('seed_legacy_native_credentials', 'remove_current_native_credentials',
+                        'rewrite_legacy_endpoint', 'https://api.1memory.ai', 'https://api.memocap.ai',
+                        'https://api.respire.ai', '/api/self/vault', 'self.keys.put(', 'self.keys.remove('):
+            self.assertNotIn(removed, seed_text)
+        self.assertIn('source_alias', seed_text)
+        self.assertIn("dict(default, RSRS_SUPER=fixture['code'])", body)
+        self.assertLess(body.index("self.cli(user_env, 'login', '--interactive'"),
+                        body.index('self.read_entry(user_env,'))
+        shared = load('db_only_shared_gate', 'dev-smoke-gate.py')
+        native_gate = load('db_only_secret_service_gate', 'dev-secret-service-migration-gate.py')
+        self.assertEqual(set(profile.REQUIRED), shared.MIGRATION)
+        self.assertEqual(native_gate.REQUIRED, set(profile.REQUIRED) |
+                         {'secret_service_current_credentials_for_legacy_db'})
+        workflow = (HERE.parent / '.github/workflows/migration-keyring-check.yml').read_text()
+        self.assertIn("module.REQUIRED-{'secret_service_current_credentials_for_legacy_db'}", workflow)
+        self.assertNotIn('secret_service_legacy_fields_and_aliases', workflow)
+        self.assertTrue({'legacy_keys_migrated_without_super_override', 'legacy_api_defaults_rewritten'}
+                        .isdisjoint(shared.MIGRATION))
+        for retained in ('migration_wrong_key_rejected', 'migration_incompatible_primary_keys_rejected',
+                         'migration_interrupted_restart_recovered', 'migration_repeated_start_idempotent',
+                         'migrated_outbox_sync_and_independent_decrypt'):
+            self.assertIn(retained, shared.MIGRATION)
+        negative = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                        and node.name == 'negative_cases')
+        rejection = next(node for node in ast.walk(negative) if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name) and node.func.id == 'require'
+                         and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
+                         and node.args[1].value == 'wrong_key_not_rejected_by_runtime')
+        check = compile(ast.Expression(rejection), '<wrong-key-rejection-guard>', 'eval')
+        accepted_rejection = dict(status='fail', errors=[
+            'migration_stage=exchange; migration_exchange=runtime_migration_outcome_unknown'])
+        eval(check, dict(require=profile.require, result=SimpleNamespace(returncode=1),
+                         rejected=accepted_rejection))
+        for exit_code, envelope in ((0, accepted_rejection), (1, dict(status='ok')),
+                (1, dict(status='fail', errors=['migration_stage=host_candidates'])),
+                *((1, dict(status='fail', errors=['migration_stage=exchange; migration_exchange=' + reason]))
+                  for reason in ('channel', 'deadline', 'spawn', 'frame', 'unclassified',
+                                 'runtime_scope_mismatch', 'runtime_unauthorized')),
+                (1, dict(status='fail', errors=['migration_stage=exchange'])),
+                (1, dict(status='fail', errors=['unrelated CLI failure']))):
+            with self.subTest(exit_code=exit_code, envelope=envelope), \
+                    self.assertRaisesRegex(RuntimeError, '^wrong_key_not_rejected_by_runtime$'):
+                eval(check, dict(require=profile.require, result=SimpleNamespace(returncode=exit_code),
+                                 rejected=envelope))
 
 
 if __name__ == '__main__':

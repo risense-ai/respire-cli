@@ -6,6 +6,162 @@ use respire_protocol::config_control::*;
 use respire_protocol::metadata_control::metadata_identity;
 use respire_protocol::{ControlBinding, HostControlLaunchGrant, RpcRequest};
 
+fn host_config_preflight(root: &std::path::Path, profile: &std::path::Path) -> anyhow::Result<()> {
+    use serde_json::Value;
+    let read = |path: std::path::PathBuf| -> anyhow::Result<Option<Value>> {
+        respire_client_host::config::normalize_control_path(&path)?;
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    };
+    if let Some(journal) = read(root.join(".login-recovery.json"))? {
+        anyhow::ensure!(journal["schema_version"] == 2 && journal.get("active").is_some_and(Value::is_null),
+            "auth_recovery_pending: finish account recovery before changing agent configuration");
+    }
+    // These records only exclude an active restore; they never authorize recovery or database access.
+    respire_client_host::config::normalize_control_path(&profile.join(".snapshot-maintenance.json"))?;
+    anyhow::ensure!(!profile.join(".snapshot-maintenance.json").try_exists()?,
+        "snapshot maintenance blocks agent configuration; finish snapshot recovery first");
+    if let Some(journal) = read(profile.join(".snapshot-recovery.json"))? {
+        anyhow::ensure!(journal["schema_version"] == 1
+            && matches!(journal["phase"].as_str(), Some("verified" | "released" | "rolled_back")),
+            "snapshot recovery blocks agent configuration; finish snapshot recovery first");
+    }
+    Ok(())
+}
+
+fn validate_host_agent_config(intent: &AgentConfigIntent, profile: &std::path::Path) -> Result<()> {
+    let agent = crate::client_config::read_agent_config_for_write(profile)?;
+    anyhow::ensure!(!(agent["readonly_team"] == true
+        && intent.key.trim() == "readonly" && intent.value() == false),
+        "this space is read-only - you cannot lift read-only yourself");
+    Ok(())
+}
+
+fn control_host_agent_config(intent: respire_protocol::config_control::AgentConfigIntent) -> anyhow::Result<respire_commands::output::ResultEnvelope> {
+    use respire_client_host::lock::LibraryLock;
+    let _takeover = crate::runtime_policy::takeover_lock()?;
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(&profile)?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    let identity = metadata_identity(&profile, super::hash)?;
+    let account = identity.account_id.clone().unwrap_or_else(|| super::hash(profile.display().to_string().as_bytes()));
+    let saved = super::lifecycle::pending_agent_config(&root)?;
+    let registration = super::read_registration(&root)?;
+    let managed = registration.as_ref().filter(|config| config.enabled && !config.manually_stopped);
+    let owner = crate::rpc::probe_runtime()?;
+    anyhow::ensure!(owner.is_some() || !crate::rpc::endpoint_path().try_exists()?, "agent config owner is not verifiable");
+    if let Some(config) = managed {
+        super::lifecycle::owned(config)?;
+        super::lifecycle::ensure_control_endpoint(config)?;
+        anyhow::ensure!(owner.is_some() || !super::super::super::manager::inspect(config)?.running,
+            "agent config cannot identify the registered owner");
+    }
+    let runtime = if owner.is_some() || saved.as_ref().is_some_and(|(record, _, _)| record.was_serving) {
+        Some(super::model_control::installed_model_runtime()?)
+    } else { None };
+    if let (Some(owner), Some((binary, manifest))) = (owner.as_ref(), runtime.as_ref()) {
+        super::model_control::verify_model_owner(owner, &root, &profile, managed, binary, manifest, Some(&account))?;
+    }
+    host_config_preflight(&root, &profile)?;
+    let (mut record, mut maintenance) = if let Some((record, token, coordinator)) = saved {
+        anyhow::ensure!(record.review.intent == intent && record.review.identity == identity
+            && record.review.installation_root == root && record.review.profile == profile,
+            "repeat the original agent-config intent and identity; a new operation is not allowed");
+        let maintenance = super::lifecycle::resume_agent_config_maintenance(&root, &profile, &token, &coordinator)?;
+        (record, maintenance)
+    } else {
+        validate_host_agent_config(&intent, &profile)?;
+        let review = crate::client_config::review_agent_config(intent, root.clone(), profile.clone())?;
+        let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
+        maintenance.auth_launch_binding(&profile)?.context("agent config requires actual Paused maintenance")?;
+        let record = AgentConfigMaintenance { review, was_serving: owner.is_some(),
+            store_ready: owner.as_ref().is_some_and(|health| health.store_ready), sent: false, receipt: None };
+        maintenance.save_agent_config(&record)?;
+        (record, maintenance)
+    };
+    let operation = record.review.operation_id.clone();
+    let mut finished = false;
+    let result = (|| -> Result<ResultEnvelope> {
+        maintenance.auth_launch_binding(&profile)?.context("agent config lost its Paused grant")?;
+        anyhow::ensure!(!record.sent || record.receipt.is_some(),
+            "agent_config_outcome_unknown operation_id={operation}; original O has no receipt; do not replay");
+        if record.was_serving { maintenance.check_account_runtime()?; }
+        if let Some(owner) = owner.as_ref() { maintenance.drain_runtime(owner)?; }
+        anyhow::ensure!(!crate::net_rpc::port_is_open(), "agent config requires a drained Runtime");
+        {
+            let _root_lock = LibraryLock::acquire(&root, Duration::from_secs(15))?;
+            let _profile_lock = if root == profile { None } else { Some(LibraryLock::acquire(&profile, Duration::from_secs(15))?) };
+            host_config_preflight(&root, &profile)?;
+            if !record.sent {
+                anyhow::ensure!(record.receipt.is_none(), "agent config unsent operation has a receipt");
+                validate_host_agent_config(&record.review.intent, &profile)?;
+                let intent = &record.review.intent;
+                let result = ResultEnvelope::new("agent-config", Status::Ok,
+                    serde_json::json!({"action":"updated", "key":intent.key, "value":intent.value()}),
+                    vec![respire_commands::output::Item::new(&intent.key, Status::Ok, &intent.raw_value)]);
+                let receipt = AgentConfigReceipt { review: record.review.clone(), outcome: AgentConfigOutcome::Committed,
+                    result: serde_json::to_value(result)? };
+                let mut preview = record.clone();
+                preview.sent = true;
+                preview.receipt = Some(receipt.clone());
+                maintenance.check_agent_config_record(&preview)?;
+                record.sent = true;
+                maintenance.save_agent_config(&record)?;
+                crate::client_config::publish_agent_config(&receipt.review, || {
+                    record.receipt = Some(receipt.clone());
+                    maintenance.save_agent_config(&record)
+                })?;
+            }
+            crate::client_config::verify_agent_config_receipt(record.receipt.as_ref().context("agent config receipt missing")?)?;
+        }
+        let receipt = record.receipt.as_ref().context("agent config receipt missing")?;
+        anyhow::ensure!(receipt.review == record.review, "agent config receipt changed original intent");
+        if let Some((binary, manifest)) = runtime.as_ref() {
+            let (current_binary, current_manifest) = super::model_control::installed_model_runtime()?;
+            anyhow::ensure!(*binary == current_binary && manifest.version == current_manifest.version
+                && manifest.sha256.eq_ignore_ascii_case(&current_manifest.sha256), "agent config Runtime selection changed");
+            if record.was_serving {
+                maintenance.start_account_runtime()?;
+                let restored = crate::rpc::probe_runtime()?.context("agent config original owner did not resume")?;
+                super::model_control::verify_model_owner(&restored, &root, &profile, managed, binary, manifest, Some(&account))?;
+                anyhow::ensure!(!record.store_ready || restored.store_ready || respire_client_host::settings::off_mode()?,
+                    "agent config original owner lacks store readiness");
+            }
+        }
+        crate::client_config::verify_agent_config_receipt(receipt)?;
+        let result: ResultEnvelope = serde_json::from_value(receipt.result.clone())?;
+        anyhow::ensure!(result.command == "agent-config" && matches!(result.status, Status::Ok)
+            == (receipt.outcome == AgentConfigOutcome::Committed), "invalid agent config setter receipt");
+        if receipt.outcome == AgentConfigOutcome::Committed {
+            let intent = &record.review.intent;
+            anyhow::ensure!(result.summary == serde_json::json!({"action":"updated", "key":intent.key, "value":intent.value()})
+                && result.items.len() == 1 && result.items[0].name == intent.key
+                && result.items[0].value == intent.raw_value && matches!(result.items[0].status, Status::Ok)
+                && result.details.is_null() && result.errors.is_empty() && result.actions.is_empty() && result.related.is_empty(),
+                "agent config result differs from original setter output");
+        }
+        maintenance.finish()?;
+        finished = true;
+        Ok(result)
+    })();
+    if !finished {
+        let actual = maintenance.refresh_agent_config()?;
+        maintenance.mark(super::lifecycle::Phase::Paused)?;
+        if actual.sent && actual.receipt.is_none() {
+            return result.map_err(|error| error.context(format!(
+                "agent_config_outcome_unknown operation_id={operation}; retain original O; do not replay")));
+        }
+    }
+    if result.is_ok() && finished && record.was_serving { maintenance.finish_handoff()?; }
+    result.map_err(|error| error.context(format!("agent config operation_id={operation}; repeat the same command to query original O")))
+}
+
+
 pub(crate) fn control_agent_config(kv: &str) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("agent configuration changes")?;
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
@@ -14,6 +170,9 @@ pub(crate) fn control_agent_config(kv: &str) -> Result<ResultEnvelope> {
     let intent = AgentConfigIntent { key: key.into(), raw_value: raw_value.into() };
     intent.apply(&serde_json::json!({})).map_err(|message|
         respire_client_host::input_error::InputError(message.into()))?;
+    if !matches!(intent.key.trim(), "read_heat" | "recall_fusion") {
+        return control_host_agent_config(intent);
+    }
     let takeover = crate::runtime_policy::takeover_lock()?;
     if crate::runtime_fetch::read_manifest()?.is_none() {
         crate::runtime_fetch::download_and_install(None, None)?;

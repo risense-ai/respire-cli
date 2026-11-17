@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -475,13 +477,10 @@ pub(crate) fn serve() -> Result<()> {
         .canonicalize().context("Runtime executable path")?;
     let digest = hex::encode(Sha256::digest(std::fs::read(&executable)
         .context("Runtime image read")?));
-    let mut command = Command::new(&executable);
-    command.args(["serve", "--port", &port.to_string()])
-        .env("RSRS_RPC_PORT", port.to_string()).env_remove("RSRS_RUNTIME_BOOT_TOKEN")
-        .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit());
+    let arguments = vec![std::ffi::OsString::from("serve"), "--port".into(), port.to_string().into()];
     drop(reservation);
-    let mut child = respire_spawn::spawn_owned_runtime(&mut command)
+    // Keep authorization and plugin/credential exchange in this resident host, not its launcher.
+    let (mut child, instance_id) = crate::autostart::spawn_authorized_runtime(&executable, &arguments, None)
         .context("Runtime spawn")?;
     let pid = child.id();
     let mut stage = "Runtime readiness";
@@ -504,7 +503,7 @@ pub(crate) fn serve() -> Result<()> {
         stage = "Runtime identity verification";
         let (installation, profile) = respire_client_host::config::control_roots()?;
         anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
-            && !health.instance_id.is_empty() && !health.account_id.is_empty() && health.generation > 0
+            && health.instance_id == instance_id && !health.account_id.is_empty() && health.generation > 0
             && crate::runtime_fetch::version_in_accept(&health.runtime_version)
             && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
             && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,

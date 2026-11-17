@@ -45,7 +45,9 @@ def run_hidden(argv, *, prompts, cwd, env, timeout):
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise RuntimeError("fixture_tty_timeout")
+                    raise RuntimeError(f"fixture_tty_timeout: prompts={cursor}/{len(prompts)} "
+                        f"child_exited={child.poll() is not None} "
+                        f"open_pipes={','.join(sorted(key.data for key in selector.get_map().values()))}")
                 for key, _ in selector.select(min(remaining, 0.1)):
                     chunk = os.read(key.fileobj.fileno(), 65536)
                     if not chunk:

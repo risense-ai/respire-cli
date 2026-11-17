@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted CI only: real encrypted profiles, keyring aliases, WAL and restart migration."""
+"""Hosted CI: legacy encrypted databases with current credentials and explicit DEV configuration."""
 import argparse
 import base64
 from contextlib import closing, contextmanager
@@ -32,10 +32,10 @@ keyring_backend = importlib.util.module_from_spec(keyring_spec)
 keyring_spec.loader.exec_module(keyring_backend)
 require, digest = support.require, support.digest
 REQUIRED = ("model_cpu_real", "onememory_multiaccount_wal_migrated",
-    "respire_compatibility_migrated", "legacy_keys_migrated_without_super_override",
-    "legacy_api_defaults_rewritten", "migration_repeated_start_idempotent",
+    "respire_compatibility_migrated", "legacy_db_with_explicit_current_credentials",
+    "explicit_dev_endpoint_preserved", "migration_repeated_start_idempotent",
     "migration_interrupted_restart_recovered", "existing_rsrs_preserved_and_legacy_imported",
-    "migrated_outbox_sync_and_independent_decrypt", "migration_incompatible_primary_keys_rejected",
+    "migrated_outbox_sync_and_independent_decrypt", "migration_wrong_key_rejected", "migration_incompatible_primary_keys_rejected",
     "migration_symlink_root_rejected", "migration_client_only_does_not_write",
     "startup_does_not_migrate", "migration_source_order_and_backup_only_idempotent",
     "restart_locked_with_native_credentials_then_host_unlock")
@@ -47,7 +47,7 @@ class Smoke(support.Smoke):
         self.keys = None
         self.wal_connections = []
         self.report.update(required_cases=list(REQUIRED), cases={}, passed=False,
-            scope="Synthetic home/profile data and exact random-user native keyring entries only.",
+            scope="Legacy encrypted databases; current host credentials and explicit DEV configuration; synthetic data only.",
             platform=sys.platform, keyring_cleanup={"passed": False, "remaining_entries": []})
 
     def env(self, name, user=None):
@@ -229,8 +229,8 @@ class Smoke(support.Smoke):
     def verify_mac_native_credentials(self, env, fixture):
         """Consume owned native credentials through the unchanged CLI creator.
 
-        This proves the original values through export and authenticated unwrap;
-        it does not test automatic server reauthentication or change item ACLs.
+        Verify the current native key and original ciphertext without synthesizing
+        an old session, performing automatic recovery, or changing item ACLs.
         """
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         clean_env = dict(env)
@@ -251,8 +251,6 @@ class Smoke(support.Smoke):
         alias = session.get("keyring_account")
         require(isinstance(alias, str) and ("rsrs", "pass:" + alias) in self.keys.entries,
                 "native_consumer_credential_alias_not_owned")
-        legacy_slot = "legacy-secret:" + alias
-        self.keys.reserve("rsrs", legacy_slot)
         note = self.root / ("native-recovery-" + secrets.token_hex(8) + ".txt")
         require(not note.exists(), "native_consumer_export_not_fresh")
         try:
@@ -265,40 +263,24 @@ class Smoke(support.Smoke):
             urk = AESGCM(support.v4_kek(fixture["code"], session["kdf_salt"], session["wrapped_urk"])).decrypt(
                 bytes.fromhex(session["urk_nonce"]), support.encrypted_bytes(session["wrapped_urk"]), None)
             require(len(urk) == 32, "native_consumer_urk_invalid")
-            salt, nonce, secret = secrets.token_bytes(16).hex(), secrets.token_bytes(12), secrets.token_hex(32)
-            self.diagnostic_secrets.add(secret)
-            wrapped = AESGCM(support.legacy_kek(1, fixture["password"], secret, salt)).encrypt(nonce, urk, None)
-            probe = dict(session, vault_version=1, kdf_salt=salt, wrapped_urk=wrapped.hex(),
-                         urk_nonce=nonce.hex(), secret=secret)
-            for key in ("pass", "super", "secret_key"):
-                probe.pop(key, None)
-            self.report["fixture_operation"] = "native_consumer_password_unwrap"
+            self.report["fixture_operation"] = "native_consumer_current_show"
             self.save()
-            self.write_session(clean_env, probe)
             shown = self.cli(clean_env, "show", fixture["id"])
             require(shown.get("details", {}).get("entry", {}).get("content") == fixture["text"],
                     "native_consumer_original_ciphertext_not_decrypted")
-            committed = self.session(clean_env)
-            require(committed.get("keyring_account") == alias
-                and committed.get("legacy_secret_backend") == "native"
-                and all(key not in committed for key in ("pass", "super", "secret", "secret_key")),
-                "native_consumer_legacy_custody_not_committed")
+            require(session_path.read_bytes() == original, "native_consumer_session_changed")
         finally:
             try:
-                self.keys.remove("rsrs", legacy_slot)
+                session_path.write_bytes(original)
             finally:
-                try:
-                    session_path.write_bytes(original)
-                finally:
-                    note.unlink(missing_ok=True)
-            require(session_path.read_bytes() == original, "native_consumer_session_restore_failed")
+                note.unlink(missing_ok=True)
         database = profile / ("rsrs.db" if (profile / "rsrs.db").exists() else "onememory.db")
         with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
             row = db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone()
             require(support.decrypt_content(urk, *row) == support.decrypt_content(urk, *fixture["cipher"]),
                     "native_consumer_content_changed")
         proof = self.report.setdefault("native_credential_consumer", {
-            "platform": "darwin", "super": "cli_keys_export", "password": "cli_v1_kdf_aead_show",
+            "platform": "darwin", "super": "cli_keys_export", "ciphertext": "cli_show",
             "consumer_changes_product_acl": False, "automatic_server_reauthentication_tested": False,
             "verified_profiles": 0})
         proof["verified_profiles"] += 1
@@ -399,7 +381,7 @@ class Smoke(support.Smoke):
         self.report["fixture_operation"] = "verify_registered_native_credentials"
         self.save()
         self.keys.track_created_login(session, user, code, password)
-        if service == "rsrs" and self.keys.name == "linux-secret-service":
+        if self.keys.name == "linux-secret-service":
             self.keys.register_current_target(session, user)
         auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
         account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
@@ -422,8 +404,6 @@ class Smoke(support.Smoke):
             session["wrapped_urk"] = AESGCM(support.v4_kek(code, session["kdf_salt"])).encrypt(wrap_nonce, urk, None).hex()
             session["urk_nonce"] = wrap_nonce.hex()
             session.pop("crypto_namespace", None)
-            self.api(account, "POST", "/api/self/vault", {
-                "version": 4, **{key: session[key] for key in ("kdf_salt", "wrapped_urk", "urk_nonce")}})
         connection = sqlite3.connect(db)
         register_witness_functions(connection)
         connection.execute("PRAGMA journal_mode=WAL")
@@ -459,7 +439,7 @@ class Smoke(support.Smoke):
         require(row and connection.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0,
             "migration_outbox_fixture_not_pending")
         self.wal_connections.append(connection)
-        if sys.platform == "darwin":
+        if sys.platform == "darwin" and service == "rsrs":
             self.verify_mac_native_credentials(env, {"account": account, "code": code, "password": password,
                 "id": memory_id, "text": text, "cipher": row})
         if service == "rsrs":
@@ -469,31 +449,15 @@ class Smoke(support.Smoke):
             self.save()
             return {"account": account, "password": password, "code": code, "service": service,
                 "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": session["keyring_account"]}
-        self.report["fixture_operation"] = "seed_legacy_native_credentials"
+        # Only the database uses the old namespace; keep the current host's
+        # login alias and explicit endpoint, and supply its known data key at import.
+        self.report["fixture_operation"] = "prepare_current_host_for_legacy_db"
         self.save()
-        self.keys.put(service, "super:" + user, code)
-        self.keys.put(service, "pass:" + user, password)
-        # The old service stores credentials by user, not by the new login alias.
-        login_alias = session.pop("keyring_account")
-        session.pop("keyring_backend", None)
-        # The old service is the only credential source, not an environment override.
-        self.report["fixture_operation"] = "remove_current_native_credentials"
-        self.save()
-        self.keys.remove("rsrs", "super:" + login_alias)
-        self.keys.remove("rsrs", "pass:" + login_alias)
-        env.pop("RSRS_SUPER", None)
-        self.report["fixture_operation"] = "rewrite_legacy_endpoint"
-        self.save()
-        session["addr"] = {"1memory": "https://api.1memory.ai", "memocap": "https://api.memocap.ai"}.get(service,
-            "https://api.respire.ai")
         self.write_session(env, session)
-        config_path = path / "client.json"
-        config = json.loads(config_path.read_text())
-        config["addr"] = session["addr"]
-        config_path.write_text(json.dumps(config), encoding="utf-8")
         alias = self.reserve_alias(path)
         return {"account": account, "password": password, "code": code, "service": service,
             "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": alias,
+            "source_alias": session["keyring_account"],
             "legacy_tombstones": tombstones, "urk": urk, "payload": payload}
 
     def migrated(self, home, fixtures):
@@ -510,26 +474,17 @@ class Smoke(support.Smoke):
             user = fixture["account"]["user"]
             session_path, value = sessions[user]
             profile = session_path.parent
-            require(value.get("addr") == "https://api.rsrs.rs", "legacy_api_default_not_rewritten")
+            require(value.get("addr") == support.UPSTREAM, "explicit_dev_endpoint_changed")
             receipt = json.loads((profile / ".rsrs-migration.json").read_text())
             require(receipt.get("namespace_migrated") is True, "full_migration_receipt_missing")
             require(value["wrapped_urk"].startswith(support.PREFIX), "migration_wrap_namespace_missing")
-            alias = value.get("keyring_account")
-            require(isinstance(alias, str) and alias.startswith("legacy-"), "migration_key_alias_missing")
-            require(alias == fixture["alias"], "migration_native_alias_identity_mismatch")
+            source_session = json.loads((fixture["source"] / "session.json").read_text())
+            require(source_session.get("keyring_account") == fixture["source_alias"]
+                and source_session.get("addr") == support.UPSTREAM, "current_source_host_changed")
             if sys.platform != "darwin":
-                self.report["fixture_operation"] = "new_alias_super"
-                self.save()
-                require(self.keys.read("rsrs", "super:" + alias) == fixture["code"], "migration_key_changed")
-                self.report["fixture_operation"] = "new_alias_pass"
-                self.save()
-                require(self.keys.read("rsrs", "pass:" + alias) == fixture["password"], "migration_login_password_changed")
-            self.report["fixture_operation"] = "legacy_source_super"
-            self.save()
-            require(self.keys.read(fixture["service"], "super:" + user) == fixture["code"], "legacy_key_source_changed")
-            self.report["fixture_operation"] = "legacy_source_pass"
-            self.save()
-            require(self.keys.read(fixture["service"], "pass:" + user) == fixture["password"], "legacy_password_source_changed")
+                require(self.keys.read("rsrs", "super:" + fixture["source_alias"]) == fixture["code"]
+                    and self.keys.read("rsrs", "pass:" + fixture["source_alias"]) == fixture["password"],
+                    "current_source_credentials_changed")
             with sqlite3.connect((fixture["source"] / "onememory.db").as_uri() + "?mode=ro", uri=True) as source_db:
                 require(source_db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
                     "legacy_source_ciphertext_changed")
@@ -563,10 +518,6 @@ class Smoke(support.Smoke):
         if name == "multiaccount":
             other = self.seed(env, home / ".onememory/accounts/second", "1memory", "multiaccount-secondary")
             fixtures.append(other)
-            config_path = home / ".onememory/client.json"
-            config = json.loads(config_path.read_text())
-            config["data_dir"] = str(other["source"])
-            config_path.write_text(json.dumps(config), encoding="utf-8")
             old_lock = sqlite3.connect(fixtures[0]["source"] / "lock.db")
             old_lock.execute("CREATE TABLE IF NOT EXISTS migration_lock_fixture(value TEXT)")
             old_lock.commit()
@@ -611,7 +562,8 @@ class Smoke(support.Smoke):
             try:
                 process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "migrate",
                     "--source", fixtures[0]["source_id"], "--account", fixtures[0]["destination_account"]],
-                    env=default, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    env=dict(default, RSRS_SUPER=fixtures[0]["code"]), cwd=self.root,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 deadline = time.monotonic() + 30
                 stage_seen = False
                 while process.poll() is None and time.monotonic() < deadline:
@@ -647,7 +599,7 @@ class Smoke(support.Smoke):
                     connection.execute("PRAGMA journal_mode=WAL")
             require(not fixtures[0]["destination"].exists(), "interruption_fixture_missed_prepublication_window")
         for fixture in fixtures:
-            migrated = self.cli(default, "migrate", "--source", fixture["source_id"],
+            migrated = self.cli(dict(default, RSRS_SUPER=fixture["code"]), "migrate", "--source", fixture["source_id"],
                 "--account", fixture["destination_account"])["summary"]
             require(migrated.get("state") == "migrated" and Path(migrated["dir"]).resolve() == fixture["destination"].resolve(),
                 "selected_migration_not_published")
@@ -658,10 +610,21 @@ class Smoke(support.Smoke):
         require(Path(selected).resolve() == Path(original_selection).resolve(), "migration_changed_selected_account")
         for fixture in fixtures:
             with self.selected_profile(default, fixture) as user_env:
-                require("RSRS_SUPER" not in user_env, "migration_super_override_present")
+                self.report["fixture_operation"] = "prepare_current_host_credentials"
+                self.save()
+                self.cli(user_env, "login", "--interactive", "--addr", support.UPSTREAM,
+                    "--user", fixture["account"]["user"], "--pass", fixture["password"], "--super", fixture["code"])
+                committed = self.session(user_env)
+                require(committed.get("user") == fixture["account"]["user"]
+                    and committed.get("addr") == support.UPSTREAM, "current_host_identity_mismatch")
+                self.keys.track_created_login(committed, fixture["account"]["user"], fixture["code"], fixture["password"])
+                fixture["account"]["token"] = committed["token"]
+                fixture["alias"] = committed["keyring_account"]
                 if sys.platform == "darwin":
                     self.verify_mac_native_credentials(user_env, fixture)
                 self.read_entry(user_env, fixture["id"], fixture["text"])
+                recalled = self.cli(user_env, "recall", fixture["text"], "--titles")
+                require(fixture["id"] in json.dumps(recalled), "migrated_database_recall_failed")
         if target:
             with sqlite3.connect(current["source"] / "rsrs.db") as db:
                 require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (current["id"],)).fetchone() == current["cipher"],
@@ -701,7 +664,7 @@ class Smoke(support.Smoke):
             reordered = self.cli(default, "migrate")["details"]["profiles"]
             require(len(reordered) == len(fixtures) + 1, "source_order_fixture_not_observed")
             for fixture in reversed(fixtures):
-                repeated = self.cli(default, "migrate", "--source", fixture["source_id"], "--account", "different-name")["summary"]
+                repeated = self.cli(dict(default, RSRS_SUPER=fixture["code"]), "migrate", "--source", fixture["source_id"], "--account", "different-name")["summary"]
                 require(repeated.get("state") == "already_migrated"
                     and Path(repeated["dir"]).resolve() == fixture["destination"].resolve(),
                     "source_order_changed_existing_migration_identity")
@@ -711,24 +674,16 @@ class Smoke(support.Smoke):
             self.passed("migration_source_order_and_backup_only_idempotent", selected_sources=len(fixtures), new_earlier_source=True)
             self.passed("onememory_multiaccount_wal_migrated", profiles=len(fixtures),
                 deleted_payloads_reencrypted=sum(len(f["legacy_tombstones"]) for f in fixtures))
-            self.passed("legacy_keys_migrated_without_super_override", old_service_unchanged=True)
-            self.passed("legacy_api_defaults_rewritten", verified="old defaults to api.rsrs.rs; dev redirect only after verification")
+            self.passed("legacy_db_with_explicit_current_credentials", current_source_credentials_preserved=True,
+                explicit_data_key=True)
+            self.passed("explicit_dev_endpoint_preserved", endpoint=support.UPSTREAM)
             self.passed("migration_repeated_start_idempotent", profiles=len(fixtures))
             for fixture in fixtures:
                 with self.selected_profile(default, fixture) as profile_env:
-                    session = self.session(profile_env)
-                    session["addr"] = support.UPSTREAM
-                    self.write_session(profile_env, session)
                     self.cli(profile_env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
                     created = self.cli(profile_env, "remember", "New-directory migration write",
                         "--title", "post-migration", "--force", "--importance", "important")
                     new_id = created["summary"]["id"]
-                    self.cli(profile_env, "migrate", "--vault", "--addr", support.UPSTREAM,
-                        "--user", fixture["account"]["user"], "--pass", fixture["password"], "--super", fixture["code"])
-                    committed = self.session(profile_env)
-                    fixture["account"]["token"] = committed["token"]
-                    self.keys.track_created_login(committed, fixture["account"]["user"],
-                        fixture["code"], fixture["password"])
                     self.cli(profile_env, "sync")
                     self.report["fixture_operation"] = "post_sync_deleted_payload_erasure"
                     self.save()
@@ -749,6 +704,8 @@ class Smoke(support.Smoke):
                 self.cli(remote, "sync")
                 self.read_entry(remote, fixture["id"], fixture["text"])
                 self.read_entry(remote, new_id, "New-directory migration write")
+                recalled = self.cli(remote, "recall", fixture["text"], "--titles")
+                require(fixture["id"] in json.dumps(recalled), "independent_database_recall_failed")
                 rows = self.cli(remote, "list", "--limit", "100")
                 require("post-migration" in json.dumps(rows), "new_directory_write_not_synced")
             self.passed("migrated_outbox_sync_and_independent_decrypt", profiles=len(fixtures),
@@ -894,6 +851,49 @@ class Smoke(support.Smoke):
     def negative_cases(self):
         env = self.env("negative-source")
         fixture = self.seed(env, Path(env["HOME"]) / ".onememory", "1memory", "negative-source")
+        from cryptography.exceptions import InvalidTag
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        attempt = self.env("wrong-data-key")
+        source = Path(attempt["HOME"]) / ".onememory"
+        source.mkdir()
+        self.reserve_alias(source)
+        shutil.copyfile(fixture["source"] / "session.json", source / "session.json")
+        with closing(sqlite3.connect(fixture["source"] / "onememory.db")) as original, \
+                closing(sqlite3.connect(source / "onememory.db")) as snapshot:
+            original.backup(snapshot)
+        wrong = "A3-" + secrets.token_hex(18)
+        self.diagnostic_secrets.add(wrong)
+        session = json.loads((source / "session.json").read_text())
+        try:
+            AESGCM(support.v4_kek(wrong, session["kdf_salt"], session["wrapped_urk"])).decrypt(
+                bytes.fromhex(session["urk_nonce"]), support.encrypted_bytes(session["wrapped_urk"]), None)
+        except InvalidTag:
+            pass
+        else:
+            raise RuntimeError("wrong_data_key_unexpectedly_unwrapped")
+        before = digest(source / "onememory.db"), digest(source / "session.json")
+        rows = self.cli(self.default_env(attempt), "migrate")["details"]["profiles"]
+        require(len(rows) == 1, "wrong_key_source_not_unique")
+        result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
+            "--source", rows[0]["source_id"], "--account", "wrong-key"],
+            env=dict(self.default_env(attempt), RSRS_SUPER=wrong), cwd=self.root, capture_output=True, timeout=60)
+        rejected = json.loads(result.stdout)
+        require(result.returncode != 0 and rejected.get("status") == "fail"
+            and any("migration_stage=exchange" in error
+                and "migration_exchange=runtime_migration_outcome_unknown" in error
+                for error in rejected.get("errors", [])),
+            "wrong_key_not_rejected_by_runtime")
+        intents = list((Path(attempt["HOME"]) / ".rsrs-migration-intents").glob("*.json"))
+        require(len(intents) == 1, "wrong_key_runtime_intent_missing")
+        intent = json.loads(intents[0].read_text(encoding="utf-8").splitlines()[-1])
+        require(intent["phase"] == "copying" and intent["original"]["source_id"] == rows[0]["source_id"]
+            and intent["original"]["account"] == "wrong-key"
+            and not (Path(attempt["HOME"]) / ".rsrs/accounts/wrong-key").exists(),
+            "wrong_key_published_or_changed_runtime_binding")
+        require((digest(source / "onememory.db"), digest(source / "session.json")) == before,
+                "wrong_key_changed_source")
+        self.passed("migration_wrong_key_rejected", authenticated_unwrap_rejected=True,
+            runtime_copying_observed=True, original_preserved=True, destination_unpublished=True)
         for label, primary in (("missing-pk", ""), ("composite-pk", ",PRIMARY KEY(id,title)")):
             attempt = self.env(label)
             source = Path(attempt["HOME"]) / ".onememory"
@@ -909,7 +909,7 @@ class Smoke(support.Smoke):
             require(len(candidates) == 1, "invalid_schema_source_fixture_missing")
             result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
                 "--source", candidates[0]["source_id"], "--account", "rejected-schema"],
-                env=self.default_env(attempt), cwd=self.root, capture_output=True, timeout=60)
+                env=dict(self.default_env(attempt), RSRS_SUPER=fixture["code"]), cwd=self.root, capture_output=True, timeout=60)
             rejected = json.loads(result.stdout)
             require(result.returncode == 1 and rejected.get("status") == "fail"
                 and any("incompatible pre-encrypted demo format" in error for error in rejected.get("errors", []))

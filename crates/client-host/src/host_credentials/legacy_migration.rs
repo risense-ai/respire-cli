@@ -80,7 +80,7 @@ impl LegacyMigration {
     pub fn collect(source_id: &str) -> Result<Self> {
         anyhow::ensure!(source_id.len() == 64 && source_id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
             "invalid legacy source identity");
-        let home = dirs::home_dir().context("cannot locate host home for legacy migration")?;
+        let home = crate::paths::home_dir().context("cannot locate host home for legacy migration")?;
         let mut selected = None;
         for (label, services) in [("respire", ["respire", "memocap", "1memory"]),
             ("onememory", ["1memory", "memocap", "respire"]), ("rsrs", ["rsrs", "respire", "1memory"])] {

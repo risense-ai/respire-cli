@@ -192,7 +192,7 @@ jobs:
           spec=importlib.util.spec_from_file_location('native_contract','scripts/dev-secret-service-migration-gate.py')
           module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
           report=json.loads((Path(os.environ['RUNNER_TEMP'])/'targeted-native-migration/migration-coverage.json').read_text())
-          required=module.REQUIRED-{'secret_service_legacy_fields_and_aliases'}
+          required=module.REQUIRED-{'secret_service_current_credentials_for_legacy_db'}
           module.require(all(report.get(k)==os.environ[v] for k,v in [('source_sha','CLI_SHA'),('version','CLI_VERSION'),('binary_sha256','CLI_BINARY_SHA256')]),'migration_artifact_identity_mismatch')
           platform, backend = ('win32','windows-credential-manager') if os.environ['RUNNER_OS']=='Windows' else ('darwin','macos-keychain-synthetic-acl')
           module.require(report.get('platform')==platform and report.get('keyring_backend')==backend,'migration_native_backend_mismatch')

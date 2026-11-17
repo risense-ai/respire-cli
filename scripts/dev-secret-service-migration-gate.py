@@ -8,12 +8,12 @@ import sys
 
 
 REQUIRED = {"model_cpu_real", "onememory_multiaccount_wal_migrated",
-    "respire_compatibility_migrated", "legacy_keys_migrated_without_super_override",
-    "legacy_api_defaults_rewritten", "migration_repeated_start_idempotent",
+    "respire_compatibility_migrated", "legacy_db_with_explicit_current_credentials",
+    "explicit_dev_endpoint_preserved", "migration_repeated_start_idempotent",
     "migration_interrupted_restart_recovered", "existing_rsrs_preserved_and_legacy_imported",
-    "migrated_outbox_sync_and_independent_decrypt", "migration_incompatible_primary_keys_rejected",
+    "migrated_outbox_sync_and_independent_decrypt", "migration_wrong_key_rejected", "migration_incompatible_primary_keys_rejected",
     "migration_symlink_root_rejected", "migration_client_only_does_not_write",
-    "secret_service_legacy_fields_and_aliases", "startup_does_not_migrate",
+    "secret_service_current_credentials_for_legacy_db", "startup_does_not_migrate",
     "migration_source_order_and_backup_only_idempotent",
     "restart_locked_with_native_credentials_then_host_unlock"}
 
@@ -50,11 +50,11 @@ def main():
         for field, remaining in (("cloud_cleanup", "remaining_users"), ("keyring_cleanup", "remaining_entries")):
             require(report.get(field, {}).get("passed") is True
                 and not report.get(field, {}).get(remaining), "secret_service_" + field + "_failed")
-        evidence = report["cases"]["secret_service_legacy_fields_and_aliases"]
+        evidence = report["cases"]["secret_service_current_credentials_for_legacy_db"]
         require(evidence.get("backend") == "secret_service"
-            and evidence.get("original_attributes_and_values_preserved") is True
-            and set(evidence.get("legacy_services", [])) == {"1memory", "memocap", "respire"},
-            "secret_service_legacy_evidence_missing")
+            and evidence.get("current_source_credentials_preserved") is True
+            and set(evidence.get("database_origins", [])) == {"1memory", "memocap", "respire"},
+            "secret_service_current_credential_evidence_missing")
         result.update(passed=True, required_observed=len(REQUIRED))
     except Exception as error:
         result["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__

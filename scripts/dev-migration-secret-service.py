@@ -223,12 +223,13 @@ class SecretServiceKeys(_base.TrackedKeys):
         # Registration has already created and verified these exact login slots.
         # Bind normalization to that returned alias, never reserved username slots.
         alias = session.get("keyring_account")
-        require(not self.current_target_entries
-                and re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+        require(re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
                 and session.get("user") == user
                 and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "fixture_current_target_registration_invalid")
         entries = {("rsrs", prefix + alias) for prefix in ("super:", "pass:")}
+        require(entries.isdisjoint(self.current_target_entries),
+                "fixture_current_target_registration_invalid")
         for entry in entries:
             require(entry in self.entries and entry in self.attribute_snapshots
                     and self._find(*entry) is not None,
@@ -254,8 +255,8 @@ class SecretServiceKeys(_base.TrackedKeys):
                 entry = (service, slot)
                 if entry in self.current_target_entries:
                     # GNOME maps both an omitted schema and exact Generic to
-                    # persisted type 0. Preserve the first raw snapshot; only
-                    # these two newly registered target entries use this baseline.
+                    # persisted type 0. Preserve the first raw snapshot; this
+                    # baseline applies only to each verified registration's pair.
                     generic = "org.freedesktop.Secret.Generic"
                     require(("xdg:schema" not in snapshot or snapshot["xdg:schema"] == generic)
                             and ("xdg:schema" not in actual or actual["xdg:schema"] == generic),
@@ -329,7 +330,7 @@ class SecretServiceKeys(_base.TrackedKeys):
                 remaining.append(event)
         report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
         report["provider_schema_baseline"] = {
-            "scope": "two_new_owned_current_target_credentials_only",
+            "scope": "two_new_owned_current_credentials_per_verified_registration_only",
             "registered_entries": len(self.current_target_entries),
             "observed_normalizations": len(self.normalized_current_entries),
             "other_attributes_and_values": "strict",

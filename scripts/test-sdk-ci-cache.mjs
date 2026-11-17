@@ -83,6 +83,10 @@ test('CLI release validation has no native SDK preparation or redistribution',()
 });
 
 test('real model probe does not inherit the unit-test Core mode',()=>{
+ const probe=readFileSync(new URL('./probe-native-arm64-alpine.sh',import.meta.url),'utf8');
+ assert.doesNotMatch(probe,/(?:>|\bcat)\s+\/profile\/inference\.json/,'probe output must not create or truncate Runtime inference configuration');
+ assert(probe.includes('> /profile/model-probe-result.json')&&probe.includes('"$profile/model-probe-result.json"'));
+ assert(probe.includes('-v "$models:/models:ro"')&&probe.includes('RSRS_M3_DIR=/profile/models/bge-m3'),'model installation must use an owned target and retain read-only host inputs');
  const text=readFileSync(new URL('../.github/workflows/token-free-sdk-check.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
  const global=text.split('    env:')[1].split('    steps:')[0];assert(!global.includes('RSRS_CORE_TEST_MODE'));assert(text.includes('model install-m3'));assert(text.includes('model probe'));
  const program=text.split('CLI_FIXTURE_BINARY="$exe" node --input-type=module <<\'NODE\'\n')[1].split('          NODE')[0].replace(/^[ \t]*import .+;[ \t]*$/gm,'');
