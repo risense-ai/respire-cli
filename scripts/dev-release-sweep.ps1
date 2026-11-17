@@ -1986,7 +1986,15 @@ Assert-Smoke 'runtime-cli-workspace-mode-normal' ([string]$runtimeStatus.summary
 foreach ($hostOnly in @(@('config'), @('agent-config'), @('inject', '--targets'))) {
     $deniedName = "runtime-cli-$($hostOnly[0])-host-boundary"
     $denied = Invoke-RuntimeCli $deniedName $hostOnly -ExpectedExit 2
-    Assert-Smoke "$deniedName-fenced" ([string]$denied.details.error_type -ceq 'host_boundary')
+    if ($hostOnly[0] -ceq 'inject') {
+        # Runtime23 removes inject from its parser; it cannot reach host-command admission.
+        Assert-Smoke "$deniedName-fenced" ([string]$denied.command -ceq 'cli' `
+            -and [string]$denied.summary.reason -ceq 'invalid_input' `
+            -and [string]$denied.details.error_type -ceq 'user' `
+            -and @($denied.errors).Count -eq 1 -and [string]$denied.errors[0] -ceq "error: unrecognized subcommand 'inject'")
+    } else {
+        Assert-Smoke "$deniedName-fenced" ([string]$denied.details.error_type -ceq 'host_boundary')
+    }
 }
 $hostConfig = Invoke-Om -Name 'runtime-cli-config' -ArgList @('--json', 'config') -DataDir $DirA -TimeoutSec 90
 $runtimeConfig = $hostConfig.Envelope
