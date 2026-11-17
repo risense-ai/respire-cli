@@ -161,6 +161,7 @@ fn validate_transition(previous:&Original,next:&Original) -> Result<()> {
     binding.session_sha256=previous.session_sha256.clone();
     binding.actor=previous.actor.clone();
     binding.final_actor=previous.final_actor.clone();
+    binding.material=previous.material.clone();
     if matches!(previous.stage,Stage::Prepared|Stage::RolledBack) {
         anyhow::ensure!(if next.stage == previous.stage {
             (next.marker_sha256 == previous.marker_sha256
@@ -182,6 +183,8 @@ fn validate_transition(previous:&Original,next:&Original) -> Result<()> {
             (Stage::Finished,Stage::HandedOff) | (Stage::RollbackFinished,Stage::RollbackHandedOff))
     }, "offline keygen final actor changed outside handoff");
     anyhow::ensure!(serde_json::to_value(&binding)? == serde_json::to_value(previous)?
+        && (next.material == previous.material || previous.material.is_none()
+            && matches!((previous.stage,next.stage),(Stage::Prepared,Stage::Prepared)))
         && previous.session_sha256.as_ref().is_none_or(|digest| next.session_sha256.as_ref() == Some(digest))
         && previous.actor.as_ref().is_none_or(|actor| next.actor.as_ref() == Some(actor)),
         "offline keygen original operation changed");
@@ -951,7 +954,27 @@ mod tests {
         changed=recovered.clone(); changed.original_identity=HostAuthIdentity::Unbound {
             operation_id:original_id,session_sha256:"d".repeat(64) };
         assert!(save(&changed,&mut Some(observed.clone())).is_err());
-        recovered.stage=Stage::Sent; save(&recovered,&mut digest)?;
+        let material=serde_json::json!({"vault_version":4,"kdf_salt":"synthetic-salt",
+            "wrapped_urk":"synthetic-wrapped","urk_nonce":"synthetic-nonce",
+            "keyring_account":"login-synthetic","keyring_backend":"native",
+            "auth_operation_id":recovered.operation_id});
+        changed=recovered.clone(); changed.material=Some(material.clone()); changed.stage=Stage::Sent;
+        assert!(save(&changed,&mut digest).is_err());
+        changed.stage=Stage::Prepared;
+        changed.material.as_mut().context("synthetic material missing")?["auth_operation_id"]=serde_json::json!(uuid::Uuid::new_v4().to_string());
+        assert!(save(&changed,&mut digest).is_err());
+        recovered.material=Some(material);
+        save(&recovered,&mut digest)?;
+        assert_eq!(load(&root)?.context("prepared material missing")?.0.material,recovered.material);
+        for stage in [Stage::Prepared,Stage::Sent] {
+            recovered.stage=stage; save(&recovered,&mut digest)?;
+            changed=recovered.clone(); changed.material=None;
+            assert!(save(&changed,&mut digest).is_err());
+            changed.material=recovered.material.clone();
+            changed.material.as_mut().context("synthetic material missing")?["wrapped_urk"]=serde_json::json!("changed");
+            assert!(save(&changed,&mut digest).is_err());
+        }
+        assert_eq!(load(&root)?.context("sent material missing")?.0.material,recovered.material);
         for query_only in [false,true] {
             assert!(!keygen_sends_original(Stage::Sent,query_only)?);
             assert!(!keygen_sends_original(Stage::Committed,query_only)?);
