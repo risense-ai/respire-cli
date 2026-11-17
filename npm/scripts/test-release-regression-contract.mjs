@@ -268,7 +268,7 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     writeFileSync(docker,`const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2);
 fs.writeFileSync(process.env.CAPTURE,JSON.stringify(args));
 const mount=args.find(arg=>arg.endsWith(':/profile')).slice(0,-':/profile'.length);
-fs.writeFileSync(path.join(mount,'inference.json'),JSON.stringify({status:'ok',details:{backend_load:{evidence:{ready:true,inference_completed:process.env.FAKE_INFERENCE!=='incomplete',fresh_session:true,dimensions:1024,selected:'CPU'}}}}));
+fs.writeFileSync(path.join(mount,'model-probe-result.json'),JSON.stringify({status:'ok',details:{backend_load:{evidence:{ready:true,inference_completed:process.env.FAKE_INFERENCE!=='incomplete',fresh_session:true,dimensions:1024,selected:'CPU'}}}}));
 `);
     stub('docker','#!/bin/sh\nMSYS2_ARG_CONV_EXCL="*" exec "'+process.execPath.replaceAll('\\','/')+'" "'+docker.replaceAll('\\','/')+'" "$@"\n');
     const script=fileURLToPath(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url));
@@ -287,6 +287,7 @@ fs.writeFileSync(path.join(mount,'inference.json'),JSON.stringify({status:'ok',d
       assert(container.includes('7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '+cache));
       assert(args.includes(shellPath(bundle)+':/runtime:ro'));assert(args.includes(shellPath(receipt)+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
       assert(args.includes('RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl'));
+      assert(args.includes('RSRS_M3_DIR=/profile/models/bge-m3'));
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
     }
