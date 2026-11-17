@@ -887,6 +887,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                      and node.name in ('recover_fixture_urk', 'library_state', 'snapshot',
                                        'database_checkpoint_state', 'assert_database_checkpoint_preserved',
+                                       'assert_historical_database_seed',
                                        'legacy_custody_alias', 'migrate_fixture_custody',
                                        'custody_consumer_error', 'verify_fixture_custody')]
         namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing,
@@ -1074,6 +1075,17 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                               'superseded_by': 'successor', 'see_also': ['peer']}).encode()
         old = AESGCM(legacy.hkdf(key, None, b'onememory:data:v1')).encrypt(nonce, payload, None).hex()
         raw = ([[('entry', old, nonce.hex(), 1, 0)]], [], b'')
+        seeded = ([[('entry', old, nonce.hex(), 1, 0), ('deleted', old, nonce.hex(), 1, 1)],
+                   [('pending operation',)], []], [], b'')
+        require_seed = self.helpers['assert_historical_database_seed']
+        require_seed(seeded)
+        for memories, outbox in ((seeded[0][0][:1], seeded[0][1]),
+                                (seeded[0][0][1:], seeded[0][1]),
+                                ([seeded[0][0][0], ('deleted', '', '', 1, 1)], seeded[0][1]),
+                                ([seeded[0][0][0], ('deleted', old, nonce.hex(), 0, 1)], seeded[0][1]),
+                                (seeded[0][0], [])):
+            with self.assertRaises(AssertionError):
+                require_seed(([memories, outbox, []], [], b''))
         records = [('entry', legacy.decrypt_content(key, old, nonce.hex()), 1, 0)]
         before = checkpoint(Path('.'), 'v1.0.11-dev.1', raw, records)
         self.assertTrue(before['legacy_domain'])

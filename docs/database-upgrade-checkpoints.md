@@ -1,8 +1,9 @@
 # Database upgrade checkpoints
 
 This registry records source and release-inventory checks on 2026-11-17. It is
-not a receipt for a successful native upgrade. Integrate the registry with the
-corresponding fixture and seed changes before merging or publishing.
+not a receipt for a successful native upgrade. The existing upgrade harness now
+selects and seeds these inputs, but native execution remains required before
+publishing a candidate that claims this coverage.
 
 `scripts/published_upgrade_policy.py` selects the two DEV inputs below in both
 profiles. The full profile also keeps historical formal releases; the critical
@@ -70,8 +71,22 @@ Any retained experimental database state must be exercised explicitly rather
 than inferred from an empty fresh schema. Credential migration remains a fixture
 precondition, not evidence of database preservation.
 
-The main integration owns these special seeds and their assertions in the
-existing upgrade harness. Registry/unit checks and source comparisons cannot
-substitute for real native database-upgrade reports. The older dev.10 references
+The existing upgrade harness seeds and checks these special states in both
+accounts. Historical seeds also create an encrypted tombstone through the old
+CLI's `remember` and `forget` commands. Empty/decrypted tombstone payloads, missing
+active records, and empty synchronization work fail before upgrade; the existing
+decrypted library comparisons then preserve the deleted record, flags, and work.
+
+This harness still uses offline synthetic identities. It checks pending work
+preservation, not an actual post-upgrade synchronization exchange. Reports expose
+`post_upgrade_sync_checked: false`; a successful harness report or `full_coverage`
+(all selected source versions) does not prove complete upgrade acceptance.
+Real synchronization needs account creation, remote readback, and cleanup; that
+fixture is deferred rather than adding it to this bounded patch. Run 44098649710
+predates these seeds and is only evidence for finding existing Runtime24 problems,
+not a final candidate with complete database-upgrade coverage.
+
+Registry/unit checks and source comparisons cannot substitute for real native
+database-upgrade reports. The older dev.10 references
 in `runtime.md` and `release-validation.md` describe the previous registry;
 this document records the replacement set and its integration boundary.

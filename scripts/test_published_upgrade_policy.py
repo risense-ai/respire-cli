@@ -15,12 +15,12 @@ from published_upgrade_policy import platform_applicability, select_upgrade_sour
 class UpgradePolicyTest(unittest.TestCase):
     def test_only_exact_documented_arm_gaps_are_not_applicable(self):
         for target in ["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-pc-windows-msvc"]:
-            gaps = ["v1.0.15", "v1.0.15-dev.10", "v1.0.16"]
+            gaps = ["v1.0.15", "v1.0.15-dev.10", "v1.0.16", "v1.0.17-dev.6"]
             if "linux" in target:
                 gaps.append("v1.0.17-dev.12")
             for tag in gaps:
                 self.assertIsNotNone(platform_applicability(tag, target, []))
-            for tag in ["v1.0.7", "v1.0.10", "v1.0.12", "v1.0.15-dev.9", "v1.0.17", "v1.0.18"]:
+            for tag in ["v1.0.7", "v1.0.10", "v1.0.11-dev.1", "v1.0.12", "v1.0.15-dev.9", "v1.0.17", "v1.0.18"]:
                 with self.assertRaises(ValueError):
                     platform_applicability(tag, target, [])
 
@@ -109,7 +109,7 @@ class UpgradeProfileTest(unittest.TestCase):
             with tarfile.open(fileobj=archive, mode="w:gz"):
                 pass
             releases = [self.release(tag, missing=(missing_latest and tag == "v1.0.18") or
-                                     (missing_checkpoint and tag == "v1.0.11-dev.1"))
+                                     (missing_checkpoint and tag == "v1.0.17-dev.6"))
                         for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045", "v1.0.11-dev.1", "v1.0.17-dev.6"]]
             for release in releases[2:]:
                 release["prerelease"] = True
@@ -160,6 +160,7 @@ class UpgradeProfileTest(unittest.TestCase):
                         "supervised_worker_checked": True, "global_engine_preserved": True, "distinct_vault_keys": True,
                         "original_records_preserved": True, "original_sync_work_preserved": True,
                         "urk_preserved": True, "old_records_decrypted": True, "post_upgrade_recall_checked": True,
+                        "encrypted_tombstones_preserved": True, "post_upgrade_sync_checked": False,
                         "seed_vault_versions": [1, 3],
                         "historical_credential_migration_actor": "fixture",
                         "host_credential_custody": {"required": True, "cleanup_passed": True,
@@ -250,9 +251,9 @@ class UpgradeProfileTest(unittest.TestCase):
         self.assertFalse(report["all_published_sources_covered"])
         self.assertEqual(report["additional_draft_baselines"], [])
         upgraded, report = self.run_fixture("critical", missing_checkpoint=True)
-        self.assertEqual(set(upgraded), {"v1.0.18"})
-        self.assertIn("v1.0.15-dev.10", report["selected_sources"])
-        checkpoint = next(item for item in report["sources"] if item["version"] == "1.0.15-dev.10")
+        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.11-dev.1"})
+        self.assertIn("v1.0.17-dev.6", report["selected_sources"])
+        checkpoint = next(item for item in report["sources"] if item["version"] == "1.0.17-dev.6")
         self.assertEqual(checkpoint["status"], "not-applicable")
 
     def test_default_full_keeps_stables_and_database_dev_checkpoints(self):
@@ -262,9 +263,9 @@ class UpgradeProfileTest(unittest.TestCase):
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])
         applicable, gap_report = self.run_fixture(missing_checkpoint=True)
-        self.assertEqual(set(applicable), set(upgraded) - {"v1.0.15-dev.10"})
-        self.assertIn("v1.0.15-dev.10", gap_report["selected_sources"])
-        checkpoint = next(item for item in gap_report["sources"] if item["version"] == "1.0.15-dev.10")
+        self.assertEqual(set(applicable), set(upgraded) - {"v1.0.17-dev.6"})
+        self.assertIn("v1.0.17-dev.6", gap_report["selected_sources"])
+        checkpoint = next(item for item in gap_report["sources"] if item["version"] == "1.0.17-dev.6")
         self.assertEqual(checkpoint["status"], "not-applicable")
         cached_upgrades, cached_report = self.run_fixture(cache_draft=True)
         self.assertEqual(set(cached_upgrades), set(upgraded) | {"v1.0.10"})
@@ -309,7 +310,7 @@ class UpgradeProfileTest(unittest.TestCase):
     def test_each_required_upgrade_flag_must_be_present_and_strictly_true(self):
         flags = ["passed", "real_model", "supervised_worker_checked", "global_engine_preserved",
                  "distinct_vault_keys", "original_records_preserved", "original_sync_work_preserved",
-                 "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked",
+                 "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked", "encrypted_tombstones_preserved",
                  "forced_restart_checked", "old_rpc_checked"]
         for name in flags:
             with self.subTest(name=name, value="missing"):

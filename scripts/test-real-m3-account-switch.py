@@ -122,6 +122,13 @@ def library_state(snapshot, factors):
     return records, rows[1], urk
 
 
+def assert_historical_database_seed(snapshot_value):
+    memories, outbox, _ = snapshot_value[0]
+    assert any(row[1] and row[2] and row[4] == 0 for row in memories), 'historical seed has no encrypted active record'
+    assert any(row[1] and row[2] and row[3] == 1 and row[4] == 1 for row in memories), 'historical seed has no encrypted pending tombstone'
+    assert outbox, 'historical seed has no pending synchronization work'
+
+
 def database_checkpoint_state(profile, checkpoint, snapshot_value, records):
     if checkpoint == 'v1.0.11-dev.1':
         links = []
@@ -413,6 +420,10 @@ for binary in BINARIES:
                     memory_ids = [row[0] for row in snapshot(profile)[0][0]]
                     assert len(memory_ids) == 1, 'feedback checkpoint requires its original candidate'
                     seed_command('query-log','mark',memory_ids[0],'--good','--query-log-id',request,'--source','human')
+                tombstone = json.loads(seed_command('remember','Historical encrypted deletion '+profile.name,
+                    '--title','upgrade-tombstone','--importance','important','--force').stdout)['summary']['id']
+                assert isinstance(tombstone, str) and tombstone, 'historical tombstone seed has no identity'
+                seed_command('forget',tombstone)
             else:
                 run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
                 if args.runtime_binary:
@@ -430,6 +441,9 @@ for binary in BINARIES:
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}
         assert [json.loads(original[str(profile)][2]).get('vault_version',1) for profile in [main,alternate]]==seed_vault_versions, 'historical preparation replaced the selected session formats'
         original_state={name:library_state(value,recovery_factors[name]) for name,value in original.items()}
+        if args.seed_binary:
+            for profile in [main, alternate]:
+                assert_historical_database_seed(original[str(profile)])
         checkpoint_before = {}
         if args.database_dev_checkpoint:
             for profile in [main, alternate]:
@@ -958,6 +972,8 @@ for binary in BINARIES:
             'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,
             'original_records_preserved':True,'original_sync_work_preserved':True,'urk_preserved':True,
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
+            'encrypted_tombstones_preserved':bool(args.seed_binary),
+            'post_upgrade_sync_checked':False,
             'seed_vault_versions':seed_vault_versions,
             'database_dev_checkpoint':checkpoint_evidence,
             'host_credential_custody':{'required':bool(args.seed_binary),'verified_accounts':list(custody_receipts.values())},

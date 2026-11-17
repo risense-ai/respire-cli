@@ -126,7 +126,7 @@ def verify_upgrade(source):
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
         'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
         'original_records_preserved','original_sync_work_preserved','urk_preserved',
-        'old_records_decrypted','post_upgrade_recall_checked',
+        'old_records_decrypted','post_upgrade_recall_checked','encrypted_tombstones_preserved',
     ]),'required real upgrade checks missing or failed'
     assert check.get('seed_vault_versions')==[1,3] and all(type(value) is int for value in check['seed_vault_versions']), 'historical v1/v3 session coverage missing'
     if checkpoint_args:
@@ -174,6 +174,7 @@ def verify_upgrade(source):
             row.get('status')=='ok' for row in rows.values()),'upgrade model readiness checks missing or failed'
     return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'upgrade_contract':upgrade_contract,
             'database_dev_checkpoint':check.get('database_dev_checkpoint'),
+            'post_upgrade_sync_checked':check.get('post_upgrade_sync_checked') is True,
             'report':str(result/'real-account-return-verification.json')}
 
 if args.download_only:
@@ -196,6 +197,7 @@ try:
     if first_platform_release:
         report['upgrade_status']='not-applicable: first Intel macOS release; fresh inference is validated separately'
     report['passed']=True
+    report['post_upgrade_sync_checked']=False
     report['full_coverage']=report['all_published_sources_covered']=args.profile=='full'
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
