@@ -746,7 +746,9 @@ def account_fixture_handler(state, reached, release, v2=None):
             if state["vault"] is None:
                 self.send_error(404)
                 return
-            if state["barrier"] == "before_publish" and state["gets"] == 2:
+            # Runtime23 prepares migration twice around host credential custody;
+            # only the third vault GET checks publication after candidate commit.
+            if state["barrier"] == "before_publish" and state["gets"] == 3:
                 reached.set()
                 if not release.wait(120):
                     state["barrier_failed"] = True
