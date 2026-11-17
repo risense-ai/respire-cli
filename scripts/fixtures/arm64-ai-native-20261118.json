@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "kind": "immutable-cli-ai-diagnostic",
+  "target": "aarch64-unknown-linux-gnu",
+  "fixture_source": "88e0861bc7483d364a8a142c334959742437359b",
+  "diagnostic_commit": "bb21a097cf5add31354c40fd43afa7670fd7bde4",
+  "build_job_id": 134258965941,
+  "cli": {
+    "repository": "risense-ai/respire-cli",
+    "sha": "88e0861bc7483d364a8a142c334959742437359b",
+    "version": "2.0.0-dev.19",
+    "run_id": 44145294665,
+    "run_attempt": 1
+  },
+  "artifact": {
+    "id": 14356861222,
+    "name": "cli-release-aarch64-unknown-linux-gnu",
+    "size": 6593137,
+    "sha256": "4c198c6a35f212291b072aad5d105a35cf6fb78e7a4f83e0b541f418bc5d3a2a"
+  },
+  "binary_sha256": "8319572ca35c4bdaa0aa0bda47a6d9f5788b3e6db9cebf6c48c2396af4ff249b",
+  "original_candidate_sha256": "a7b3fa271b8cde2509d1046065493dc1f9c7fc58f010e72d0401e82cefee6447",
+  "runtime": {
+    "repository": "risense-ai/respire-runtime",
+    "release_id": 448539942,
+    "version": "2.0.0-dev.24",
+    "source_sha": "7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b",
+    "producer": {
+      "run_id": 44073731569,
+      "run_attempt": 1
+    },
+    "assets": [
+      {
+        "id": 758798041,
+        "name": "runtime-build-aarch64-unknown-linux-gnu.json",
+        "size": 54334,
+        "sha256": "9ac1f2534d59e6910122db32e1cd1880e32e29aaf3a33b30e58e06ae6beac268"
+      },
+      {
+        "id": 758797753,
+        "name": "rsrs-runtime-aarch64-unknown-linux-gnu",
+        "size": 51841256,
+        "sha256": "b33d33d9feb83af6e65cbd1430567004c0da1079273dfd4191e5cd3644c8eb6b"
+      },
+      {
+        "id": 758797837,
+        "name": "rsrs-runtime-aarch64-unknown-linux-gnu.tar.gz",
+        "size": 20369915,
+        "sha256": "373480c171fca432062c7cb6230decb0a0eb02bd2cf4d36bc04d57c3ce0b49e5"
+      }
+    ]
+  },
+  "projection": {
+    "original": "a941613bee1ce48a8778aa6cd51a00515a3b2c1a43dabb6223cdaea4741d2da3",
+    "cli_method": "1a4aacada981b43e5c53fbac3b06c41c0503d4da1d9844987dc5fc809c4ee278",
+    "projected": "b3fbfb8a788ee016cfaa4815ac3f7d5f8fb34d4de4b3c02e52bdfede3a585f2d"
+  }
+}
