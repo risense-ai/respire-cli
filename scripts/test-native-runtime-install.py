@@ -98,8 +98,9 @@ class FixtureInstallationTests(unittest.TestCase):
                     ready(dict(health, **{field: value}), root, runtime, False, owner)
         self.assertIn('health.get("startup_complete") is True', source)
         operation = '12345678-1234-4234-9234-123456789abc'
-        alias = 'login-' + operation.replace('-', '')
-        for fault in ('', 'keygen', 'handoff', 'locked', 'bound', 'foreign', 'stop'):
+        alias = 'login-' + 'fedcba98' * 4  # Native alias is independent of the operation ID.
+        for fault in ('', 'keygen', 'keygen_early', 'keygen_prepared', 'keygen_nonjson', 'keygen_cleanup', 'handoff', 'locked',
+                      'bound', 'foreign', 'material', 'session_alias', 'backend', 'stop'):
             with self.subTest(seed=fault), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve()
                 keys = types.SimpleNamespace(entries=set(), credential_backend='native')
@@ -110,39 +111,51 @@ class FixtureInstallationTests(unittest.TestCase):
                     self.assertTrue(kwargs['capture_output'])
                     self.assertEqual(kwargs['timeout'], 45)
                     if command[2:] == ['keygen']:
-                        journal = root / 'runtime/autostart/key-control.json'
-                        journal.parent.mkdir(parents=True)
-                        if fault == 'foreign':
-                            (root / 'foreign').mkdir()
-                        journal.write_text(json.dumps({'operation_id': operation, 'root': str(root),
-                            'profile': str(root / 'foreign' if fault == 'foreign' else root)}), encoding='utf-8')
-                        if fault != 'keygen':
-                            archive = journal.parent / 'key-results'
-                            archive.mkdir()
-                            journal.rename(archive / (operation + '.json'))
-                        session = {'vault_version': 4, 'keyring_account': alias, 'keyring_backend': 'native'}
-                        if fault == 'bound':
-                            session['user'] = 'foreign-account'
-                        (root / 'session.json').write_text(json.dumps(session), encoding='utf-8')
-                        return types.SimpleNamespace(returncode=int(fault == 'keygen'), stdout='private-sentinel-never-report')
+                        if fault != 'keygen_early':
+                            journal = root / 'runtime/autostart/offline-keygen.json'
+                            journal.parent.mkdir(parents=True)
+                            if fault == 'foreign':
+                                (root / 'foreign').mkdir()
+                            journal.write_text(json.dumps({'schema': 1, 'operation_id': operation,
+                                'stage': 'prepared' if fault.startswith('keygen') else 'committed',
+                                'root': str(root), 'source': str(root),
+                                'profile': str(root / 'foreign' if fault == 'foreign' else root),
+                                'material': None if fault == 'keygen_prepared' else {'vault_version': 4, 'auth_operation_id': operation if fault != 'material' else 'foreign',
+                                             'keyring_account': alias, 'keyring_backend': 'foreign' if fault == 'backend' else 'native'}}), encoding='utf-8')
+                            session = {'vault_version': 4, 'keyring_account': 'login-' + 'a'*32 if fault == 'session_alias' else alias,
+                                       'keyring_backend': 'native'}
+                            if fault == 'bound':
+                                session['user'] = 'foreign-account'
+                            (root / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+                        return types.SimpleNamespace(returncode=int(fault.startswith('keygen')),
+                            stdout='private-sentinel-never-report' if fault == 'keygen_nonjson' else json.dumps({'summary': {'super': 'private-sentinel-never-report'},
+                                               'errors': ['host auth credential write failed: private-sentinel-never-report']}),
+                            stderr='private-sentinel-never-report')
                     if command[2:] == ['runtime', 'status']:
                         return types.SimpleNamespace(returncode=0, stdout=json.dumps(
                             {'summary': {'runtime': {'store_ready': fault != 'locked'}}}))
                     return types.SimpleNamespace(returncode=int(
                         fault == 'handoff' and command[2:] == ['runtime', 'start']
-                        or fault == 'stop' and command[2:] == ['runtime', 'stop']))
+                        or fault in ('stop', 'keygen_cleanup') and command[2:] == ['runtime', 'stop']),
+                        stdout='private-sentinel-never-report', stderr='private-sentinel-never-report')
                 with patch('subprocess.run', side_effect=cli):
                     if fault:
                         with self.assertRaises(AssertionError) as raised:
                             seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys)
                         self.assertNotIn('private-sentinel-never-report', str(raised.exception))
+                        if fault.startswith('keygen'):
+                            self.assertIn('synthetic CLI keygen failed', str(raised.exception))
+                            self.assertIn('"category": "' + ('unclassified' if fault == 'keygen_nonjson' else 'native_custody') + '"', str(raised.exception))
+                            if fault == 'keygen_cleanup':
+                                self.assertIn('cleanup also failed', raised.exception.__notes__[0])
+                                self.assertNotIn('private-sentinel-never-report', str(raised.exception.__cause__))
                     else:
                         seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys)
                 self.assertEqual(calls[0], ['keygen'])
                 self.assertEqual(calls[-1], ['runtime', 'stop'])
                 self.assertEqual(calls.count(['keygen']), 1)
-                self.assertEqual(keys.entries, set() if fault == 'foreign' else
-                    {('rsrs', prefix + alias) for prefix in ('super:', 'pass:', 'key-control:')})
+                self.assertEqual(keys.entries, set() if fault in ('foreign', 'material', 'backend', 'keygen_early', 'keygen_prepared') else
+                    {('rsrs', 'super:' + alias)})
                 if not fault:
                     self.assertEqual(calls, [['keygen'], ['runtime', 'start'], ['runtime', 'status'], ['runtime', 'stop']])
 

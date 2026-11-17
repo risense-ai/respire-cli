@@ -49,41 +49,95 @@ def seed_local_credentials(binary, env, keys):
     session_path = profile / "session.json"
     journal = profile / "runtime/autostart/key-control.json"
     results = journal.parent / "key-results"
-    assert not session_path.exists() and not journal.exists() and not results.exists(), "key fixture must be fresh"
+    offline = journal.with_name("offline-keygen.json")
+    assert not any(path.exists() for path in (session_path, journal, results, offline)), "key fixture must be fresh"
+    stage = None
+    alias = None
+
+    def checked(result, action):
+        if result.returncode == 0:
+            return
+        # CLI output may contain the Super Key; report fixed classifications only.
+        try:
+            value = json.loads(result.stdout)
+        except (ValueError, UnicodeError, RecursionError):
+            value = None
+        errors = value.get("errors") if isinstance(value, dict) else None
+        text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
+        text += "\n" + result.stderr
+        categories = (
+            ("handoff_unsupported", "offline_keygen_handoff_unsupported"),
+            ("runtime_repair_required", "repair required"),
+            ("unknown_owner", "offline keygen owner is unverifiable"),
+            ("live_or_unknown_owner", "offline keygen live or unknown owner exists"),
+            ("native_custody", "host auth credential"),
+            ("control_spawn", "cannot start owned host control Runtime"),
+            ("control_response", "host control response"),
+            ("control_exit", "host control Runtime exit"),
+            ("account_rejected", "Runtime rejected account control"),
+            ("selection_changed", "offline keygen installation, selection or image changed"),
+            ("maintenance_pending", "runtime maintenance is incomplete"),
+            ("source_session_invalid", "invalid auth source session"),
+            ("path_missing", "(os error 2)"),
+            ("directory_missing", "(os error 3)"),
+            ("access_denied", "(os error 5)"),
+            ("sharing_violation", "(os error 32)"),
+        )
+        diagnostic = {"returncode": result.returncode,
+                      "category": next((name for name, marker in categories if marker in text), "unclassified"),
+                      "stdout_json": isinstance(value, dict), "stderr_present": bool(result.stderr),
+                      "offline_stage": stage, "material_tracked": alias is not None,
+                      "session_present": session_path.exists()}
+        raise AssertionError(f"synthetic {action} failed: {json.dumps(diagnostic, sort_keys=True)}")
+
     try:
         try:
             generated = subprocess.run([binary, "--json", "keygen"], env=env,
                                        capture_output=True, text=True, timeout=45)
         finally:
-            # Track the host's durable owner even when keygen fails after custody.
-            for path in [journal, *results.glob("*.json")]:
-                if path.exists():
-                    assert not path.is_symlink(), "key fixture journal must not be linked"
-                    binding = json.loads(path.read_text(encoding="utf-8"))
-                    operation = uuid.UUID(binding["operation_id"])
-                    assert operation.version == 4 and str(operation) == binding["operation_id"], "invalid key fixture operation"
-                    assert os.path.samefile(binding["root"], profile) and os.path.samefile(binding["profile"], profile), "foreign key fixture owner"
-                    alias = "login-" + operation.hex
-                    keys.entries.update(("rsrs", prefix + alias) for prefix in ("super:", "pass:", "key-control:"))
-        assert generated.returncode == 0, "synthetic CLI keygen did not commit"
+            # The offline controller checkpoints its independently generated alias
+            # before native custody, including when keygen fails after the write.
+            if offline.exists():
+                assert not offline.is_symlink(), "key fixture journal must not be linked"
+                binding = json.loads(offline.read_text(encoding="utf-8"))
+                operation = uuid.UUID(binding["operation_id"])
+                assert binding["schema"] == 1 and operation.version == 4 and str(operation) == binding["operation_id"], "invalid key fixture operation"
+                assert all(os.path.samefile(binding[key], profile) for key in ("root", "source", "profile")), "foreign key fixture owner"
+                stage = binding["stage"]
+                assert stage in ("prepared", "sent", "committed", "starting", "verified", "finished", "handed_off",
+                                 "rolled_back", "rollback_starting", "rollback_finished", "rollback_handed_off"), "invalid key fixture stage"
+                material = binding.get("material")
+                if material is not None:
+                    alias = material.get("keyring_account")
+                    assert material.get("auth_operation_id") == binding["operation_id"] and material.get("vault_version") == 4, "foreign key fixture material"
+                    assert isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias), "invalid keygen fixture alias"
+                    assert material.get("keyring_backend") == keys.credential_backend, "keygen fixture custody differs"
+                    keys.entries.add(("rsrs", "super:" + alias))
+        checked(generated, "CLI keygen")
         assert not session_path.is_symlink(), "key fixture session must not be linked"
         session = json.loads(session_path.read_text(encoding="utf-8"))
-        alias = session.get("keyring_account")
         assert not session.get("user") and session.get("vault_version") == 4, "keygen must create an unbound v4 session"
-        assert isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias), "invalid keygen fixture alias"
+        assert alias is not None and session.get("keyring_account") == alias, "keygen session differs from owned material"
         assert ("rsrs", "super:" + alias) in keys.entries and session.get("keyring_backend") == keys.credential_backend, "keygen fixture custody differs"
         assert not any(key in session for key in ("pass", "super", "secret", "secret_key")), "keygen retained inline credentials"
         started = subprocess.run([binary, "--json", "runtime", "start"], env=env,
                                  capture_output=True, text=True, timeout=45)
-        assert started.returncode == 0, "synthetic key handoff did not start"
+        checked(started, "key handoff start")
         status = subprocess.run([binary, "--json", "runtime", "status"], env=env,
                                 capture_output=True, text=True, timeout=45)
-        assert status.returncode == 0, "synthetic key handoff status failed"
+        checked(status, "key handoff status")
         assert json.loads(status.stdout)["summary"]["runtime"]["store_ready"] is True, "host did not unlock synthetic credentials"
     finally:
-        stopped = subprocess.run([binary, "--json", "runtime", "stop"], env=env,
-                                 capture_output=True, text=True, timeout=45)
-        assert stopped.returncode == 0, "synthetic key fixture did not stop"
+        primary_error = sys.exc_info()[1]
+        try:
+            stopped = subprocess.run([binary, "--json", "runtime", "stop"], env=env,
+                                     capture_output=True, text=True, timeout=45)
+            checked(stopped, "key fixture stop")
+        except Exception as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note("synthetic key fixture cleanup also failed; fixture retained")
+            raise primary_error from cleanup_error
 
 
 def main():
