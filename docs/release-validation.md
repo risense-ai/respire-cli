@@ -15,7 +15,8 @@ applicable stable and historical stable migration coverage. Both critical and
 full profiles also retain DEV checkpoints that changed persistent formats;
 ordinary DEV revisions do not add redundant upgrade combinations. The policy
 in `scripts/published_upgrade_policy.py` retains formal stable releases and the
-registered database-changing DEV checkpoint `v1.0.15-dev.10`.
+registered database-changing DEV checkpoints `v1.0.11-dev.1` and
+`v1.0.17-dev.6`.
 
 Old CLI or Client2 operating against the new Runtime, and new clients operating
 against the old Runtime, are not acceptance targets. Preserve database recovery,
@@ -48,8 +49,9 @@ All eight CLI SDK pins bind the same reviewed SDK version and its per-target dig
 
 Current frontend releases use eight CLI targets: Linux x64/ARM64 GNU and musl,
 macOS Intel/ARM64, and Windows x64/ARM64. Runtime stays pinned to
-`2.0.0-dev.23`. Merge this host pin only after the Runtime release is published
-and verified. Stable publication remains disabled until separate complete G1
+`2.0.0-dev.24`, whose core configuration interfaces are published. The CLI
+download pin and Client2 adaptation are merged; new host DEV publication still
+requires candidate acceptance. Stable publication remains disabled until separate complete G1
 evidence is implemented and authorized.
 
 `critical` runs build and package checks only and cannot publish. `full` is the
