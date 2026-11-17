@@ -60,7 +60,44 @@ class Smoke(support.Smoke):
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + user)
 
+    def registration_diagnostics(self, env, text):
+        result = {"journal_status": "not_found"}
+        try:
+            root = Path(env["RSRS_DATA_DIR"]).resolve(strict=True)
+            require(root.is_relative_to(self.root.resolve(strict=True)), "registration_root_outside_fixture")
+            path = root / ".login-recovery.json"
+            if path.is_symlink():
+                return {"journal_status": "link_rejected"}
+            if not path.exists():
+                return result
+            operation = re.search(r"\baccount_outcome_unknown operation_id=([0-9a-f-]{36})\b", text)
+            if operation is None:
+                return {"journal_status": "operation_binding_missing"}
+            journal = json.loads(path.read_text(encoding="utf-8"))
+            records = [record for record in journal["operations"]
+                if record["operation_id"] == operation[1]]
+            if len(records) != 1:
+                return {"journal_status": "operation_not_unique"}
+            record = records[0]
+            phases = ("admitted", "login_input", "remote_pending", "remote_unknown", "authorized",
+                "prepared", "awaiting_verification", "rolling_back", "committed", "rolled_back")
+            if record["phase"] not in phases or record["account"]["register"] is not True:
+                return {"journal_status": "registration_record_invalid"}
+            account = record["account"]
+            result.update(journal_status="matched", phase=record["phase"],
+                root_matches=Path(record["root"]).resolve(strict=True) == root,
+                source_selected=Path(record["profile"]).resolve(strict=True) == self.profile(env),
+                authorization_recorded=account.get("authorization") is not None,
+                target_recorded=account.get("target") is not None,
+                vault_pending=account.get("vault_pending") is True,
+                published_vault=account.get("published_vault") is True)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            # Keep the original failure fatal; never copy journal values or exception text.
+            result = {"journal_status": "diagnostic_unavailable"}
+        return result
+
     def cli(self, env, *args, timeout=180):
+        started = time.monotonic()
         try:
             output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
                 cwd=self.root, env=env, capture_output=True, timeout=timeout)
@@ -70,6 +107,7 @@ class Smoke(support.Smoke):
             self.save()
             raise
         finally:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
             stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
                 cwd=self.root, env=env, capture_output=True, timeout=60)
             require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
@@ -96,6 +134,7 @@ class Smoke(support.Smoke):
             categories = (
                 ("argument_contract", ("unexpected argument", "required arguments were not provided", "a value is required")),
                 ("host_required", ("client_only: explicit legacy migration is host-managed",)),
+                ("account_control_unknown", ("control_outcome_unknown",)),
                 ("host_control", ("host control deadline exceeded", "missing host control response frame", "migration_outcome_unknown", "migration response binding mismatch", "migration response profile mismatch")),
                 ("profile_discovery", ("migration discovery did not return profiles", "legacy profile has no name", "profile root is not a directory", "invalid session metadata file")),
                 ("discovery_path", ("discovery path contains parent traversal", "discovery path contains a symlink", "discovery path contains a reparse point", "discovery ancestor is not a directory")),
@@ -119,7 +158,9 @@ class Smoke(support.Smoke):
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "error_class": category, "json_envelope": isinstance(value, dict),
                 "has_source": "--source" in args, "has_account": "--account" in args,
-                "error": self.redacted_cli_error(env, output)}
+                "error": self.redacted_cli_error(env, output), "elapsed_ms": elapsed_ms}
+            if args[0] == "register" and category == "account_control_unknown":
+                self.report["cli_failure"]["account_control"] = self.registration_diagnostics(env, text)
             self.report["cli_failure"].update(migration_failure_diagnostics(value))
             migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
                 "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",

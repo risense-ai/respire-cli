@@ -4,17 +4,19 @@ import {createPreparation,preparationLink} from './release-preparation.mjs';
 import {validateImportedEvidence,importedAnchor,validateImportAnchor,assertImportPin,assertImportSelection,assertImportedContents,validateConsumerIntent} from './prepared-import.mjs';
 import {readFileSync} from 'node:fs';
 
-test('Release requires fresh validation and has no prepared publication entry',()=>{
+test('Release publication requires the completed full preparation and independently rechecked import',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  assert.doesNotMatch(release,/prepared_run|prepared-import|PREPARED_|IMPORTED_/);
   const job=name=>release.split(`\n  ${name}:\n`)[1].split(/\n  [a-z][\w-]*:\n/)[0];
-  for(const joined of [job('publication-ready'),job('publish')]){
-    assert.match(joined,/needs.validate.result == 'success'/);
-    assert.doesNotMatch(joined,/needs.validate.result == 'skipped'/);
-  }
-  assert.match(job('publication-ready'),/Require successful CLI CI for this exact source/);
+  assert.match(job('prepared-import'),/prepared-import.mjs consumer/);
+  assert.match(job('publication-ready'),/needs.prepared-import.result == 'success'/);
+  assert.match(job('publication-ready'),/prepared-import.mjs readiness/);
   const publish=job('publish');
+  assert.match(publish,/needs.prepared-import.result == 'success'/);
+  assert.match(publish,/needs.publication-ready.result == 'success'/);
   assert(publish.indexOf('guard-accepted')<publish.indexOf('--publish --accepted-only'));
+  const helper=readFileSync(new URL('./prepared-import.mjs',import.meta.url),'utf8');
+  assert.match(helper,/const history=preparationContext\(receipt.preparation.source\)/);
+  assert.match(helper,/validatePreparationHistory\(receipt.preparation,history\)/);
 });
 
 const sha='a'.repeat(40),workflowSha='c'.repeat(40),hash='b'.repeat(64),version='1.2.3-dev.4';
@@ -37,7 +39,8 @@ function fixture(){
   const assets=triples.flatMap(t=>[`rsrs-${t}${t.includes('windows')?'.exe':''}`,`rsrs-${t}-runtime.tar.gz`,`cli-build-${t}.json`]).map(file=>({file,size:100,sha256:hash}));
   const packs=[...manifest.targets.map(t=>t.pkg),manifest.npmScope].map((name,i)=>({name,version,file:`pack-${i}.tgz`,size:100,sha256:hash}));
   const identity={hashes:{'Cargo.lock':hash,'rust-toolchain.toml':hash},sdk:[]};
-  const history={source:original,identity,manifest,run,jobs,ci,artifacts,assets,packs};
+  const full_result={schema:1,kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:original.sha,product_sources:{cli:original.sha},manifest_sha256:hash,run_id:Number(original.run_id),run_attempt:Number(original.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
+  const history={source:original,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result};
   jobs.push({id:900,name:'preparation-receipt',status:'in_progress',started_at:time(3)});
   const proof=createPreparation({...history,now:time(4)});
   Object.assign(jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});
@@ -139,14 +142,12 @@ test('optional historical byte parameters cannot substitute for mandatory write-
   }
 });
 
-test('prepared import preserves the exact validation profile and old missing fields remain full',()=>{
-  const old=fixture();delete old.receipt.preparation.validation_profile;old.receipt.origin=preparationLink(old.receipt.preparation,{id:90,name:'release-prepared-700-1',size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:700,head_sha:sha}});validateImportedEvidence(old.receipt,old.source,old.manifest,old.context);
-  const f=fixture(),h=f.context.history;
-  h.jobs=h.jobs.filter(j=>j.name.startsWith('validate / ')||j.name==='preparation-receipt');
-  const producing=structuredClone(h.jobs);Object.assign(producing.at(-1),{status:'in_progress',conclusion:undefined,completed_at:undefined});
-  const proof=createPreparation({...h,jobs:producing,run:{...h.run,status:'in_progress'},profile:'critical',now:time(4)});
-  f.receipt.preparation=proof;f.receipt.validation_profile='critical';
-  f.receipt.origin=preparationLink(proof,{id:90,name:'release-prepared-700-1',size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:700,head_sha:sha}});
-  validateImportedEvidence(f.receipt,f.source,f.manifest,f.context);
-  for(const profile of [undefined,'full','invalid']){const r=structuredClone(f.receipt);if(profile===undefined)delete r.validation_profile;else r.validation_profile=profile;assert.throws(()=>validateImportedEvidence(r,f.source,f.manifest,f.context))}
+test('prepared import rejects critical and any incomplete full proof before publication',()=>{
+  const f=fixture();
+  for(const mutate of [r=>r.validation_profile='critical',r=>r.preparation.validation_profile='critical',
+    r=>delete r.preparation.full_result,r=>r.preparation.full_result.gui_passed=false,r=>r.preparation.full_result.historical_upgrades.pop()]){
+    const receipt=structuredClone(f.receipt);mutate(receipt);
+    receipt.origin=preparationLink(receipt.preparation,{id:90,name:'release-prepared-700-1',size_in_bytes:100,digest:`sha256:${hash}`,expired:false,workflow_run:{id:700,head_sha:sha}});
+    assert.throws(()=>validateImportedEvidence(receipt,f.source,f.manifest,f.context));
+  }
 });

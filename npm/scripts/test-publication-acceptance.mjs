@@ -151,7 +151,8 @@ function preparedCleanupFixture(){
   const artifacts=[...m.targets.map(t=>`cli-release-${t.triple}`),'npm-release-validation','npm-release-packages'].map((name,i)=>({id:50+i,name,size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:50,head_sha:sha}}));
   const assets=f.scoped.assets.map(a=>({file:a.name,size:a.size,sha256:a.sha256}));
   const packs=f.scoped.packages.map((p,i)=>({name:p.name,version,file:`pack-${i}.tgz`,size:10,sha256:hash}));
-  f.history={source:original,identity,manifest,run:originalRun,jobs:originalJobs,ci,artifacts};
+  const full_result={schema:1,kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:original.sha,product_sources:{cli:original.sha},manifest_sha256:hash,run_id:Number(original.run_id),run_attempt:Number(original.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
+  f.history={source:original,identity,manifest,run:originalRun,jobs:originalJobs,ci,artifacts,full_result};
   originalJobs.push({id:900,name:'preparation-receipt',status:'in_progress',started_at:previous('30')});
   const proof=createPreparation({...f.history,assets,packs,now:previous('35')});
   Object.assign(originalJobs.at(-1),{status:'completed',conclusion:'success',completed_at:previous('36')});

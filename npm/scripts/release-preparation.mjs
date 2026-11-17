@@ -9,6 +9,7 @@ import {regressionContract,validateRegressionContract,validationProfile,regressi
 import {api,pages,output as setOutput} from './release-publication.mjs';
 import {readVerifiedReceipt} from './verified-receipt.mjs';
 import {frontendLayout, releaseAssetNames, validateBuildMetadata} from './verify-binary.mjs';
+import {completeCandidate} from './candidate-artifact.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
@@ -62,6 +63,7 @@ function completed(job,label){
   return end;
 }
 export function preparationValidation(jobs,ci,source,manifest,profile='full'){
+  requireValue(profile==='full','Only full validation can prepare publication');
   validatePreparationSource(source);
   requireValue(manifest.cliVersion===source.version,'Prepared manifest version differs');
   requireValue(ci?.path==='.github/workflows/ci.yml'&&ci.head_sha===source.sha&&ci.head_branch==='main'&&
@@ -135,7 +137,7 @@ export function preparationReceiptJob(jobs,{producing=false}={}){
   return job;
 }
 
-export function createPreparation({source,identity,manifest,run,jobs,ci,artifacts,assets,packs,profile='full',now=new Date().toISOString()}){
+export function createPreparation({source,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result,profile='full',now=new Date().toISOString()}){
   validatePreparationRun(run,source,{producing:true});
   profile=validationProfile(profile);
   const validation=preparationValidation(jobs,ci,source,manifest,profile),time=parseTimestamp(now);
@@ -143,8 +145,20 @@ export function createPreparation({source,identity,manifest,run,jobs,ci,artifact
   // Completed API gates are read before writing; runner time is audit data only.
   requireValue(time!==null,'Preparation receipt clock is invalid');
   validatePreparedBytes(assets,packs,source,manifest);
+  validatePreparationFull(full_result,source,manifest);
   return structuredClone({schema:1,kind:'release-prepared',state:'validated-unpublished',validation_profile:profile,source,identity,validation,
-    origin_artifacts:preparationArtifacts(artifacts,source,manifest),assets,packs,prepared_at:now});
+    origin_artifacts:preparationArtifacts(artifacts,source,manifest),assets,packs,full_result,prepared_at:now});
+}
+export function validatePreparationFull(result,source,manifest){
+  requireValue(result?.schema===1&&result.kind==='candidate-full'&&result.full_passed===true&&result.gui_passed===true
+    &&result.harness_sha===source.sha&&result.product_sources?.cli===source.sha&&HASH.test(result.manifest_sha256||'')
+    &&Number(result.run_id)===Number(source.run_id)&&Number(result.run_attempt)===Number(source.run_attempt)
+    &&Array.isArray(result.historical_upgrades)&&result.historical_upgrades.length===manifest.targets.length
+    &&manifest.targets.every(t=>result.historical_upgrades.filter(r=>r.target===t.triple&&r.profile==='full'&&r.all_published_sources_covered===true).length===1)
+    &&Array.isArray(result.reports)&&result.reports.length>0&&result.reports.every(r=>HASH.test(r.sha256||''))
+    &&result.reports.filter(r=>r.artifact==='client2-published-online-x86_64-pc-windows-msvc'&&r.path==='report.json').length===1,
+    'Missing complete candidate GUI/DB/process evidence');
+  return result;
 }
 export function validatePreparedBytes(assets,packs,source,manifest){
   const names=manifest.targets.flatMap(t=>releaseAssetNames(manifest,t.triple)).sort();
@@ -161,6 +175,7 @@ export function validatePreparationHistory(receipt,context){
   requireValue(receipt?.schema===1&&receipt.kind==='release-prepared'&&receipt.state==='validated-unpublished'&&
     same(receipt.source,source)&&same(receipt.identity,identity),'Prepared receipt source, SDK, toolchain or layout differs');
   const profile=validationProfile(receipt.validation_profile);
+  validatePreparationFull(receipt.full_result,source,manifest);
   validateRegressionContract(receipt.validation?.inventory,manifest,profile);
   if(context.validation_profile!==undefined)requireValue(profile===validationProfile(context.validation_profile),'Prepared validation profile differs');
   requireValue(same(receipt.validation,preparationValidation(jobs,ci,source,manifest,profile)), 'Prepared CI/regression proof changed or is stale');
@@ -188,7 +203,7 @@ export function preparationContext(source){
   const ci=api(`repos/${REPO}/actions/runs/${candidates[0].id}`);
   return {...preparationInputs(source.sha,source.version),source,run,jobs,artifacts,ci};
 }
-export function attestPreparation(assetsFolder,packsFolder,output){
+export function attestPreparation(assetsFolder,packsFolder,output,reportsFolder){
   const source=validatePreparationSource({repository:process.env.GITHUB_REPOSITORY,workflow:WORKFLOW,
     run_id:process.env.GITHUB_RUN_ID,run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),
     sha:process.env.CLI_SHA,version:process.env.CLI_VERSION});
@@ -197,7 +212,9 @@ export function attestPreparation(assetsFolder,packsFolder,output){
     'Only the exact main workflow checkout can attest unpublished preparation');
   const context=preparationContext(source);
   validatePreparationRun(context.run,source,{producing:true});
-  const receipt=createPreparation({...context,profile:validationProfile(process.env.VALIDATION_PROFILE),assets:preparedAssets(assetsFolder,source,context.manifest),
+  const assets=preparedAssets(assetsFolder,source,context.manifest);
+  const full_result=completeCandidate(JSON.parse(process.env.CANDIDATE_ASSETS),assets,reportsFolder,context.jobs,source);
+  const receipt=createPreparation({...context,profile:validationProfile(process.env.VALIDATION_PROFILE),assets,full_result,
     packs:preparedPacks(packsFolder,source,context.manifest)});
   writeFileSync(output,JSON.stringify(receipt,null,2)+'\n');
   console.log(`Recorded ${receipt.validation_profile} unpublished validation for ${source.sha}@${source.version}; no publication acknowledgement`);
@@ -278,7 +295,8 @@ export function inspectPreparation(runId,sha,version){
   setOutput({prepared_run:result.receipt.source.run_id,prepared_version:result.receipt.source.version,
     prepared_attempt:result.receipt.source.run_attempt,prepared_artifact_id:result.link.artifact.id,
     prepared_artifact_digest:result.link.artifact.digest,prepared_receipt_sha256:result.link.receipt_sha256,
-    prepared_binary_artifact_ids:result.receipt.origin_artifacts.filter(a=>a.name.startsWith('cli-release-')).map(a=>a.id).join(',')});
+    prepared_binary_artifact_ids:result.receipt.origin_artifacts.filter(a=>a.name.startsWith('cli-release-')).map(a=>a.id).join(','),
+    prepared_pack_artifact_ids:result.receipt.origin_artifacts.filter(a=>a.name==='npm-release-packages').map(a=>a.id).join(',')});
   return result;
 }
 export function assertPreparationPin(result,pin){
@@ -301,7 +319,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{
     const action=process.argv[2];
     if(action==='attest'){
-      requireValue(process.argv.length===6,'Expected attest <assets> <packs> <receipt>');
+      requireValue(process.argv.length===7,'Expected attest <assets> <packs> <receipt> <full-reports>');
       attestPreparation(...process.argv.slice(3));
     }else if(action==='inspect'){
       requireValue(process.argv.length===3,'Unexpected preparation lookup arguments');

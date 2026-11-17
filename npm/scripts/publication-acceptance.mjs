@@ -120,6 +120,7 @@ export function assertSubmissionActive() {
     run.path!=='.github/workflows/release.yml' || run.head_repository?.full_name!==repo || !['push','workflow_dispatch'].includes(run.event))throw Error('Submission source attempt is inactive or stale');
 }
 async function guardAccepted() {
+  if(process.env.VALIDATION_PROFILE!=='full'||!process.env.PREPARED_RUN)throw Error('Publication requires a full prepared candidate and exact-byte import');
   const repo = process.env.GITHUB_REPOSITORY, runId = process.env.GITHUB_RUN_ID, attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
   if(repo!=='risense-ai/respire-cli' || !id(runId) || !id(attempt)) throw Error('Invalid submission run');
   assertSubmissionActive();
@@ -294,7 +295,7 @@ function finalizeAccepted() {
   if(readyAt===null)throw Error('Invalid publication readiness clock');
   const profile=validationProfile(scoped.validation_profile);
   if(process.env.VALIDATION_PROFILE!==undefined&&profile!==validationProfile(process.env.VALIDATION_PROFILE))throw Error('Accepted validation profile differs from the requested profile');
-  if(process.env.FULL_REGRESSION_REQUIRED==='true'&&profile!=='full')throw Error('Full regression requires a full validation profile');
+  if(profile!=='full')throw Error('Publication requires a full validation profile');
   let fullyValidated=false,validationError='required regressions still pending',fullAt=null,preparedImport=null;
   if(scoped.validation_origin!==undefined){
     if(!process.env.PREPARED_RUN)throw Error('Prepared validation origin is missing its selected source mode');

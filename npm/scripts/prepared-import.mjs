@@ -9,7 +9,7 @@ import {readVerifiedReceipt} from './verified-receipt.mjs';
 import {parseTimestamp,validateRegressionContract,validationProfile} from './release-regression-contract.mjs';
 import {readPreparedRun,assertPreparationPin,preparationPinFromEnv,currentPublicationOwner,requirePreparationBeforeTrigger,
   preparationContext,validatePreparationSource,validatePreparationLink,validatePreparationHistory,
-  validatePreparedBytes,preparedAssets,preparedPacks,preparationInputs} from './release-preparation.mjs';
+  validatePreparedBytes,validatePreparationFull,preparedAssets,preparedPacks,preparationInputs} from './release-preparation.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
@@ -77,6 +77,7 @@ export function validateImportedShape(receipt,source,manifest){
   const profile=validationProfile(receipt.validation_profile);
   requireValue(profile===validationProfile(proof.validation_profile),'Import validation profile differs from its preparation');
   validateRegressionContract(proof.validation?.inventory,manifest,profile);
+  validatePreparationFull(proof.full_result,proof.source,manifest);
   validatePreparedBytes(proof.assets,proof.packs,proof.source,manifest);
   requireValue(same(receipt.validated_assets,proof.assets)&&same(receipt.validated_packs,proof.packs),
     'Import lacks matching mandatory asset and tarball verification');

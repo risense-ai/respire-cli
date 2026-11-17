@@ -94,6 +94,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   assert.ok(statSync(runtime).isFile());
   assert.notEqual(runtime, cli, 'CLI cannot substitute for standalone Runtime');
   assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+  if (process.env.CANDIDATE_ASSETS) {
+    assert.equal(selected.sha256, process.env.RSRS_PUBLISHED_RUNTIME_SHA256);
+    assert.equal(selected.release.metadata_sha256, process.env.RSRS_PUBLISHED_RUNTIME_METADATA_SHA256);
+  }
   for (const [key, value] of Object.entries({NATIVE_RUNTIME_BIN: runtime, NATIVE_RUNTIME_SHA256: selected.sha256, NATIVE_RUNTIME_VERSION: selected.version})) {
     assert.ok(!/[\r\n]/.test(value));
     appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);

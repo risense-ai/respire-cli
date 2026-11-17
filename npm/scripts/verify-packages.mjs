@@ -4,6 +4,8 @@ import {join, resolve} from 'node:path';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {frontendLayout, validateBuildMetadata, verifyBinary} from './verify-binary.mjs';
 import {currentPackSource, downloadValidatedPacks, packProducer, readValidatedPacks, verifyPackFile} from './registry-publication.mjs';
+import {readImportedPreparation,assertImportPin,importPinFromEnv,assertImportSelection} from './prepared-import.mjs';
+import {preparationPinFromEnv} from './release-preparation.mjs';
 
 const root = process.cwd();
 const assets = resolve(process.argv[2] || 'release-assets');
@@ -35,8 +37,15 @@ const reuseDirectory = reuseIndex >= 0 ? resolve(process.argv[reuseIndex + 1] ||
 if (reuseDirectory && packDirectory && !exporting) throw Error('Packing and validated-tarball reuse are mutually exclusive');
 let reused;
 if (reuseDirectory) {
-  const source=currentPackSource();
+  let source=currentPackSource();
   if (source.sha!==sha) throw Error('Validated pack checkout/source differs');
+  if(process.env.PREPARED_RUN){
+    if(process.argv.includes('--download'))throw Error('Prepared packs must come from the verified import');
+    const imported=readImportedPreparation({...source,workflow:'.github/workflows/release.yml',version:manifest.cliVersion},manifest);
+    assertImportSelection(imported,process.env.PREPARED_RUN,preparationPinFromEnv());assertImportPin(imported,importPinFromEnv());
+    const original=imported.receipt.preparation.source;
+    source={repository:original.repository,run_id:String(original.run_id),run_attempt:Number(original.run_attempt),sha:original.sha};
+  }
   if (process.argv.includes('--download')) downloadValidatedPacks(reuseDirectory,source);
   reused=readValidatedPacks(reuseDirectory,source,manifest);
 }

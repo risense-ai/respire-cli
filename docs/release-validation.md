@@ -46,29 +46,38 @@ The paired Core SDK still validates its own eight-target compatibility contract.
 All eight CLI SDK pins bind the same reviewed SDK version and its per-target digests in
 `sdk/core-sdk.lock.json`.
 
-Normal DEV and stable publication use the `critical` validation profile. It
-requires exact-source workspace tests, CLI 90% coverage and packaging/workflow/
-fixture contracts across all three source CI lanes, seven Release builds, and
-seven native startup/real CPU inference/latest applicable formal-stable upgrade
-checks. API regression, pinned SDK digests, and consistent artifacts for all
-eight npm packages remain required: seven scoped platform packages and the
-`rsrs-cli` launcher. The parent Release submits only the seven platform packages;
-`npm-alias.yml` submits the exact launcher tarball validated by the parent using
-its existing package-specific Trusted Publisher. Parent acceptance binds the
-launcher digest separately, without claiming its npm acceptance. Byte, source, dependency, receipt and immutable-version fence
-checks still apply before submission.
+Current frontend releases use eight CLI targets: Linux x64/ARM64 GNU and musl,
+macOS Intel/ARM64, and Windows x64/ARM64. Runtime stays pinned to
+`2.0.0-dev.22`. Stable publication remains disabled until separate complete G1
+evidence is implemented and authorized.
 
-The `full` profile additionally requires all historical upgrades, long resident
-stress, six cloud sweeps, three native migration fixtures and three migration
-join gates. It retains the API gate and all critical build/source protections.
-Full regression runs on the scheduled/manual path; an ordinary critical release
-does not claim those checks ran. `full_regression_before_publish=true` explicitly
-forces the full profile for compatibility with older callers.
-Manual Release exposes `validation_profile=critical|full`, defaulting to
-`critical`; the legacy full flag overrides that selection. The daily
-`release-full-regression.yml` entry dispatches Release with `publish=false`,
-`validation_profile=full` and the legacy full flag. Its dispatch success is not
-regression success; use the dispatched run's actual full results and receipts.
+`critical` runs build and package checks only and cannot publish. `full` is the
+default Release profile. From an exact main workflow dispatch, run it with
+`publish=false` and explicit `client2_release` / `client2_commit`. It freezes the
+candidate CLI Actions bytes and official pinned Runtime asset IDs and hashes,
+then requires all eight native lanes, seven cloud sweeps, four native migration
+fixtures and four joins, historical formal/database DEV upgrades, the existing
+Windows Client2 GUI subset (including restart/recovery), packaging and API gates.
+The GUI installs the candidate CLI locally; it cannot download a newer public
+CLI in place of the candidate. Live GUI-owned CLI process paths, parent/session,
+lifetimes and image hashes must match the candidate in initial and restart phases.
+
+Every full result joins raw reports and real Runtime process hashes before
+`release-prepared-RUN-ATTEMPT` is emitted. Exact-source main push CI must also
+have succeeded. Public archive/hash verification runs all eight targets on
+Ubuntu; actual execution continues to use the native OS and architecture.
+Ordinary PRs retain the existing source CI and offline contract checks; no full
+product run is dispatched by these changes.
+
+Promotion is a separate main dispatch: `ref=<prepared source SHA>`,
+`prepared_run=<completed candidate run>`, `validation_profile=full`,
+`publish=true`, with no `dev_version` override. It imports the already validated
+CLI assets and npm tarballs without rebuilding or repacking publication bytes.
+Critical, failed, stale, incomplete or differently bound evidence cannot publish.
+Public npm metadata, isolated installation and installed binary hash checks run
+only after promotion through the existing `verify-publication.yml` workflow.
+The independent `release-full-regression.yml` entry remains a manual check of
+explicit immutable public assets; it is not a prerequisite for candidate testing.
 
 `rsrs-cli` is the primary public npm install entry. Protocol 2 separates two
 states; neither state can substitute for the other:
@@ -422,8 +431,8 @@ inputs, every platform SDK pin, original Actions artifact IDs/digests, actual
 binary/runtime/metadata hashes, and the exact local validated npm tarballs.
 For this explicitly full preparation it records full validation completion
 independently of publication. A critical proof cannot be relabelled or imported
-as full, and a legacy proof without a profile retains only its original full
-meaning. Required
+as full. Proofs without complete candidate GUI/database/process evidence cannot
+authorize the new publication path, regardless of their profile label. Required
 jobs and timestamps are rechecked when validating the proof; missing or changed
 evidence fails closed. The artifact retains the existing one-day lifetime.
 
@@ -431,18 +440,17 @@ This is evidence from a run that did not publish. It is neither npm acceptance
 nor public installation proof, and does not promise the version is still free.
 
 For prepared DEV publication, dispatch Release from main with `ref` set to that
-same exact source SHA, `dev_version` set to the prepared version, `prepared_run`
-set to the completed preparation run ID, and both `publish=true` and
-`full_regression_before_publish=true`. The preparation must have completed
+same exact source SHA, `prepared_run` set to the completed preparation run ID,
+`validation_profile=full` and `publish=true`. The version comes only from the
+preparation receipt; a `dev_version` override is rejected. The preparation must have completed
 before this new publication trigger. Historical repair/recovery inputs cannot
 be combined with prepared mode. Normal publication retains its existing gates.
 
 The plan pins the original receipt artifact ID, ZIP digest, canonical JSON
 digest and source attempt, then registers a consumer before reading any binary
 artifact. A read-only import job checks the original main run, complete gates,
-source inputs and actual binary/runtime/metadata bytes. It independently packs
-with the same pinned npm tool and requires equality with every prepared npm
-tarball. It uploads verified platform copies and an import receipt into the new
+source inputs and actual binary/runtime/metadata bytes. It imports the original npm tarballs by pinned artifact ID and checks every
+local file against the preparation digest. It does not repack publication bytes. It uploads verified platform copies and an import receipt into the new
 run. Failed or skipped import jobs cannot authorize publication. Readiness pins
 this new receipt, and the actual publisher checks both local byte inventories
 and original/current proof pins before npm submissions. Existing immutable
