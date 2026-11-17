@@ -187,7 +187,7 @@ class JournalContract(unittest.TestCase):
                     login_continuation_receipt(value, self.id, self.root, self.addr, outcome)
 
     def test_real_fixture_keeps_required_failure_assertions(self):
-        for assertion in ('legacy_original_profile_not_restored', 'legacy_interrupted_credential_not_deleted',
+        for assertion in ('failed_login_original_profile_not_restored', 'failed_login_interrupted_credential_not_deleted',
                           'original_profile_not_restored', 'interrupted_native_credential_not_deleted',
                           'interrupted_native_password_not_deleted', 'fresh_login_replayed_authentication',
                           'unknown_rollback_deleted_credentials', 'unknown_result_released_maintenance',
@@ -195,6 +195,9 @@ class JournalContract(unittest.TestCase):
                           'original_ciphertexts_changed', 'original_source_changed',
                           'login_continuation_maintenance_not_finished'):
             self.assertIn('"' + assertion + '"', SOURCE)
+        self.assertIn('"failed_login_explicit_rollback"', SOURCE)
+        self.assertNotIn('"synthetic_legacy_schema"', SOURCE)
+        self.assertNotIn('"original": list(initial_session)', SOURCE)
         self.assertIn('start_new_session=True', SOURCE)
         self.assertLess(SOURCE.index('= interrupt_owned_control(child)'),
                         SOURCE.index('release.set()', SOURCE.index('= interrupt_owned_control(child)')))
