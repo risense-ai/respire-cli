@@ -72,6 +72,7 @@ exit 0
     $null=New-Item -ItemType Directory -Path (Join-Path $root 'client2')
     $journal=Join-Path $root 'client2/requests.json'
     foreach ($case in @('public','saved','envelope','private-transaction','pending','duplicate','invalid-id')) {
+        $report=@{recovery=@{}}
         $record=[pscustomobject]@{id=('desktop-'+[guid]::NewGuid());name='auth_reset';started='2026-11-16T00:00:00Z';state='done';host=$true;
             transaction=[pscustomobject]@{operation_id=[guid]::NewGuid().ToString();source_profile=$root;kind='key'}}
         switch ($case) {
@@ -86,6 +87,12 @@ exit 0
         $failed=$false
         try { $null=Read-RecoveryRecord } catch { $failed=$true }
         if ($failed -eq ($case -in @('public','saved'))) { throw 'Recovery journal accepted private data or rejected public identity' }
+        if ($case -in @('envelope','private-transaction','pending','invalid-id')) {
+            $diagnostic=$report.recovery.journal_validation
+            $field=@{envelope='record_fields_public'; 'private-transaction'='transaction_fields_public'; pending='state_done'; 'invalid-id'='operation_id_valid'}[$case]
+            if ($diagnostic.Count -ne 9 -or @($diagnostic.Values | Where-Object { $_ -isnot [bool] }).Count -or $diagnostic[$field] -ne $false -or
+                (ConvertTo-Json $diagnostic -Compress).Contains('synthetic-forbidden-field')) { throw 'Journal diagnostic must identify the failed predicate using fixed booleans only' }
+        }
     }
     $source=[IO.File]::ReadAllText($nativePath)
     $resume=$source.Substring($source.LastIndexOf("if (`$RecoveryPhase -ceq 'resume')"))
