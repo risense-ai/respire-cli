@@ -41,6 +41,23 @@ def migrate_fixture_custody(profile, keys, plan, expected_urk):
     (profile/'session.json').write_text(json.dumps(migrated),encoding='utf-8')
 
 
+def custody_consumer_error(output):
+    # Emit only known source messages; arbitrary output may contain decrypted data or credentials.
+    body=(output.stdout+output.stderr).decode('utf-8',errors='replace')
+    markers=('runtime request belongs to another installation',
+        'runtime RPC response scope mismatch', 'scope_mismatch',
+        'unlock Runtime does not own the selected profile',
+        'runtime owner roots or installation identity do not match maintenance',
+        'unlock Runtime process identity changed', 'unlock Runtime image changed',
+        'host session credential read failed', 'legacy secret credential is missing or empty',
+        'Runtime session credentials are unavailable', 'failed to decrypt',
+        'NoStorageAccess', 'PlatformFailure', 'NoEntry')
+    matched=sorted((body.index(marker),marker) for marker in markers if marker in body)
+    return 'CLI host custody consumer failed: '+json.dumps({'returncode':output.returncode,
+        'source_chain':[marker for _,marker in matched] or ['unclassified'],
+        'stdout_bytes':len(output.stdout),'stderr_bytes':len(output.stderr)})
+
+
 def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
     alias,version,slots=plan
     session=json.loads((profile/'session.json').read_bytes())
@@ -68,7 +85,11 @@ def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
             for slot,value in slots.items()}
         assert recover_fixture_urk(session,original_factors)==expected_urk, 'host custody changed the URK'
         assert set(slots)=={'pass' if version==1 else 'super','legacy-secret'}, 'CLI custody proof has an unconsumed slot'
-        clean_env=dict(env,RSRS_DATA_DIR=str(profile))
+        # RSRS_DATA_DIR identifies the installation; client.json selects its account.
+        clean_env=dict(env)
+        installation=pathlib.Path(env['RSRS_DATA_DIR'])
+        config_bytes=(installation/'client.json').read_bytes()
+        assert pathlib.Path(json.loads(config_bytes)['data_dir']).resolve()==profile.resolve(), 'custody consumer account is not selected'
         for prefix in ('RSRS_','ONEMEMORY_','RESPIRE_'):
             for suffix in ('SUPER','PASS','SECRET','KDF_SALT','WRAPPED_URK','URK_NONCE'):
                 assert prefix+suffix not in env, 'resident custody consumer has a factor override'
@@ -77,10 +98,11 @@ def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
         assert row is not None, 'custody consumer has no original ciphertext'
         expected=json.loads(vault_crypto.decrypt_content(expected_urk,*row[1:]))['content']
         shown=captured_run([str(binary),'--json','show',row[0]],env=clean_env,timeout=120)
-        assert shown.returncode==0, 'CLI host custody consumer failed'
+        assert shown.returncode==0, custody_consumer_error(shown)
         result=json.loads(shown.stdout)
-        assert not result.get('errors') and result.get('status') not in ('error','failed'), 'CLI host custody consumer returned an error'
+        assert not result.get('errors') and result.get('status') not in ('error','failed','fail'), custody_consumer_error(shown)
         assert result.get('details',{}).get('entry',{}).get('content')==expected, 'CLI host custody could not decrypt original data'
+        assert (installation/'client.json').read_bytes()==config_bytes, 'CLI custody consumer changed account routing'
         assert json.loads((profile/'session.json').read_bytes())==session, 'CLI custody consumer changed the session'
     else:
         assert recover_fixture_urk(session,recovered)==expected_urk, 'host custody changed the URK'
@@ -826,8 +848,15 @@ for binary in BINARIES:
             assert (main/'client.json').read_bytes()==config_before,'restart changed the account or API configuration'
             assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_restart,'restart changed original records, sync work or URK'
             if args.seed_binary:
-                for profile in [main,alternate]:
+                for account,profile in [('alternate',alternate),('main',main)]:
+                    if sys.platform=='darwin':
+                        run('account','use',account)
+                        wait_index_ready()
                     verify_fixture_custody(profile,keys,custody_slots[str(profile)],expected_urks[str(profile)],binary,env)
+                assert (main/'client.json').read_bytes()==config_before, 'post-restart custody changed account routing'
+                assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_restart, 'post-restart custody changed original library state'
+                if sys.platform=='darwin' and args.runtime_binary:
+                    replacement=observe_runtime()
             run('model','probe','--model','m3')
             assert run('recall','Real account return fixture','--titles').get('items')
             if args.runtime_binary:

@@ -819,8 +819,10 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                      and node.name in ('recover_fixture_urk', 'library_state', 'snapshot',
-                                       'legacy_custody_alias', 'migrate_fixture_custody')]
+                                       'legacy_custody_alias', 'migrate_fixture_custody',
+                                       'custody_consumer_error', 'verify_fixture_custody')]
         namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing,
+                         pathlib=SimpleNamespace(Path=Path), sys=SimpleNamespace(platform='darwin'),
                          canonical_scope_path=lambda path: str(path.resolve()))
         exec(compile(ast.Module(body=functions, type_ignores=[]), '<upgrade-library-fixture>', 'exec'), namespace)
         cls.helpers = namespace
@@ -859,7 +861,9 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         from cryptography.exceptions import InvalidTag
         for version in (1, 3, 4):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
-                profile = Path(directory)
+                installation = Path(directory) / '.rsrs'
+                profile = installation / 'accounts/alternate' if version == 3 else installation
+                profile.mkdir(parents=True)
                 urk, salt, nonce = bytes(range(32)), 'ab' * 16, bytes.fromhex('cd' * 12)
                 factors = {'pass': PASSWORD, 'super': 'A3-' + '12' * 18,
                            'secret': 'original-secret', 'secret_key': 'original-secret-key'}
@@ -869,7 +873,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                            factors['pass'] if version == 1 else factors['super'],
                            factors['secret'] if version == 1 else factors['secret_key'], salt, current=current))
                     return (legacy.PREFIX if current else '') + AESGCM(kek).encrypt(nonce, key, None).hex()
-                def encrypt(current, payload=b'original record', key=urk):
+                def encrypt(current, payload=b'{"content":"original record"}', key=urk):
                     info = b'rsrs:data:v1' if current else b'onememory:data:v1'
                     return (legacy.PREFIX if current else '') + AESGCM(legacy.hkdf(key, None, info)).encrypt(nonce, payload, None).hex()
                 session = dict(vault_version=version, kdf_salt=salt, urk_nonce=nonce.hex(),
@@ -912,6 +916,48 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                         self.assertEqual(committed['keyring_backend'], backend)
                         self.assertEqual(committed['vault_version'], version)
                         self.assertFalse(set(factors) & committed.keys())
+                        if backend == 'native':
+                            config = installation / 'client.json'
+                            config.write_text(json.dumps({'data_dir': str(profile)}), encoding='utf-8')
+                            config_before = config.read_bytes()
+                            env = {'RSRS_DATA_DIR': str(installation), 'RSRS_BIN_DIR': str(installation / 'bin'),
+                                   'RSRS_RUNTIME_BIN': str(installation / 'bin/runtime/dev23/rsrs-runtime')}
+                            keys.keychain = profile / 'synthetic.keychain'
+                            keys._security = Mock(return_value=SimpleNamespace(returncode=0))
+                            def consume(command, *, env, timeout):
+                                self.assertEqual(env['RSRS_DATA_DIR'], str(installation))
+                                self.assertEqual(json.loads(config.read_bytes())['data_dir'], str(profile))
+                                self.assertEqual(env, expected_env)
+                                self.assertEqual(command, ['fixture-cli', '--json', 'show', 'original'])
+                                return SimpleNamespace(returncode=0, stderr=b'', stdout=json.dumps({
+                                    'status': 'ok', 'details': {'entry': {'content': 'original record'}}}).encode())
+                            expected_env = dict(env)
+                            verify = self.helpers['verify_fixture_custody']
+                            with patch.dict(self.helpers, captured_run=consume):
+                                receipt = verify(profile, keys, (alias, version, slots), urk, 'fixture-cli', env)
+                            self.assertEqual(receipt['consumer'], 'cli_authenticated_decryption')
+                            self.assertEqual(config.read_bytes(), config_before)
+                            self.assertEqual(snapshot(profile), current)
+                            for returncode, message in ((1, 'unlock Runtime does not own the selected profile'),
+                                                        (1, 'runtime request belongs to another installation'),
+                                                        (0, 'host session credential read failed'), (1, 'unknown')):
+                                output = SimpleNamespace(returncode=returncode,
+                                    stdout=json.dumps({'status': 'fail', 'errors': [message + ' ' + PASSWORD]}).encode(),
+                                    stderr=(SUPER + ' original record').encode())
+                                with patch.dict(self.helpers, captured_run=Mock(return_value=output)), \
+                                        self.assertRaises(AssertionError) as failed:
+                                    verify(profile, keys, (alias, version, slots), urk, 'fixture-cli', env)
+                                diagnostic = str(failed.exception)
+                                self.assertIn(message if message != 'unknown' else 'unclassified', diagnostic)
+                                self.assertNotIn(PASSWORD, diagnostic)
+                                self.assertNotIn(SUPER, diagnostic)
+                                self.assertNotIn('original record', diagnostic)
+                            config.write_text(json.dumps({'data_dir': str(profile / 'wrong')}), encoding='utf-8')
+                            child = Mock()
+                            with patch.dict(self.helpers, captured_run=child), \
+                                    self.assertRaisesRegex(AssertionError, 'account is not selected'):
+                                verify(profile, keys, (alias, version, slots), urk, 'fixture-cli', env)
+                            child.assert_not_called()
                         self.assertTrue(keys.cleanup()['passed'])
                         self.assertFalse(keys.values)
                         (profile / 'session.json').write_bytes(before[2])
