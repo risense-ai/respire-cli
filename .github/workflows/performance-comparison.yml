@@ -147,7 +147,8 @@ jobs:
           assert.equal(m.source_commit,'7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b');
           assert.equal(m.target_triple??m.triple,process.env.RSRS_RUNTIME_TRIPLE);
           assert.equal(hash(r.release.metadata_json),r.release.metadata_sha256);
-          assert.equal(m.binary_sha256,r.sha256);assert.equal(hash(readFileSync(process.env.NATIVE_RUNTIME_BIN)),r.sha256);
+          const runtime=process.env.RSRS_DATA_DIR+'/bin/runtime/'+r.version+'/rsrs-runtime';
+          assert.equal(m.binary_sha256,r.sha256);assert.equal(hash(readFileSync(runtime)),r.sha256);
           writeFileSync('registration-runtime-identity.json',JSON.stringify({version:r.version,source_sha:m.source_commit,
             target:m.target_triple??m.triple,binary_sha256:r.sha256,metadata_sha256:r.release.metadata_sha256},null,2)+'\n');
           NODE
