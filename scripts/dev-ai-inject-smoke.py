@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -327,6 +328,24 @@ class Smoke:
         self.report["cases"][name] = {"status": "passed", "passed": True, **evidence}
         self.save()
 
+    def wait_index_ready(self):
+        while True:
+            doctor = self.cli("doctor")
+            require(doctor["command"] == "doctor" and doctor["status"] in ("ok", "warn")
+                and not doctor["errors"] and all(item["status"] != "fail" for item in doctor["items"]),
+                "cure_doctor_failed")
+            rows = [item for item in doctor["items"] if item["name"] in ("embedder", "model index")]
+            require(len(rows) == 2 and {item["name"] for item in rows} == {"embedder", "model index"},
+                "cure_index_readiness_missing")
+            index = doctor["details"]["retrieval_index"]
+            require(not index["error"] and index["state"] in ("idle", "scheduled", "running", "ready"),
+                "cure_index_state_invalid")
+            if all(item["status"] == "ok" for item in rows):
+                return
+            require(index["state"] in ("scheduled", "running")
+                and all(item["status"] in ("ok", "warn") for item in rows), "cure_index_not_pending")
+            time.sleep(0.25)
+
     def save(self):
         (self.root / "ai-inject-coverage.json").write_text(json.dumps(self.report, indent=2) + "\n", encoding="utf-8")
 
@@ -577,7 +596,11 @@ class Smoke:
         self.passed("tree_deepen_auto_applied", built=summary["built"], moved=summary["moved"])
         orphan = self.remember("CI detached database recovery", topics[0])
         require(not self.rows()[orphan]["parent"], "cure_fixture_not_orphan")
+        # remember defers indexing; tree-cure returns pending, not attached, until it is ready.
+        self.wait_index_ready()
         result = self.cli("tree-cure", "--auto", "--min", "0.5")
+        self.report["tree_cure_result"] = result
+        require(result["command"] == "tree-cure" and result["status"] == "ok", "cure_not_completed")
         parent = self.rows()[orphan]["parent"]
         require(result["summary"]["attached"] > 0 and parent and parent in self.rows(), "cure_no_persisted_attachment")
         self.cli("show", orphan)

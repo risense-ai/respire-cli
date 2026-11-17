@@ -19,6 +19,56 @@ def execute(nodes, namespace):
 
 
 class SeedReadinessTests(unittest.TestCase):
+    def exercise_ai(self, ready_after=2, missing=False, failure=None):
+        tree = ast.parse(pathlib.Path(__file__).with_name('dev-ai-inject-smoke.py').read_text(encoding='utf-8'))
+        wait = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'wait_index_ready')
+        self.assertEqual(len(wait.args.args), 1)
+        state = {'polls': 0}
+
+        def cli(*command):
+            self.assertEqual(command, ('doctor',))  # No tree-cure write is replayed.
+            state['polls'] += 1
+            if failure == 'command':
+                raise RuntimeError('cli_failed_doctor')
+            ready = state['polls'] >= ready_after
+            doctor = {'command': 'doctor', 'status': 'ok' if ready else 'warn', 'errors': [],
+                      'items': [{'name': name, 'status': 'ok' if ready else 'warn'}
+                                for name in (('embedder',) if missing else ('embedder', 'model index'))],
+                      'details': {'retrieval_index': {'state': 'ready' if ready else 'running', 'error': None}}}
+            if failure == 'status':
+                doctor['status'] = 'fail'
+            elif failure == 'errors':
+                doctor['errors'] = ['actual doctor failure']
+            elif failure == 'item':
+                doctor['items'][0]['status'] = 'fail'
+            elif failure == 'row-status':
+                doctor['items'][0]['status'] = 'unsupported'
+            elif failure in ('failed', 'unsupported', 'paused'):
+                doctor['details']['retrieval_index']['state'] = failure
+            elif failure == 'index-error':
+                doctor['details']['retrieval_index']['error'] = 'index failed'
+            elif failure == 'diagnostic':
+                del doctor['details']['retrieval_index']
+            return doctor
+
+        def require(value, code):
+            if not value:
+                raise RuntimeError(code)
+
+        def sleep(seconds):
+            self.assertIsNone(failure, 'doctor failure must not enter another wait')
+
+        namespace = dict(require=require, time=SimpleNamespace(sleep=sleep))
+        execute([wait], namespace)
+        namespace['wait_index_ready'](SimpleNamespace(cli=cli))
+        run = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'run')
+        statements = [ast.unparse(node) for node in run.body]
+        orphan = next(i for i, text in enumerate(statements) if text.startswith('orphan ='))
+        self.assertEqual(statements[orphan + 2], 'self.wait_index_ready()')
+        self.assertEqual(statements[orphan + 3], "result = self.cli('tree-cure', '--auto', '--min', '0.5')")
+        self.assertIn("result['status'] == 'ok'", statements[orphan + 5])
+        return state
+
     def exercise(self, directory, *, historical=False, runtime=True, artifacts='ready', ready_after=2):
         main = pathlib.Path(directory) / 'main'
         alternate = pathlib.Path(directory) / 'alternate'
@@ -79,6 +129,7 @@ class SeedReadinessTests(unittest.TestCase):
             events = self.exercise(directory)
             self.assertEqual(events, [(event, profile) for profile in ('main', 'alternate')
                                      for event in ('select', 'remember', 'doctor', 'doctor', 'stop')])
+        self.assertEqual(self.exercise_ai()['polls'], 2)
 
     def test_timeout_fails_without_stopping_or_selecting_next_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -93,6 +144,13 @@ class SeedReadinessTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 self.exercise(directory, artifacts='missing')
             self.assertFalse(any(event == 'stop' for event, _ in self.events))
+        with self.assertRaisesRegex(RuntimeError, 'cure_index_readiness_missing'):
+            self.exercise_ai(ready_after=1, missing=True)
+        for failure in ('command', 'status', 'errors', 'item', 'row-status', 'failed', 'unsupported', 'paused', 'index-error'):
+            with self.subTest(failure=failure), self.assertRaises(RuntimeError):
+                self.exercise_ai(failure=failure)
+        with self.assertRaises(KeyError):
+            self.exercise_ai(failure='diagnostic')
 
     def test_empty_actual_artifacts_fail_even_with_ok_doctor(self):
         for artifacts in ('empty-directory', 'empty-file'):
