@@ -968,8 +968,17 @@ def main():
                     command_env["RSRS_SUPER"] = old_super
                 child = subprocess.Popen([str(args.binary), *migration], env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 require(reached.wait(120), "commit_barrier_not_reached")
-                alias = (json.loads(recovery_path.read_bytes()).get("active") or {}).get("alias")
+                # Native credential names belong to the host custody record, not Runtime's recovery alias.
+                active = json.loads(recovery_path.read_bytes())["active"]
+                custody = json.loads((root / "runtime/autostart" / ("account-login-" + active["operation_id"] + ".json")).read_bytes())
+                alias = custody["account"]
+                require(custody["operation_id"] == active["operation_id"]
+                        and alias == "login-" + uuid.UUID(active["operation_id"]).hex
+                        and Path(custody["root"]).resolve() == root.resolve()
+                        and Path(custody["source"]).resolve() == root.resolve(),
+                        "unowned_fixture_login_custody")
                 if keys:
+                    require(custody["backend"] == "secret_service", "native_backend_not_used")
                     require(re.fullmatch(r"login-[a-f0-9]{32}", alias or "") is not None, "native_alias_missing")
                     native_aliases.add(alias)
                 require(json.loads(session.read_bytes())["wrapped_urk"].startswith(legacy.PREFIX)
