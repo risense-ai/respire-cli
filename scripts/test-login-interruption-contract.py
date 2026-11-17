@@ -17,6 +17,10 @@ import tempfile
 import time
 import unittest
 import uuid
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 SOURCE = Path(__file__).with_name('dev-login-interruption-smoke.py').read_text()
 TREE = ast.parse(SOURCE)
@@ -474,6 +478,47 @@ class BarrierContract(unittest.TestCase):
         instance.do_GET()
         instance.reply.assert_called_with(replacement)
         self.assertEqual(state['posts'], 1)
+
+        # Exercise the actual HTTP handler: extra preflight pulls must not move
+        # the failed post-copy push into a later login.
+        scope = dict(BaseHTTPRequestHandler=BaseHTTPRequestHandler, json=json, require=require,
+                     state=state, reached=threading.Event(), release=threading.Event(), v2=None)
+        factory = next(node for node in TREE.body
+                       if isinstance(node, ast.FunctionDef) and node.name == 'account_fixture_handler')
+        exec(compile(ast.Module(body=[factory], type_ignores=[]), '<actual-http-handler>', 'exec'), scope)
+        state.update(sync_blobs={}, sync_pulls=0, transfer_stage='initial_login', transfer_http=[])
+        server = ThreadingHTTPServer(('127.0.0.1', 0), scope['account_fixture_handler'](
+            state, scope['reached'], scope['release']))
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        origin = 'http://127.0.0.1:' + str(server.server_port)
+        push = Request(origin + '/push/batch', data=json.dumps({'items': [
+            {'id': 'synthetic-memory', 'deleted': False}]}).encode(),
+            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+        try:
+            for _ in range(3):
+                with urlopen(origin + '/pull?since=0', timeout=5) as response:
+                    self.assertEqual(json.load(response)['total'], 0)
+            with self.assertRaises(HTTPError) as failure:
+                urlopen(push, timeout=5)
+            self.assertEqual(failure.exception.code, 503)
+            failure.exception.close()
+            self.assertEqual(state['sync_blobs'], {})
+            self.assertEqual(state['transfer_http'][-1], dict(stage='initial_login',
+                method='POST', route='/push/batch', status=503))
+            state['transfer_stage'] = 'retry_login'
+            with urlopen(origin + '/pull', timeout=5) as response:
+                self.assertEqual(json.load(response)['total'], 0)
+            with urlopen(push, timeout=5) as response:
+                self.assertEqual(json.load(response), {'replaced': [True]})
+            with urlopen(origin + '/pull', timeout=5) as response:
+                self.assertEqual(json.load(response)['total'], 1)
+            self.assertTrue(all(event['status'] == 200 for event in state['transfer_http']
+                                if event['stage'] == 'retry_login'))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=5)
 
     def test_timeout_latches_all_observation_and_mutation_endpoints_closed(self):
         main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'account_fixture_handler')
