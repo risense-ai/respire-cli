@@ -14,6 +14,7 @@ jobs:
     env:
       CLI_TARGET: aarch64-unknown-linux-musl
       CLI_VERSION: 2.0.0-dev.19
+      CLI_SHA: 1e6384d213b00975a98998e3331f5b21941da8a1
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
@@ -28,11 +29,35 @@ jobs:
           run-id: 44023793523
           github-token: ${{ github.token }}
           path: candidate-proof
-      - name: Build only the diagnostic musl CLI without Core SDK
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-release-aarch64-unknown-linux-musl
+          run-id: 44033703087
+          github-token: ${{ github.token }}
+          path: original-release
+      - name: Authenticate the exact original release CLI without rebuilding
         run: |
           set -euo pipefail
           node npm/scripts/set-build-version.mjs "$CLI_VERSION"
-          bash scripts/build-linux-musl.sh "$CLI_TARGET" candidate
+          node npm/scripts/extract-artifact.mjs original-release release-cli
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          const metadata = JSON.parse(readFileSync(`original-release/cli-build-${process.env.CLI_TARGET}.json`));
+          assert.equal(metadata.git_sha, process.env.CLI_SHA);
+          assert.equal(metadata.producer.run_id, '44033703087');
+          assert.equal(metadata.producer.run_attempt, 1);
+          assert.equal(metadata.binary_sha256, 'e413dade98813291980856ef2ac20c4758e36a988c1150052a7cc3c524424949');
+          assert.equal(createHash('sha256').update(readFileSync('release-cli/rsrs')).digest('hex'), metadata.binary_sha256);
+          NODE
+          git show "$CLI_SHA:scripts/probe-native-arm64-alpine.sh" > scripts/probe-native-arm64-alpine-original.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('scripts/probe-native-arm64-alpine-original.sh').read_text()
+          assert source.count('inference.json') == 3
+          Path('scripts/probe-native-arm64-alpine-output-only.sh').write_text(source.replace('inference.json', 'model-probe-result.json'))
+          PY
       - name: Reuse the candidate's exact public Runtime inventory
         env:
           GH_TOKEN: ${{ github.token }}
@@ -87,7 +112,7 @@ jobs:
           unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           export HOME="$RUNNER_TEMP/diagnostic-model-home"
           mkdir -p "$HOME"
-          binary="$(realpath target/ci/$CLI_TARGET/debug/rsrs)"
+          binary="$(realpath release-cli/rsrs)"
           export RSRS_RUNTIME_BIN="$(python3 scripts/native_fixture_process.py --install-published "$binary")"
           "$binary" --direct model install-m3 --json > "$RUNNER_TEMP/native-model-inference.json" || {
             status=$?
@@ -107,9 +132,58 @@ jobs:
           assert.equal(proof.selected, 'CPU');
           NODE
           "$binary" --json runtime stop
+          set +e
+          bash scripts/probe-native-arm64-alpine-original.sh "$CLI_TARGET" "$binary" "$RSRS_M3_DIR" \
+            "$RUNNER_TEMP/arm-alpine-original" "$RSRS_RUNTIME_BIN" \
+            "$RSRS_PUBLISHED_RUNTIME_SHA256" "$RSRS_PUBLISHED_RUNTIME_VERSION"
+          original_status=$?
+          set -e
+          test "$original_status" -ne 0
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'arm-alpine-original/inference.json').read_text())
+          assert result['status'] == 'fail'
+          assert any('private Runtime model plan was rejected' in error for error in result['errors'])
+          print('PASS: original release CLI and original probe reproduce the private model plan rejection')
+          PY
+          set +e
+          bash scripts/probe-native-arm64-alpine-output-only.sh "$CLI_TARGET" "$binary" "$RSRS_M3_DIR" \
+            "$RUNNER_TEMP/arm-alpine-output-only" "$RSRS_RUNTIME_BIN" \
+            "$RSRS_PUBLISHED_RUNTIME_SHA256" "$RSRS_PUBLISHED_RUNTIME_VERSION"
+          output_only_status=$?
+          set -e
+          test "$output_only_status" -ne 0
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'arm-alpine-output-only/model-probe-result.json').read_text())
+          assert result['status'] == 'fail'
+          assert any('Read-only file system (os error 30)' in error for error in result['errors'])
+          print('PASS: original release CLI and output-only correction expose the read-only installation target')
+          PY
           bash scripts/probe-native-arm64-alpine.sh "$CLI_TARGET" "$binary" "$RSRS_M3_DIR" \
             "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" \
             "$RSRS_PUBLISHED_RUNTIME_SHA256" "$RSRS_PUBLISHED_RUNTIME_VERSION"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync, writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+          const proof = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/arm-alpine-probe/model-probe-result.json`));
+          assert.equal(proof.status, 'ok');
+          const cli = hash('release-cli/rsrs');
+          assert.equal(cli, 'e413dade98813291980856ef2ac20c4758e36a988c1150052a7cc3c524424949');
+          assert.equal(hash(process.env.RSRS_RUNTIME_BIN), process.env.RSRS_PUBLISHED_RUNTIME_SHA256);
+          writeFileSync(`${process.env.RUNNER_TEMP}/release-alpine-comparison.json`, JSON.stringify({
+            cli_source: process.env.CLI_SHA, cli_run: 44033703087, cli_sha256: cli,
+            runtime_version: process.env.RSRS_PUBLISHED_RUNTIME_VERSION,
+            runtime_sha256: process.env.RSRS_PUBLISHED_RUNTIME_SHA256,
+            original_probe_sha256: hash('scripts/probe-native-arm64-alpine-original.sh'),
+            fixed_probe_sha256: hash('scripts/probe-native-arm64-alpine.sh'),
+            original_failed_as_expected: true, output_only_failed_read_only: true, fixed_passed: true,
+          }, null, 2));
+          NODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -117,4 +191,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-model-inference.json
             ${{ runner.temp }}/arm-alpine-probe/model-probe-result.json
+            ${{ runner.temp }}/arm-alpine-original/inference.json
+            ${{ runner.temp }}/arm-alpine-output-only/model-probe-result.json
+            ${{ runner.temp }}/release-alpine-comparison.json
           if-no-files-found: warn
