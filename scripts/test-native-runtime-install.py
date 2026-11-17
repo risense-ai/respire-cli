@@ -85,6 +85,11 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('OS registration acceptance is limited to an ephemeral GitHub-hosted runner', result.stderr)
         source = (scripts / 'test-runtime-autostart.py').read_text(encoding='utf-8')
+        supervisor = (scripts.parent / 'cli/src/autostart/supervise.rs').read_text(encoding='utf-8')
+        for variable in ('HOME', 'USERPROFILE'):
+            restore = f'std::env::set_var("{variable}", &config.user_home);'
+            self.assertLess(supervisor.index('lifecycle::owned(&config)?;'), supervisor.index(restore))
+            self.assertLess(supervisor.index(restore), supervisor.index('lifecycle_io::migrate_legacy_session()?;'))
         self.assertLess(source.index('assert not root.exists()'), source.index('        foreground(False)'))
         self.assertLess(source.index('        foreground(False)'), source.index('        seed_local_credentials(binary, env, keys, root)'))
         self.assertLess(source.index('        seed_local_credentials(binary, env, keys, root)'), source.index('        health = foreground(True)'))

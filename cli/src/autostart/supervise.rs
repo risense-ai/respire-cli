@@ -91,6 +91,9 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     for (key, value) in &config.environment {
         std::env::set_var(key, value);
     }
+    // OS-launched hosts must use the registered home's native credential store.
+    std::env::set_var("HOME", &config.user_home);
+    std::env::set_var("USERPROFILE", &config.user_home);
     // Runtime commands bypass the normal CLI bootstrap. Initialize only after
     // the registration has established this supervisor's owned data root.
     super::super::install_error_logging();
