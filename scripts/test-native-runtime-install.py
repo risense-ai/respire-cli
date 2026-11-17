@@ -348,12 +348,16 @@ class FixtureInstallationTests(unittest.TestCase):
                               'dbus-user-session dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3',
                               'sudo loginctl enable-linger "$(id -un)"', 'sudo systemctl restart "user@$uid.service"',
                               'sudo systemctl is-active --quiet "user@$uid.service"',
+                              'systemctl --user start dbus.service',
+                              'systemctl --user is-active --quiet dbus.socket dbus.service',
                               "stat -c '%u:%a'", 'test -S "$XDG_RUNTIME_DIR/bus"',
                               "NameHasOwner s org.freedesktop.systemd1)",
                               "GetConnectionUnixUser s org.freedesktop.systemd1)",
                               "= 'b true'", '= "u $uid"', '"DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"'):
                     self.assertIn(proof, preparation)
                 self.assertNotIn('dbus-run-session', preparation)
+                self.assertLess(preparation.index('systemctl --user start dbus.service'),
+                                preparation.index('NameHasOwner s org.freedesktop.systemd1)'))
                 self.assertLess(product.index('Prepare hosted Linux credentials and user systemd'), product.index('Build the current native CLI'))
                 matrix = re.search(r'        include: \$\{\{ (.+) \}\}', product)[1]
             programs.append({'target': 'x86_64-pc-windows-msvc' if product_job == 'startup'

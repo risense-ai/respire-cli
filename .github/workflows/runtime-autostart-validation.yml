@@ -83,6 +83,12 @@ jobs:
           test ! -L "$XDG_RUNTIME_DIR/bus"
           test -S "$XDG_RUNTIME_DIR/bus"
           test "$(stat -c '%u' "$XDG_RUNTIME_DIR/bus")" = "$uid"
+          # user@ readiness covers basic.target, not the socket-activated API bus.
+          systemctl --user show dbus.socket dbus.service -p Id -p ActiveState -p SubState -p MainPID -p Listen
+          systemctl --user start dbus.service
+          systemctl --user is-active --quiet dbus.socket dbus.service
+          systemctl --user show dbus.socket dbus.service -p Id -p ActiveState -p SubState -p MainPID -p Listen
+          sudo journalctl -b -u "user@$uid.service" --no-pager
           test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = 'b true'
           test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
           printf '%s\n' "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
