@@ -159,7 +159,8 @@ def serve(args):
     lock = threading.Lock()
     state = {"mode": "idle", "operation_id": None, "apply_ids": [], "result_ids": [],
              "dropped_apply_replies": 0, "result_issued": 0, "result_forwarded": 0,
-             "result_response_lost": 0, "errors": [], "core_test_mode": False, "scope": scope}
+             "result_response_lost": 0, "errors": [], "core_test_mode": False, "scope": scope,
+             "apply_fusion": None, "effective_fusion": None}
     nonce = secrets.token_hex(32)
 
     def verify_owner():
@@ -170,7 +171,8 @@ def serve(args):
     def snapshot():
         return {key: json.loads(json.dumps(state[key])) for key in (
             'operation_id', 'apply_ids', 'result_ids', 'result_issued', 'result_forwarded',
-            'result_response_lost', 'dropped_apply_replies', 'errors', 'core_test_mode', 'scope')}
+            'result_response_lost', 'dropped_apply_replies', 'errors', 'core_test_mode', 'scope',
+            'apply_fusion', 'effective_fusion')}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -223,6 +225,10 @@ def serve(args):
                     if apply:
                         require(not state["apply_ids"] and state["mode"] == "lose_reply", "Unexpected/replayed apply")
                         require(rpc["scope"] == scope, "Apply scope differs from Runtime owner")
+                        candidate = json.loads(rpc["args"][0])["candidate"]
+                        require(candidate["recall_fusion"]["fusion"] == "attention",
+                                "Real GUI did not select attention fusion")
+                        state["apply_fusion"] = candidate["recall_fusion"]["fusion"]
                         state["operation_id"] = rpc["operation_id"]
                         state["apply_ids"].append(rpc["operation_id"])
                     if result:
@@ -258,7 +264,12 @@ def serve(args):
                     require(status == 200 and value["ok"] is True
                             and value["id"] == rpc["operation_id"] and value["scope"] == scope,
                             "Real Runtime did not successfully apply the original request")
+                    summary = value["envelope"]["summary"]
+                    require(summary["state"] == "applied" and summary["candidate"] == candidate
+                            and summary["effective"]["recall_fusion"]["fusion"] == "attention",
+                            "Real Runtime did not apply the selected attention fusion")
                     with lock:
+                        state["effective_fusion"] = summary["effective"]["recall_fusion"]["fusion"]
                         state["dropped_apply_replies"] += 1
                         state["mode"] = "drop_results"
                     self.close_reply()

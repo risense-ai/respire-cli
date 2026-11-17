@@ -207,14 +207,37 @@ foreach ($step in $ordering) {
 }
 if ($handler.Substring(0,$handler.IndexOf('connection.request(self.command')).Contains('self.close_reply()')) { throw 'Result is cut off before real forwarding' }
 $snapshot = [regex]::Match($forwarder,'(?s)    def snapshot\(\):.*?(?=    class Handler)').Value
-foreach ($field in @('result_issued','result_forwarded','result_response_lost','operation_id','scope')) {
+foreach ($field in @('result_issued','result_forwarded','result_response_lost','operation_id','scope','apply_fusion','effective_fusion')) {
     if (-not $snapshot.Contains("'$field'")) { throw 'Public result proof counter/identity is missing' }
 }
 if ($snapshot.Contains('nonce') -or $snapshot.Contains('owner') -or $snapshot.Contains('json.dumps(state)')) { throw 'Proxy proof serializes private state wholesale' }
 $nativeSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')
+$coreIssue = [regex]::Match($nativeSource,"(?s)if \(\`$binding.core_query.phase -ceq 'core-issue'\) \{.*?(?=\} elseif)").Value
+if (-not $coreIssue -or $coreIssue.Contains('GetCurrentPattern(') -or $coreIssue.Contains('0x0D')) {
+    throw 'Core select must use one explicit keyboard route without pattern fallback or Enter submit'
+}
+$last=-1
+foreach ($step in @('Focus-OfflineControl $combo', 'Send-OfflineKey 0x24 $comboId', 'Send-OfflineKey 0x28 $comboId',
+    'Send-OfflineKey 0x09 $comboId', "Read-CoreQueryControl 'lose_reply'", '$prepared.pattern.Invoke()')) {
+    $index=$coreIssue.IndexOf($step)
+    if ($index -le $last) { throw 'Core select keyboard/one-save order or original-focus guard changed' }
+    $last=$index
+}
+foreach ($step in @('candidate["recall_fusion"]["fusion"] == "attention"', 'summary["candidate"] == candidate',
+    'summary["effective"]["recall_fusion"]["fusion"] == "attention"')) {
+    if (-not $handler.Contains($step) -or $handler.IndexOf($step) -ge $handler.LastIndexOf('self.close_reply()')) {
+        throw 'Real candidate/effective fusion must be checked before losing the apply response'
+    }
+}
+foreach ($step in @('supported_patterns', 'call_site', 'failure_script_line', 'Read-CoreQueryControl -FailureEvidence')) {
+    if (-not $nativeSource.Contains($step)) { throw 'Core issue failure diagnostics are missing' }
+}
 if ($nativeSource.Contains('$binding.core_query.nonce') -or -not $nativeSource.Contains('$script:coreQueryControl.nonce') -or
     -not $nativeSource.Contains("throw 'Forwarding proof has non-public fields'")) { throw 'Native control/private-proof separation changed' }
 $workflow = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../.github/workflows/client2-core-query-diagnostic.yml')
+foreach ($image in @('workspace.png','core-selection.png')) {
+    if (-not $workflow.Contains('/core-query-gui/' + $image)) { throw 'Exact safe core query screenshot upload is missing' }
+}
 foreach ($private in @('native-binding.json','core-query-proxy-ready.json','core-query-gui/**','core-query-gui/*')) {
     if ($workflow.Contains($private)) { throw 'Diagnostic upload includes private fixture control files' }
 }
