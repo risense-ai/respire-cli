@@ -279,9 +279,14 @@ class AliasTests(unittest.TestCase):
                             raise RuntimeError('auth_failed')
                         keys.created(ALIAS, None)
                         keys.values['rsrs', 'legacy-secret:' + ALIAS] = factor
-                        smoke.write_session(env, dict(user=USER, keyring_account=ALIAS, token='fixture-token',
-                            vault_version=1, keyring_backend='native', legacy_secret_backend='native'))
-                        return {'summary': {'ok': True}}
+                        target = Path(env['RSRS_DATA_DIR']) / 'accounts' / 'fixture-account'
+                        target.mkdir(parents=True)
+                        (Path(env['RSRS_DATA_DIR']) / 'client.json').write_text(
+                            json.dumps({'data_dir': str(target)}), encoding='utf-8')
+                        smoke.write_session(dict(env, RSRS_DATA_DIR=str(target)), dict(user=USER,
+                            keyring_account=ALIAS, token='fixture-token', vault_version=1,
+                            keyring_backend='native', legacy_secret_backend='native'))
+                        return {'summary': {'ok': True, 'dir': str(target)}}
 
                     smoke.cli = cli
                     scope = dict(self=smoke, version=1, user=USER, password=PASSWORD,
@@ -296,8 +301,22 @@ class AliasTests(unittest.TestCase):
                             self.assertEqual(keys.entries, {('rsrs', 'pass:' + ALIAS), ('rsrs', 'legacy-secret:' + ALIAS)})
                     self.assertTrue(keys.cleanup()['passed'])
                     self.assertFalse(keys.values)
-                    session_path = Path(scope[variable]['RSRS_DATA_DIR']) / 'session.json'
+                    root = Path(scope[variable]['RSRS_DATA_DIR'])
+                    session_path = smoke.profile(scope[variable]) / 'session.json'
+                    if not fails:
+                        self.assertNotEqual(session_path.parent, root)
+                        self.assertFalse((root / 'session.json').exists())
                     session_path.write_text('{', encoding='utf-8')
+                    with self.assertRaises(json.JSONDecodeError):
+                        smoke.session(scope[variable])
+                    config_path = root / 'client.json'
+                    for selected, failure_code in ((str(root.parent), 'login_profile_selection_outside_fixture'),
+                                                   ('', 'login_profile_selection_invalid'),
+                                                   (None, 'login_profile_selection_invalid')):
+                        config_path.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
+                        with self.assertRaisesRegex(RuntimeError, '^' + failure_code + '$'):
+                            smoke.session(scope[variable])
+                    config_path.write_text('{', encoding='utf-8')
                     with self.assertRaises(json.JSONDecodeError):
                         smoke.session(scope[variable])
 
@@ -361,8 +380,13 @@ class AliasTests(unittest.TestCase):
                         if committed:
                             keys.created(ALIAS)
                             keys.values['rsrs', 'legacy-secret:' + ALIAS] = factor
-                            smoke.write_session(env, dict(user=USER, keyring_account=ALIAS, token='fixture-token',
-                                vault_version=3, keyring_backend='native', legacy_secret_backend='native'))
+                            target = Path(env['RSRS_DATA_DIR']) / 'accounts' / 'fixture-account'
+                            target.mkdir(parents=True)
+                            (Path(env['RSRS_DATA_DIR']) / 'client.json').write_text(
+                                json.dumps({'data_dir': str(target)}), encoding='utf-8')
+                            smoke.write_session(dict(env, RSRS_DATA_DIR=str(target)), dict(user=USER,
+                                keyring_account=ALIAS, token='fixture-token', vault_version=3,
+                                keyring_backend='native', legacy_secret_backend='native'))
                         exit_code = 1 if failure == 'auth' else 2 if failure == 'pending' else 0
                         if failure in ('auth', 'pending'):
                             envelope.update(status='fail' if failure == 'auth' else 'pending',
@@ -411,24 +435,32 @@ class AliasTests(unittest.TestCase):
 
     def test_committed_session_tracked_even_when_post_auth_checks_fail(self):
         for reason in ('fixture_tty_missing_prompt', 'invalid_cli_json_login', 'owned_runtime_stop_failed'):
-            keys = MemoryKeys()
-            smoke = object.__new__(legacy.Smoke)
-            smoke.keys = keys
-            current = {'user': USER}
-            def cli(*args, **kwargs):
-                keys.created(ALIAS)
-                current.update(keyring_account=ALIAS, token='synthetic-token')
-                raise RuntimeError(reason)
-            smoke.cli = cli
-            smoke.session = lambda env: dict(current)
-            with self.assertRaisesRegex(RuntimeError, '^' + reason + '$'):
-                smoke.password_login({}, USER, PASSWORD, 2, SUPER)
-            self.assertEqual(keys.entries, {('rsrs', 'super:' + ALIAS), ('rsrs', 'pass:' + ALIAS)})
-            report = keys.cleanup()
-            self.assertTrue(report['passed'])
-            self.assertFalse(keys.values)
-            for secret in (PASSWORD, SUPER, ALIAS, USER):
-                self.assertNotIn(secret, json.dumps(report))
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as td:
+                keys = MemoryKeys()
+                smoke = object.__new__(legacy.Smoke)
+                smoke.keys = keys
+                root = Path(td)
+                env = {'RSRS_DATA_DIR': str(root)}
+
+                def cli(*args, **kwargs):
+                    keys.created(ALIAS)
+                    target = root / 'accounts' / 'fixture-account'
+                    target.mkdir(parents=True)
+                    (root / 'client.json').write_text(json.dumps({'data_dir': str(target)}), encoding='utf-8')
+                    smoke.write_session(dict(env, RSRS_DATA_DIR=str(target)),
+                        dict(user=USER, keyring_account=ALIAS, token='synthetic-token'))
+                    raise RuntimeError(reason)
+
+                smoke.cli = cli
+                with self.assertRaisesRegex(RuntimeError, '^' + reason + '$'):
+                    smoke.password_login(env, USER, PASSWORD, 2, SUPER)
+                self.assertFalse((root / 'session.json').exists())
+                self.assertEqual(keys.entries, {('rsrs', 'super:' + ALIAS), ('rsrs', 'pass:' + ALIAS)})
+                report = keys.cleanup()
+                self.assertTrue(report['passed'])
+                self.assertFalse(keys.values)
+                for secret in (PASSWORD, SUPER, ALIAS, USER):
+                    self.assertNotIn(secret, json.dumps(report))
 
     def test_failed_login_does_not_claim_unchanged_alias_or_partial_session(self):
         for original, after in (({'user': USER, 'keyring_account': ALIAS, 'token': 'old'},

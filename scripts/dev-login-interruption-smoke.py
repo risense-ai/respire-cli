@@ -273,6 +273,21 @@ def terminal_operation(journal, record, outcome):
             "original_terminal_receipt_missing")
 
 
+def login_terminal_operation(journal, record, summary, session_bytes):
+    # Host custody replaces the admission alias with the committed candidate alias.
+    session = json.loads(session_bytes)
+    alias = session.get("keyring_account")
+    sha256 = hashlib.sha256(session_bytes).hexdigest()
+    rows = [row for row in journal["operations"] if row["operation_id"] == record["operation_id"]]
+    require(isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias)
+            and summary.get("session_sha256") == sha256 and len(rows) == 1
+            and rows[0].get("candidate_sha256") == sha256
+            and rows[0]["account"].get("target") == summary["target_profile"]
+            and all(session.get(key) == record["account"][key] == rows[0]["account"][key]
+                    for key in ("user", "addr")), "original_terminal_receipt_missing")
+    terminal_operation(journal, dict(record, alias=alias), "committed")
+
+
 def login_continuation_receipt(summary, operation_id, source, addr, outcome):
     require(summary.get("operation_id") == operation_id
             and summary.get("source_profile") == str(source.resolve())
@@ -380,7 +395,7 @@ def host_key_continuation(binary, directory, env, state, addr, code, keys, sourc
     require(session_path.read_bytes() == original_session
             and (state["logins"], state["posts"], state["password_posts"]) == effects,
             "key_continuation_effects_mismatch")
-    journal_path = source / ".login-recovery.json"
+    journal_path = Path(env["RSRS_DATA_DIR"]) / ".login-recovery.json"
     pending_journal = journal_path.read_bytes()
 
     def query(expected_exit, outcome):
@@ -539,10 +554,10 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
         require(continue_transport != initial_transport and continue_transport != operation_id,
                 "login_continuation_transport_mismatch")
         login_continuation_receipt(committed, operation_id, source, addr, "committed")
-        terminal_operation(json.loads(journal_path.read_bytes()), record, "committed")
         target = Path(committed["target_profile"])
-        require(target.resolve().is_relative_to(directory.resolve()), "login_continuation_target_escaped")
+        require(target.resolve().is_relative_to(source.resolve()), "login_continuation_target_escaped")
         session_path = target / "session.json"
+        login_terminal_operation(json.loads(journal_path.read_bytes()), record, committed, session_path.read_bytes())
         saved = session_path.read_bytes(), journal_path.read_bytes()
         observation["stage"] = "recover_committed_original"
         login_continuation_receipt(query(0), operation_id, source, addr, "committed")
