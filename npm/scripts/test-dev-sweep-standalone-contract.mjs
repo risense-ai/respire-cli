@@ -19,12 +19,12 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const callRuntime="      runtime_sha:\n        required: false\n        type: string\n";
   const header=workflow.split('jobs:\n')[0];
   for(const input of [dispatchInput,callInput,dispatchRuntime,callRuntime])assert(header.includes(input));
-  assert.equal(hash(header.replace(dispatchInput,'').replace(callInput,'').replace(dispatchRuntime,'').replace(callRuntime,'')),'251cbc82190bc45915963d50bc3ecd83cb1e4bfe72f9bed86ee33faf0b2c347a');
+  assert.equal(hash(header.replace(dispatchInput,'').replace(callInput,'').replace(dispatchRuntime,'').replace(callRuntime,'')),'e22044c490d5efe81a4fdddd47d146b565302d1cecd112ee09aeb6115e65037b');
   assert.equal(hash(step('Verify the original release build')),'c07d866f172e6c28e49889fc0f3d8d5fa1ad6bf9ecb26724e4db35d2e2bbabfe');
   assert.equal(hash(step('Verify and extract the original binary')),'2cf493f2afd7eae32aa0f49ec56815a50dffafb00d64015d38b0b8a2c10ecc8b');
   const api=workflow.split('\n  api-smoke:\n')[1];
-  assert(api.includes('if: ${{ !inputs.auth_salt_only && !inputs.business_only }}'));
-  assert.equal(hash(api.replace('if: ${{ !inputs.auth_salt_only && !inputs.business_only }}','if: ${{ !inputs.auth_salt_only }}')),'88aebc2bef3afed3d4426e2aa9fcffb3ecad36bd973084af62af28284c732718');
+  assert(api.includes('if: ${{ !inputs.database_sync_only && !inputs.business_only }}'));
+  assert.equal(hash(api.replace('if: ${{ !inputs.database_sync_only && !inputs.business_only }}','if: ${{ !inputs.database_sync_only }}')),'f5f71f1f9d8e808add8ee4143b67b8b6c070099887bc4a2216cb9c7dec96402b');
   assert.match(workflow,/required=\[\.\.\.m.targets.map\(t=>`Release \(\$\{t.triple\}\)`\),'npm-dry-run'\]/);
   assert.match(workflow,/run.head_sha!==sha/);
   assert.match(workflow,/j.conclusion==='success'/);
@@ -35,7 +35,7 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const evaluate=(line,inputs)=>runInNewContext(expression(line),{inputs,cancelled:()=>false,
     runner:{os:'Linux'},matrix:{target:'x86_64-unknown-linux-musl'},steps:{supplement_python:{outcome:'success'},standalone_runtime:{outcome:'success'},native_credentials:{outcome:'success'}}});
   const job=name=>workflow.split(`\n  ${name}:\n`)[1].split('\n')[0];
-  const normal={api_only:false,local_api_only:false,auth_salt_only:false,business_only:false};
+  const normal={api_only:false,local_api_only:false,database_sync_only:false,business_only:false};
   const business={...normal,business_only:true};
   assert.equal(evaluate(job('sweep'),normal),true);assert.equal(evaluate(job('api-smoke'),normal),true);
   assert.equal(evaluate(job('sweep'),business),true);assert.equal(evaluate(job('api-smoke'),business),false);
@@ -47,7 +47,7 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const guards=[...step('Require the approved development server').matchAll(/node -e '([^']+)'/g)].slice(0,3).map(m=>m[1]);
   assert.equal(guards.length,3);
   for(let mask=0;mask<16;mask++){
-    const env=Object.fromEntries(['API_ONLY','LOCAL_API_ONLY','AUTH_SALT_ONLY','BUSINESS_ONLY'].map((name,i)=>[name,String(Boolean(mask&(1<<i)))]));
+    const env=Object.fromEntries(['API_ONLY','LOCAL_API_ONLY','DATABASE_SYNC_ONLY','BUSINESS_ONLY'].map((name,i)=>[name,String(Boolean(mask&(1<<i)))]));
     const run=()=>guards.forEach(body=>runInNewContext(body,{process:{env}}));
     if(Object.values(env).filter(v=>v==='true').length>1)assert.throws(run,/Choose one diagnostic scope/);
     else assert.doesNotThrow(run);
@@ -86,11 +86,11 @@ test('standalone identity precedes credentials and every dependent fixture is fa
   assert.match(binding,/steps.supplement_python.outcome == 'success'/);
   assert.match(binding,/RSRS_DATA_DIR: \$\{\{ runner.temp \}\}\/diagnostic-runtime-proof/);
   assert.match(binding,/node scripts\/ci-install-pinned-runtime.mjs "\$exe"/);
-  for(const name of ['Sweep the exact CI binary','Verify all supplementary CLI contracts','Verify historical Secret Service profile migration','Verify native encrypted profile migration','Verify real legacy authentication salt migration','Diagnose runtime contracts without a full release claim']){
+  for(const name of ['Sweep the exact CI binary','Verify all supplementary CLI contracts','Verify historical Secret Service profile migration','Verify native encrypted profile migration','Verify migrated legacy ciphertext on an independent current device','Diagnose runtime contracts without a full release claim']){
     const condition=step(name).split('\n')[0];
     assert(condition.includes("steps.standalone_runtime.outcome == 'success'"),name);
     assert(condition.includes("runner.os != 'Linux' || steps.native_credentials.outcome == 'success'"),name);
-    const evaluate=(runtime,credentials,os='Linux')=>runInNewContext(condition.slice(condition.indexOf('${{')+3,condition.lastIndexOf('}}')),{cancelled:()=>false,inputs:{local_api_only:name.startsWith('Diagnose'),auth_salt_only:name.startsWith('Verify real')},runner:{os},steps:{standalone_runtime:{outcome:runtime},native_credentials:{outcome:credentials},supplement_python:{outcome:'success'}}});
+    const evaluate=(runtime,credentials,os='Linux')=>runInNewContext(condition.slice(condition.indexOf('${{')+3,condition.lastIndexOf('}}')),{cancelled:()=>false,inputs:{local_api_only:name.startsWith('Diagnose'),database_sync_only:name.startsWith('Verify migrated')},runner:{os},steps:{standalone_runtime:{outcome:runtime},native_credentials:{outcome:credentials},supplement_python:{outcome:'success'}}});
     for(const runtime of ['failure','skipped','cancelled']) assert.equal(evaluate(runtime,'success'),false,name);
     for(const credentials of ['failure','skipped','cancelled']) assert.equal(evaluate('success',credentials),false,name);
     if(name!=='Verify native encrypted profile migration')assert.equal(evaluate('success','success'),true,name);

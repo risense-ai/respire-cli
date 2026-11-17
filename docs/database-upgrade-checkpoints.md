@@ -90,3 +90,35 @@ Registry/unit checks and source comparisons cannot substitute for real native
 database-upgrade reports. The older dev.10 references
 in `runtime.md` and `release-validation.md` describe the previous registry;
 this document records the replacement set and its integration boundary.
+
+## Release supplement: legacy ciphertext synchronization
+
+The `legacy_vault` report filename and suite identifier remain stable, but the
+default `dev-legacy-vault-smoke.py` release case is `legacy_ciphertext_sync`.
+It registers a current disposable account, retains its original URK and current
+vault, and encodes an active record and an encrypted tombstone in the historical
+`onememory:data:v1` domain. The existing public migration must convert these
+records without changing plaintext, deletion state or the original source.
+The upgraded profile must push the converted records to the real DEV server;
+an independent current device logs in through host RPC, pulls them, decrypts
+the active record, and reads back its exact ciphertext. Before synchronization,
+the migrated tombstone must still decrypt with the original URK. On the independent
+device, both the received head and the local record must contain the same ID,
+`deleted=true` and empty ciphertext/nonce, matching the current server's
+content-free tombstone protocol. Missing deletion records fail. Both cloud
+accounts and fixture-owned native credentials must be cleaned up.
+
+The final release no longer runs the old v1/v2/v3 authentication combinations,
+changes server authentication salts, or requires old session/credential locations
+and fixed TTY prompt sequences. The old `--auth-salt-only` script option remains
+an explicit manual diagnostic, outside the final gate; the focused workflow input
+is now `database_sync_only`. Current login transaction, continuation, wrong-key,
+identity and credential cleanup checks remain independent requirements. No failed
+or unknown login is retried to obtain a passing result.
+
+This supplement exercises genuine legacy encryption with synthetic records in
+the current schema. It complements, and does not replace, the formal/DEV schema
+checkpoints above. It does not change their `post_upgrade_sync_checked: false`
+reports or claim that every historical schema has completed remote sync. A green
+unit test or the presence of this fixture is not evidence that its real network
+execution passed; acceptance requires the exact candidate's successful report.

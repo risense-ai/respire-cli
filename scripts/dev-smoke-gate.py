@@ -15,8 +15,7 @@ AI = {"model_cpu_real", "inject_preview_install_remove", "inject_stale_revision_
       "classify_save_provider_contract", "classify_tree_provider_contract",
       "classify_causal_plan", "classify_auto_applied", "tree_deepen_go_applied",
       "tree_deepen_auto_applied", "tree_cure_auto_applied"}
-LEGACY = {"model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade",
-          "cloud_v3_secret_key_recovery_upgrade"}
+LEGACY = {"model_cpu_real", "legacy_ciphertext_sync"}
 MIGRATION = {"model_cpu_real", "onememory_multiaccount_wal_migrated", "respire_compatibility_migrated",
              "legacy_db_with_explicit_current_credentials", "explicit_dev_endpoint_preserved",
              "migration_repeated_start_idempotent", "migration_interrupted_restart_recovered",
@@ -130,7 +129,17 @@ def verify(args, result):
     identity(legacy, args)
     require(legacy.get("passed") is True and not legacy.get("missing_cases"), "legacy_vault_incomplete")
     cases(legacy, LEGACY, "legacy_vault_required_cases_missing")
+    require(legacy.get("scope") == "historical_ciphertext_sync"
+            and set(legacy.get("required_cases", [])) == LEGACY, "legacy_database_scope_mismatch")
+    database_sync = legacy["cases"]["legacy_ciphertext_sync"]
+    require(all(database_sync.get(field) is True for field in ("urk_preserved", "original_source_preserved",
+            "old_content_decrypted", "ciphertext_reencrypted", "encrypted_tombstone_preserved",
+            "migrated_push", "independent_device_pull_decrypted", "current_host_login", "remote_tombstone_propagated"))
+            and database_sync.get("remote_tombstone_content") == "canonical_empty",
+            "legacy_database_sync_not_proven")
     require(legacy.get("cloud_cleanup", {}).get("passed") is True, "legacy_vault_cleanup_failed")
+    require(legacy.get("keyring_cleanup", {}).get("passed") is True
+            and not legacy.get("keyring_cleanup", {}).get("remaining_entries"), "legacy_keyring_cleanup_failed")
     result["components"]["legacy_vault"] = {"passed": True, "required_observed": len(LEGACY)}
 
     runtime = read(args.runtime)

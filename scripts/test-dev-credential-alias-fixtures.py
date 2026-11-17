@@ -1165,6 +1165,24 @@ class OriginalFactorTests(unittest.TestCase):
                      'full_migration_not_reencrypted', 'old_authentication_hash_still_accepted'):
             self.assertIn(code, legacy_text)
         self.assertIn('authorization_fallback_and_absent_native_store_not_tested', legacy_text)
+        database = next(node for node in ast.walk(ast.parse(legacy_text))
+            if isinstance(node, ast.FunctionDef) and node.name == 'database_sync')
+        tombstone = next(node for node in ast.walk(database) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == 'require'
+            and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == 'new_device_tombstone_not_propagated')
+        assertion = compile(ast.Expression(tombstone), '<remote-tombstone-contract>', 'eval')
+        head = {'id': 'deleted-fixture', 'deleted': True, 'ciphertext': '', 'nonce': ''}
+        scope = dict(require=legacy.require, deleted='deleted-fixture',
+            observed={'deleted-fixture': ('deleted-fixture', '', '', 1)}, heads={'deleted-fixture': head})
+        eval(assertion, scope)
+        for wrong in ({}, dict(head, deleted=False), dict(head, id='unrelated'),
+                      dict(head, ciphertext='stale'), dict(head, nonce='stale')):
+            with self.subTest(tombstone=wrong):
+                with self.assertRaisesRegex(RuntimeError, '^new_device_tombstone_not_propagated$'):
+                    eval(assertion, dict(scope, heads={'deleted-fixture': wrong}))
+        with self.assertRaisesRegex(RuntimeError, '^new_device_tombstone_not_propagated$'):
+            eval(assertion, dict(scope, observed={}))
         tree = ast.parse(profile_text)
         case = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'case')
         body = ast.unparse(case)
