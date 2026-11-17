@@ -87,16 +87,6 @@ jobs:
           bash scripts/ci-apt-get.sh update
           bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
-          echo "key=$(python3 scripts/native-model-cache.py key)" >> "$GITHUB_OUTPUT"
-        id: models
-      - uses: actions/cache/restore@v4
-        with:
-          path: .native-model-cache
-          key: ${{ steps.models.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Verify and restore only pinned public model files
-        run: python3 scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/models/bge-m3" --legacy-dir "$RUNNER_TEMP/unused-legacy-model"
       - name: Run existing contracts and the isolated loopback interruption fixture
         run: |
           set -euo pipefail
