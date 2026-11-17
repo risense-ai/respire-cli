@@ -858,9 +858,12 @@ pub(crate) fn resume_key_maintenance(
     resume_key_maintenance_inner(root, profile, source, token, coordinator, false)
 }
 
-pub(crate) fn pending_agent_config(root: &Path) -> Result<Option<(respire_protocol::config_control::AgentConfigMaintenance, String, String)>> {
+pub(crate) fn pending_agent_config(root: &Path, query: bool) -> Result<Option<(respire_protocol::config_control::AgentConfigMaintenance, String, String)>> {
     let Some(marker) = marker(root)? else { return Ok(None); };
-    let record = marker.agent_config.context("finish existing maintenance before agent config")?;
+    let Some(record) = marker.agent_config else {
+        anyhow::ensure!(query, "finish existing maintenance before agent config");
+        return Ok(None);
+    };
     Ok(Some((serde_json::from_value(record)?, marker.token, marker.id)))
 }
 
@@ -2558,14 +2561,23 @@ mod tests {
         let result = crate::autostart::control_agent_config("diary_mode=verbose")?;
         assert!(matches!(result.status, respire_commands::output::Status::Ok));
         assert!(!marker_path(&root).exists() && !root.join("bin").exists() && !root.join("rsrs.db").exists());
+        let mut terminal_core = None;
         for intent in ["read_heat=false", "read_heat=true", "recall_fusion={\"fusion\":\"attention\"}"] {
             let saved = crate::autostart::control_agent_config(intent)?;
             assert!(matches!(saved.status, respire_commands::output::Status::Ok));
             assert_eq!(saved.summary["core_application"]["state"], "pending");
             assert_eq!(saved.summary["core_application"]["reason"], "runtime_not_running");
             assert!(!marker_path(&root).exists() && !root.join("bin").exists());
+            terminal_core = Some(saved);
         }
+        let terminal_core = terminal_core.context("terminal core receipt missing")?;
+        let request_a = format!("desktop-{}", terminal_core.details["operation_id"].as_str().context("operation A missing")?);
         let saved = fs::read(root.join("agent.json"))?;
+        let repeated = crate::autostart::control_core_config_rpc(&request_a, Some("recall_fusion={\"fusion\":\"attention\"}"))?;
+        assert_eq!(serde_json::to_value(&repeated)?, serde_json::to_value(&terminal_core)?);
+        assert!(crate::autostart::control_core_config_rpc(&request_a, Some("recall_fusion={\"fusion\":\"legacy\"}")).is_err());
+        assert_eq!(fs::read(root.join("agent.json"))?, saved);
+        assert!(!marker_path(&root).exists());
         for intent in ["read_heat=bad", "recall_fusion={\"unknown\":true}"] {
             assert!(crate::autostart::control_agent_config(intent).is_err());
             assert_eq!(fs::read(root.join("agent.json"))?, saved);
@@ -2585,9 +2597,63 @@ mod tests {
         let error = crate::autostart::control_agent_config("diary_mode=concise").err()
             .context("sent agent config was replayed without its receipt")?;
         assert!(format!("{error:#}").contains("agent_config_outcome_unknown"));
-        let (pending, _, _) = pending_agent_config(&root)?.context("original agent operation disappeared")?;
+        let (pending, _, _) = pending_agent_config(&root, false)?.context("original agent operation disappeared")?;
         assert!(pending == original && fs::read(root.join("agent.json"))? == candidate);
         assert!(marker(&root)?.context("agent maintenance disappeared")?.phase == Phase::Paused);
+        let pending_b = fs::read(marker_path(&root))?;
+        let queried = crate::autostart::control_core_config_rpc(&request_a, None)?;
+        assert_eq!(serde_json::to_value(&queried)?, serde_json::to_value(&terminal_core)?);
+        assert_eq!(fs::read(marker_path(&root))?, pending_b);
+        assert_eq!(fs::read(root.join("agent.json"))?, candidate);
+        let mut non_agent = marker(&root)?.context("B disappeared")?;
+        non_agent.agent_config = None;
+        fs::write(marker_path(&root), serde_json::to_vec(&non_agent)?)?;
+        let non_agent_bytes = fs::read(marker_path(&root))?;
+        let queried = crate::autostart::control_core_config_rpc(&request_a, None)?;
+        assert_eq!(serde_json::to_value(&queried)?, serde_json::to_value(&terminal_core)?);
+        assert_eq!(fs::read(marker_path(&root))?, non_agent_bytes);
+        fs::write(marker_path(&root), &pending_b)?;
+        fs::remove_file(marker_path(&root))?;
+        use respire_protocol::config_control::{AgentConfigReceipt, AgentConfigOutcome};
+        let review = crate::client_config::review_agent_config(
+            AgentConfigIntent { key:"recall_fusion".into(), raw_value:"{\"fusion\":\"legacy\"}".into() }, root.clone(), root.clone())?;
+        let scope = respire_protocol::RuntimeRequestScope {account_id:"synthetic".into(), instance_id:"original".into(), generation:1};
+        let unknown = AgentConfigMaintenance {review:review.clone(), was_serving:false, store_ready:false, sent:true,
+            receipt:Some(AgentConfigReceipt {review:review.clone(), outcome:AgentConfigOutcome::Unknown,
+                result:json!({"core_control":{"scope":scope,"revision":0,"candidate":{},"validated":null,
+                    "apply_sent":false,"rollback_sent":false,"response":null}})})};
+        let mut held = begin_maintenance_locked()?;
+        held.save_agent_config(&unknown)?;
+        drop(held);
+        let request = format!("desktop-{}", review.operation_id);
+        let pending_before = fs::read(marker_path(&root))?;
+        // A result file can precede completion; matching pending remains authoritative.
+        let terminal_path = root.join("runtime/autostart/core-config-results").join(format!("{}.json", review.operation_id));
+        private_write(&terminal_path, &serde_json::to_vec(&terminal_core)?, None)?;
+        let error = crate::autostart::control_core_config_rpc(&request, None).err().context("publication Unknown was completed")?;
+        let details = &error.downcast_ref::<crate::autostart::CoreConfigUnknown>().context("Unknown metadata lost")?.details;
+        assert_eq!(details["operation_id"], review.operation_id);
+        assert_eq!(details["scope"], serde_json::to_value(&scope)?);
+        assert_eq!(details["publication_state"], "unknown");
+        let mut context = respire_commands::runtime_error::OperationContext {scope:scope.clone(), operation_id:review.operation_id.clone(), idempotency_key:review.operation_id.clone()};
+        context.scope.generation += 1;
+        let error = super::super::supervise::control_core_config_result(&context, &root).err().context("foreign scope accepted")?;
+        assert!(error.downcast_ref::<crate::autostart::CoreConfigUnknown>().is_none());
+        context.scope = scope;
+        assert!(super::super::supervise::control_core_config_result(&context, &root).err()
+            .context("publication unexpectedly completed")?.downcast_ref::<crate::autostart::CoreConfigUnknown>().is_some());
+        assert_eq!(fs::read(marker_path(&root))?, pending_before);
+        let mut without_scope = marker(&root)?.context("Unknown marker missing")?;
+        without_scope.agent_config.as_mut().context("Unknown record missing")?["receipt"]["result"]["core_control"]["scope"] = Value::Null;
+        fs::write(marker_path(&root), serde_json::to_vec(&without_scope)?)?;
+        let no_scope_before = fs::read(marker_path(&root))?;
+        let error = crate::autostart::control_core_config_rpc(&request, None).err().context("scope-free publication Unknown completed")?;
+        let details = &error.downcast_ref::<crate::autostart::CoreConfigUnknown>().context("scope-free Unknown lost identity")?.details;
+        assert_eq!(details["operation_id"], review.operation_id);
+        assert!(details["scope"].is_null());
+        assert_eq!(details["publication_state"], "unknown");
+        assert_eq!(fs::read(marker_path(&root))?, no_scope_before);
+        assert_eq!(fs::read(root.join("agent.json"))?, candidate);
         fs::remove_file(marker_path(&root))?;
         Ok(())
     }

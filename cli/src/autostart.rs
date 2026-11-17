@@ -23,7 +23,7 @@ pub(crate) use supervise::{rpc_accounts, rpc_keys};
 pub(crate) use supervise::control_migrate_profile;
 pub(crate) use supervise::{login_recovery_status, recover_legacy_login_locked};
 pub(crate) use supervise::{control_metadata, control_offline_read};
-pub(crate) use supervise::{control_agent_config, CoreConfigUnknown};
+pub(crate) use supervise::{control_agent_config, control_core_config_rpc, CoreConfigUnknown};
 pub(crate) use supervise::{
     control_super_reset, control_super_reset_step, control_key_result, control_key_rollback,
     control_fivekeys,

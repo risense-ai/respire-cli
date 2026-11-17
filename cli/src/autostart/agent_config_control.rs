@@ -324,7 +324,7 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
             result: serde_json::json!({"output":output,"core_control":control}) });
         maintenance.check_agent_config_record(&preview)?;
         record.sent = true;
-        maintenance.save_agent_config(record)?;
+        save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Unknown)?;
         crate::client_config::publish_agent_config(&review, ||
             save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed))?;
     }
@@ -393,7 +393,8 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
 }
 
 fn control_host_agent_config(intent: Option<respire_protocol::config_control::AgentConfigIntent>,
-    query: Option<(&respire_commands::runtime_error::OperationContext, &std::path::Path)>) -> anyhow::Result<respire_commands::output::ResultEnvelope> {
+    query: Option<(&respire_commands::runtime_error::OperationContext, &std::path::Path)>,
+    request: Option<(&str, bool)>) -> anyhow::Result<respire_commands::output::ResultEnvelope> {
     use respire_client_host::lock::LibraryLock;
     let _takeover = crate::runtime_policy::takeover_lock()?;
     let (root, profile) = respire_client_host::config::control_roots()?;
@@ -403,26 +404,46 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
     let profile = profile.canonicalize()?;
     let identity = metadata_identity(&profile, super::hash)?;
     let account = identity.account_id.clone().unwrap_or_else(|| super::hash(profile.display().to_string().as_bytes()));
-    let saved = super::lifecycle::pending_agent_config(&root)?;
-    if let Some((context, source)) = query {
-        anyhow::ensure!(source.canonicalize()? == profile && context.operation_id == context.idempotency_key,
-            "core configuration query identity mismatch");
-        if let Some((record, _, _)) = saved.as_ref() {
-            anyhow::ensure!(matches!(record.review.intent.key.trim(), "read_heat" | "recall_fusion"),
-                "query is not an original core configuration operation");
-            let control: CoreConfigTransaction = serde_json::from_value(record.receipt.as_ref()
-                .context("original core publication receipt unavailable")?.result["core_control"].clone())?;
-            anyhow::ensure!(record.review.operation_id == context.operation_id && control.scope.as_ref() == Some(&context.scope)
+    let saved = super::lifecycle::pending_agent_config(&root, query.is_some() || request.is_some())?;
+    let mut query_only = query.is_some() || request.is_some_and(|(_, query)| query);
+    let requested = query.map(|(context, _)| context.operation_id.as_str())
+        .or(request.map(|(id, _)| id));
+    if let Some(operation_id) = requested {
+        if let Some((context, source)) = query {
+            anyhow::ensure!(source.canonicalize()? == profile && context.operation_id == context.idempotency_key,
+                "core configuration query identity mismatch");
+        }
+        if let Some((record, _, _)) = saved.as_ref().filter(|(record, _, _)|
+            record.review.operation_id == operation_id) {
+            query_only = true;
+            anyhow::ensure!(intent.as_ref().is_none_or(|intent| *intent == record.review.intent),
+                "core configuration request ID is bound to another intent");
+            anyhow::ensure!(matches!(record.review.intent.key.trim(), "read_heat" | "recall_fusion")
                 && record.review.profile == profile && record.review.identity == identity,
                 "core configuration query differs from original operation");
-        } else {
-            let output: ResultEnvelope = serde_json::from_slice(&std::fs::read(core_result_path(&root, &context.operation_id)?)?)?;
-            anyhow::ensure!(output.details["operation_id"] == context.operation_id
+            if let Some((context, _)) = query {
+                let control: CoreConfigTransaction = serde_json::from_value(record.receipt.as_ref()
+                    .context("original core scope unavailable")?.result["core_control"].clone())?;
+                anyhow::ensure!(control.scope.as_ref() == Some(&context.scope),
+                    "core configuration query differs from original scope");
+            }
+            if record.receipt.as_ref().is_none_or(|receipt| receipt.outcome == AgentConfigOutcome::Unknown) {
+                return Err(CoreConfigUnknown { details: core_transaction_details(record)? }.into());
+            }
+        } else if query_only || core_result_path(&root, operation_id)?.try_exists()? {
+            let output: ResultEnvelope = serde_json::from_slice(&std::fs::read(core_result_path(&root, operation_id)?)?)?;
+            anyhow::ensure!(intent.as_ref().is_none_or(|intent| output.summary["key"] == intent.key
+                && output.summary["value"] == intent.value()),
+                "core configuration request ID is bound to another intent");
+            anyhow::ensure!(output.details["operation_id"] == operation_id
                 && output.details["source_profile"] == serde_json::to_value(&profile)?
-                && output.details["scope"] == serde_json::to_value(&context.scope)?
-                && output.details["identity"] == serde_json::to_value(&identity)?,
+                && output.details["identity"] == serde_json::to_value(&identity)?
+                && query.map(|(context, _)| serde_json::to_value(&context.scope)).transpose()?
+                    .is_none_or(|scope| output.details["scope"] == scope),
                 "core configuration terminal receipt identity mismatch");
             return Ok(output);
+        } else {
+            anyhow::ensure!(saved.is_none(), "another agent configuration operation is pending");
         }
     }
     let registration = super::read_registration(&root)?;
@@ -451,7 +472,8 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
     } else {
         let intent = intent.context("core configuration query cannot create an operation")?;
         validate_host_agent_config(&intent, &profile)?;
-        let review = crate::client_config::review_agent_config(intent, root.clone(), profile.clone())?;
+        let review = crate::client_config::review_agent_config_for_operation(intent, root.clone(), profile.clone(),
+            request.map(|(id, _)| id))?;
         let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
         maintenance.auth_launch_binding(&profile)?.context("agent config requires actual Paused maintenance")?;
         let record = AgentConfigMaintenance { review, was_serving: owner.is_some(),
@@ -465,7 +487,7 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
     let result = (|| -> Result<ResultEnvelope> {
         maintenance.auth_launch_binding(&profile)?.context("agent config lost its Paused grant")?;
         if core_setting {
-            let mut output = control_core_setting(&mut record, &mut maintenance, owner.as_ref(), query.is_some())?;
+            let mut output = control_core_setting(&mut record, &mut maintenance, owner.as_ref(), query_only)?;
             if let Some(previous) = owner.as_ref() {
                 let current = crate::rpc::probe_runtime()?.context("core config owner exited before completion")?;
                 let (binary, manifest) = runtime.as_ref().context("core config Runtime selection missing")?;
@@ -486,7 +508,7 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
             };
             crate::autostart::private_write(&path, &serde_json::to_vec(&output)?,
                 previous.as_deref().map(crate::autostart::hash).as_deref())?;
-            if query.is_some() { maintenance.finish_core_config_query()?; } else { maintenance.finish()?; }
+            if query_only { maintenance.finish_core_config_query()?; } else { maintenance.finish()?; }
             finished = true;
             return Ok(output);
         }
@@ -552,12 +574,16 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
         Ok(result)
     })();
     if !finished {
+        if core_setting && record.sent {
+            let details = core_transaction_details(&record)?;
+            let cleanup = (|| {
+                maintenance.refresh_agent_config()?;
+                maintenance.mark(super::lifecycle::Phase::Paused)
+            })();
+            return CoreConfigUnknown::after_cleanup(details, result, cleanup);
+        }
         let actual = maintenance.refresh_agent_config()?;
         maintenance.mark(super::lifecycle::Phase::Paused)?;
-        if core_setting && actual.sent {
-            let details = core_transaction_details(&actual)?;
-            return result.map_err(|error| error.context(CoreConfigUnknown { details }));
-        }
         if actual.sent && actual.receipt.is_none() {
             return result.map_err(|error| error.context(format!(
                 "agent_config_outcome_unknown operation_id={operation}; retain original O; do not replay")));
@@ -576,7 +602,24 @@ pub(crate) fn control_agent_config(kv: &str) -> Result<ResultEnvelope> {
     let intent = AgentConfigIntent { key: key.into(), raw_value: raw_value.into() };
     intent.apply(&serde_json::json!({})).map_err(|message|
         respire_client_host::input_error::InputError(message.into()))?;
-    control_host_agent_config(Some(intent), None)
+    control_host_agent_config(Some(intent), None, None)
+}
+
+pub(crate) fn control_core_config_rpc(request_id: &str, setting: Option<&str>) -> Result<ResultEnvelope> {
+    crate::runtime_policy::require_host("core configuration RPC")?;
+    anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
+    let operation = request_id.strip_prefix("desktop-").context("core config requires a desktop request UUID")?;
+    let uuid = uuid::Uuid::parse_str(operation)?;
+    anyhow::ensure!(uuid.get_version_num() == 4 && uuid.to_string() == operation,
+        "core config requires a canonical request UUID");
+    let intent = setting.map(|setting| -> Result<AgentConfigIntent> {
+        let (key, value) = setting.split_once('=').context("core setting requires key=value")?;
+        anyhow::ensure!(matches!(key.trim(), "read_heat" | "recall_fusion"), "not a core configuration setting");
+        let intent = AgentConfigIntent { key: key.into(), raw_value: value.into() };
+        intent.apply(&serde_json::json!({})).map_err(anyhow::Error::msg)?;
+        Ok(intent)
+    }).transpose()?;
+    control_host_agent_config(intent, None, Some((operation, setting.is_none())))
 }
 
 #[derive(Debug)]
@@ -591,6 +634,19 @@ impl std::fmt::Display for CoreConfigUnknown {
 }
 impl std::error::Error for CoreConfigUnknown {}
 
+impl CoreConfigUnknown {
+    pub(crate) fn after_cleanup(mut details: serde_json::Value, result: Result<ResultEnvelope>,
+        cleanup: Result<()>) -> Result<ResultEnvelope> {
+        if cleanup.is_err() { details["cleanup_failed"] = true.into(); }
+        let result = match (result, cleanup) {
+            (result, Ok(())) => result,
+            (Err(error), Err(cleanup)) => Err(error.context(format!("agent config cleanup failed: {cleanup:#}"))),
+            (Ok(_), Err(cleanup)) => Err(cleanup.context("agent config cleanup failed")),
+        };
+        result.map_err(|error| error.context(Self { details }))
+    }
+}
+
 fn core_transaction_details(record: &AgentConfigMaintenance) -> Result<serde_json::Value> {
     let control: Option<CoreConfigTransaction> = record.receipt.as_ref()
         .map(|receipt| serde_json::from_value(receipt.result["core_control"].clone())).transpose()?;
@@ -598,6 +654,11 @@ fn core_transaction_details(record: &AgentConfigMaintenance) -> Result<serde_jso
         "idempotency_key": record.review.operation_id, "source_profile": record.review.profile,
         "scope": control.and_then(|control| control.scope), "identity": record.review.identity,
         "kind": "core_config", "query_only": true, "replayed": false,
+        "publication_state": match record.receipt.as_ref().map(|receipt| &receipt.outcome) {
+            Some(AgentConfigOutcome::Committed) => "committed",
+            Some(AgentConfigOutcome::RolledBack) => "rolled_back",
+            _ => "unknown",
+        },
         "result_command": "runtime core-config-result"}))
 }
 
@@ -612,5 +673,5 @@ pub(crate) fn control_core_config_result(context: &respire_commands::runtime_err
     source_profile: &std::path::Path) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("core configuration result")?;
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
-    control_host_agent_config(None, Some((context, source_profile)))
+    control_host_agent_config(None, Some((context, source_profile)), None)
 }

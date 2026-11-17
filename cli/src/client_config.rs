@@ -130,6 +130,11 @@ pub(crate) fn read_config() -> Result<ConfigSnapshot> {
 
 pub(crate) fn review_agent_config(intent: respire_protocol::config_control::AgentConfigIntent,
     root: PathBuf, profile: PathBuf) -> Result<respire_protocol::config_control::AgentConfigReview> {
+    review_agent_config_for_operation(intent, root, profile, None)
+}
+
+pub(crate) fn review_agent_config_for_operation(intent: respire_protocol::config_control::AgentConfigIntent,
+    root: PathBuf, profile: PathBuf, operation_id: Option<&str>) -> Result<respire_protocol::config_control::AgentConfigReview> {
     use respire_protocol::config_control::AgentConfigReview;
     let workspace = intent.workspace_mode().map_err(anyhow::Error::msg)?.is_some();
     let path = if workspace { paths::client_config_path() } else { profile.join("agent.json") };
@@ -147,7 +152,7 @@ pub(crate) fn review_agent_config(intent: respire_protocol::config_control::Agen
     anyhow::ensure!(original.is_object(), "agent config must be an object");
     let candidate = intent.apply(&original).map_err(anyhow::Error::msg)?;
     if workspace { config::validate_client_config(&candidate, &path)?; }
-    let mut review = AgentConfigReview { operation_id: uuid::Uuid::new_v4().to_string(),
+    let mut review = AgentConfigReview { operation_id: operation_id.map(str::to_owned).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         installation_root: root, profile: profile.clone(),
         identity: respire_protocol::metadata_control::metadata_identity(&profile, |bytes| hex::encode(Sha256::digest(bytes)))?,
         intent, original_config, original_revision: revision(bytes.as_deref()).0,

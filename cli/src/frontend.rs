@@ -2273,6 +2273,24 @@ mod capture_tests {
         assert_eq!(envelope.details["query_only"], true);
         assert_eq!(envelope.details["replayed"], false);
         assert!(envelope.errors.iter().all(|error| !error.contains("private candidate")));
+        let original_details = envelope.details.clone();
+        for cleanup_stage in ["refresh_agent_config", "mark(Paused)"] {
+            let Err(error) = super::autostart::CoreConfigUnknown::after_cleanup(
+                original_details.clone(), Err(anyhow::anyhow!("original apply response lost")),
+                Err(anyhow::anyhow!("maintenance I/O failed").context(cleanup_stage))) else {
+                panic!("cleanup failure was discarded");
+            };
+            let chain = format!("{error:#}");
+            assert!(chain.contains("original apply response lost"));
+            assert!(chain.contains(cleanup_stage) && chain.contains("maintenance I/O failed"));
+            let (envelope, code) = super::command_failure(&error);
+            assert_eq!(code, 1);
+            let mut expected = original_details.clone();
+            expected["cleanup_failed"] = true.into();
+            assert_eq!(envelope.details, expected);
+            assert_eq!(envelope.summary["core_application"]["state"], "unknown");
+            assert!(envelope.errors.iter().all(|error| !error.contains("maintenance I/O failed")));
+        }
         let parsed = capture_run(vec!["--json".into(), "--not-a-command".into()]);
         assert_eq!(parsed.exit, 2);
         assert_eq!(parsed.envelope.summary["reason"], "invalid_input");
