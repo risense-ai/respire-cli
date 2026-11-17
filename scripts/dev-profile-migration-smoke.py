@@ -3,7 +3,7 @@
 import argparse
 import base64
 from contextlib import closing, contextmanager
-from dev_migration_diagnostics import migration_failure_diagnostics, script_failure_location
+from dev_migration_diagnostics import migration_failure_diagnostics, migration_execution_state, script_failure_location
 import hashlib
 import importlib.util
 import json
@@ -191,6 +191,8 @@ class Smoke(support.Smoke):
                 error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
             self.report["cli_failure"]["migration_exchange"] = exchange[1] if stage and stage[1] == "exchange" \
                 and exchange and exchange[1] in exchange_categories else None
+            if args[0] == "migrate" and self.report["cli_failure"]["migration_stage"] == "exchange":
+                self.report["cli_failure"]["execution_state"] = migration_execution_state(self.root, env, args, value)
             self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
                 ("child_exited", "host runtime exited before readiness"),
                 ("startup_identity_changed", "runtime owner changed during startup"),

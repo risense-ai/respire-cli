@@ -33,6 +33,60 @@ class DiagnosticsTests(unittest.TestCase):
         for case_id in runtime.DIRECT_CASE_IDS:
             self.assertEqual(runtime.exit_diagnostic(case_id, 0, result)['case_id'], case_id)
 
+        from dev_migration_diagnostics import migration_execution_state
+        import sqlite3
+        import uuid
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            home = base / 'home'; home.mkdir()
+            root = home / '.rsrs'; root.mkdir()
+            source, account, operation = 'a' * 64, 'imported-test', str(uuid.uuid4())
+            arguments = ('migrate', '--source', source, '--account', account)
+            envelope = {'errors': ['migration_outcome_unknown operation_id=' + operation + '; migration_stage=exchange']}
+            env = {'HOME': str(home), 'RSRS_DATA_DIR': str(root)}
+            original = dict(operation_id=operation, source_id=source, account=account, key=SECRET)
+            host = root / 'runtime/autostart/migrations'; host.mkdir(parents=True)
+            (host / 'original.json').write_text(json.dumps({'operation': original, 'sent': True,
+                'finished': False, 'was_serving': True, 'store_ready': False, 'session': SECRET}), encoding='utf8')
+            stage = home / '.rsrs-migration-staging' / str(uuid.uuid4()); stage.mkdir(parents=True)
+            intents = home / '.rsrs-migration-intents'; intents.mkdir()
+            path = intents / (operation + '.json')
+            frame = dict(original=original, phase='copying', stage=str(stage), session_digest=SECRET)
+            path.write_text(json.dumps(frame) + '\n', encoding='utf8')
+            (root / 'session.json').write_text(SECRET, encoding='utf8')
+            with closing(sqlite3.connect(stage / 'onememory.db')) as database:
+                database.execute('CREATE TABLE private_payload(body TEXT)')
+                database.execute('INSERT INTO private_payload VALUES(?)', (SECRET,))
+                database.commit()
+            profile_spec = importlib.util.spec_from_file_location('profile_migration_smoke', Path(__file__).with_name('dev-profile-migration-smoke.py'))
+            profile = importlib.util.module_from_spec(profile_spec)
+            profile_spec.loader.exec_module(profile)
+            smoke = profile.Smoke.__new__(profile.Smoke)
+            default = smoke.default_env(dict(env, RSRS_SUPER=SECRET, RSRS_RUNTIME_BIN=SECRET))
+            self.assertNotIn('RSRS_DATA_DIR', default)
+            self.assertNotIn('RSRS_RUNTIME_BIN', default)
+            for diagnostic_env in (env, dict(default, RSRS_SUPER=SECRET), dict(env, RSRS_DATA_DIR='')):
+                state = migration_execution_state(base, diagnostic_env, arguments, envelope)
+                self.assertEqual((state['status'], state['host_record'], state['intent_phase']), ('collected', 'matched', 'copying'))
+                self.assertEqual(state['staging_databases']['onememory.db'], {'state': 'ok'})
+                self.assertTrue(state['sent'])
+                self.assertFalse(state['destination_exists'])
+                self.assertNotIn(SECRET, json.dumps(state))
+                self.assertNotIn(str(home), json.dumps(state))
+            with closing(sqlite3.connect(root / 'lock.db')) as lock:
+                lock.execute('CREATE TABLE lock_probe(value INTEGER)'); lock.commit()
+                lock.execute('BEGIN EXCLUSIVE')
+                state = migration_execution_state(base, env, arguments, envelope)
+                self.assertEqual(state['installation_lock']['state'], 'busy')
+                lock.rollback()
+            for invalid in (dict(frame, phase=SECRET), dict(frame, stage=str(base / 'outside'))):
+                path.write_text(json.dumps(invalid) + '\n', encoding='utf8')
+                state = migration_execution_state(base, env, arguments, envelope)
+                self.assertEqual(state, {'status': 'invalid_or_unavailable'})
+                self.assertNotIn(SECRET, json.dumps(state))
+            self.assertEqual(migration_execution_state(base, env, arguments, {}), {'status': 'operation_binding_missing'})
+
     def test_direct_still_fails_and_success_unchanged(self):
         smoke = runtime.Smoke.__new__(runtime.Smoke)
         smoke.args = types.SimpleNamespace(binary=SECRET)
