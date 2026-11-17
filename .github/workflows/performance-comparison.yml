@@ -186,6 +186,41 @@ jobs:
           $exe = Join-Path (Resolve-Path producer-cli) 'rsrs'
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Project only fixed PR412 rejection classes from the initial registration
+        if: always()
+        shell: python
+        run: |
+          import json, os, re
+          from pathlib import Path
+          folder = Path(os.environ['RUNNER_TEMP']) / 'registration-sweep/secrets'
+          files = [p for p in folder.glob('*-register.txt') if re.fullmatch(r'[0-9]+-register\.txt', p.name)]
+          result = {'diagnostic_only': True, 'case': 'initial_register', 'case_observed': bool(files)}
+          if not files:
+              result['failure_code'] = 'registration_case_not_reached'
+          else:
+              assert len(files) == 1, 'initial registration evidence must be unique'
+              try:
+                  envelope, _ = json.JSONDecoder().raw_decode(files[0].read_text(encoding='utf-8').lstrip())
+              except (ValueError, UnicodeError):
+                  raise RuntimeError('initial registration JSON evidence invalid') from None
+              assert envelope['status'] in ('ok', 'warn', 'skip', 'pending', 'fail'), 'unsupported registration status'
+              result['status'] = envelope['status']
+              result['outcome_unknown'] = envelope['summary'].get('reason') == 'account_outcome_unknown'
+              classes = (
+                  'auth_salt_http_unauthorized', 'auth_salt_http_forbidden', 'auth_salt_http_rate_limited',
+                  'auth_salt_http_server_error', 'auth_salt_http_other', 'auth_salt_transport',
+                  'auth_salt_missing', 'auth_salt_invalid_hex', 'auth_salt_reply_parse_failed',
+                  'register_http_unauthorized', 'register_http_forbidden', 'register_http_rate_limited',
+                  'register_http_server_error', 'register_http_other', 'register_transport',
+                  'register_reply_parse_failed', 'register_token_missing', 'register_remote_unknown',
+                  'register_native_credentials', 'register_state_conflict', 'register_material_invalid',
+                  'register_local_compatibility', 'register_unclassified')
+              errors = envelope['errors']
+              assert isinstance(errors, list) and all(isinstance(e, str) for e in errors), 'registration errors invalid'
+              result['rejection_classes'] = [c for c in classes if any(e.endswith('; register_kind=' + c) for e in errors)]
+              if result['outcome_unknown']:
+                  assert len(result['rejection_classes']) == 1, 'unknown registration lacks one fixed PR412 class'
+          Path('registration-safe-rejection.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -196,5 +231,6 @@ jobs:
             registration-producer.json
             registration-cli-identity.json
             registration-runtime-identity.json
+            registration-safe-rejection.json
             ${{ runner.temp }}/registration-sweep/report.md
             ${{ runner.temp }}/registration-sweep/coverage.json
