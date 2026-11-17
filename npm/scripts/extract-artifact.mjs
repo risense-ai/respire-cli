@@ -9,6 +9,7 @@ import {Transform, Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {createGunzip} from 'node:zlib';
 import {packPackage, verifyPackFile} from './registry-publication.mjs';
+import {consumeCandidate} from './candidate-artifact.mjs';
 
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -824,7 +825,6 @@ async function main() {
   }
   extractBuildArtifact();
   if(process.env.ARTIFACT_SOURCE==='build' && process.env.VALIDATION_PROFILE==='full' && process.env.CANDIDATE_ASSETS) {
-    const {consumeCandidate}=await import('./candidate-artifact.mjs');
     await consumeCandidate(resolve(process.argv[2]),resolve(process.argv[3]),process.env.CLI_TARGET);
   }
 }

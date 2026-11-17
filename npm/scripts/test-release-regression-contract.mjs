@@ -60,7 +60,17 @@ test('frontend artifacts extract, verify and pack exact CLI bytes without a fabr
       const result=run('extract-artifact.mjs',['assets',path.join('bins',target.triple,'release')],
         {CLI_TARGET:target.triple,CLI_SHA:sha,CLI_VERSION:manifest.cliVersion});
       assert.equal(result.status,0,result.stderr);
+      const rejected=run('extract-artifact.mjs',['assets',path.join('candidate',target.triple)],
+        {CLI_TARGET:target.triple,CLI_SHA:sha,CLI_VERSION:manifest.cliVersion,
+          ARTIFACT_SOURCE:'build',VALIDATION_PROFILE:'full',CANDIDATE_ASSETS:JSON.stringify({schema:0})});
+      assert.equal(rejected.status,1,rejected.stderr);
+      assert.match(rejected.stdout,/Extracted verified/);
+      assert.match(rejected.stderr,/AssertionError/);
+      assert.doesNotMatch(rejected.stderr,/unsettled top-level await/);
     }
+    const invalidEntry=run('candidate-artifact.mjs');
+    assert.equal(invalidEntry.status,1,invalidEntry.stderr);
+    assert.match(invalidEntry.stderr,/Expected resolve/);
     const verified=run('verify-packages.mjs',['assets','--assets-only']);assert.equal(verified.status,0,verified.stderr);
     const packed=run('pack.mjs',['--repo',root,'--root',path.join(root,'bins')]);assert.equal(packed.status,0,packed.stderr);
     for(const target of manifest.targets){
