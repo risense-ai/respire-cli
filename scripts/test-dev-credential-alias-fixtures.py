@@ -1137,11 +1137,16 @@ class OriginalFactorTests(unittest.TestCase):
                          and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
                          and node.args[1].value == 'wrong_key_not_rejected_by_runtime')
         check = compile(ast.Expression(rejection), '<wrong-key-rejection-guard>', 'eval')
-        accepted_rejection = dict(status='fail', errors=['migration_stage=exchange'])
+        accepted_rejection = dict(status='fail', errors=[
+            'migration_stage=exchange; migration_exchange=runtime_migration_outcome_unknown'])
         eval(check, dict(require=profile.require, result=SimpleNamespace(returncode=1),
                          rejected=accepted_rejection))
         for exit_code, envelope in ((0, accepted_rejection), (1, dict(status='ok')),
                 (1, dict(status='fail', errors=['migration_stage=host_candidates'])),
+                *((1, dict(status='fail', errors=['migration_stage=exchange; migration_exchange=' + reason]))
+                  for reason in ('channel', 'deadline', 'spawn', 'frame', 'unclassified',
+                                 'runtime_scope_mismatch', 'runtime_unauthorized')),
+                (1, dict(status='fail', errors=['migration_stage=exchange'])),
                 (1, dict(status='fail', errors=['unrelated CLI failure']))):
             with self.subTest(exit_code=exit_code, envelope=envelope), \
                     self.assertRaisesRegex(RuntimeError, '^wrong_key_not_rejected_by_runtime$'):

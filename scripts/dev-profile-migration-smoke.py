@@ -879,7 +879,9 @@ class Smoke(support.Smoke):
             env=dict(self.default_env(attempt), RSRS_SUPER=wrong), cwd=self.root, capture_output=True, timeout=60)
         rejected = json.loads(result.stdout)
         require(result.returncode != 0 and rejected.get("status") == "fail"
-            and any("migration_stage=exchange" in error for error in rejected.get("errors", [])),
+            and any("migration_stage=exchange" in error
+                and "migration_exchange=runtime_migration_outcome_unknown" in error
+                for error in rejected.get("errors", [])),
             "wrong_key_not_rejected_by_runtime")
         intents = list((Path(attempt["HOME"]) / ".rsrs-migration-intents").glob("*.json"))
         require(len(intents) == 1, "wrong_key_runtime_intent_missing")
