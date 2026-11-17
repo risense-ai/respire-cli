@@ -50,6 +50,7 @@ FAILURE_CODES = FAILURE_CODES | frozenset({
     "key_continuation_effects_mismatch", "key_continuation_material_changed",
     "key_continuation_unlock_failed", "key_continuation_memory_failed",
     "key_continuation_credential_not_owned", "key_continuation_query_failed",
+    "server_transfer_fault_not_observed",
 })
 
 
@@ -725,6 +726,13 @@ def account_fixture_handler(state, reached, release, v2=None):
                 self.reply({"updated": True})
             elif self.path == "/push/batch":
                 require(self.headers.get("Authorization") == "Bearer synthetic-token", "transfer_push_not_authorized")
+                stage = state["transfer_stage"]
+                rejected = stage == "initial_login"
+                state["transfer_http"].append({"stage": stage, "method": "POST",
+                    "route": "/push/batch", "status": 503 if rejected else 200})
+                if rejected:
+                    self.reply({"error": "synthetic transfer push outage"}, 503)
+                    return
                 for item in data["items"]:
                     state["sync_blobs"][item["id"]] = dict(item, user="synthetic")
                 self.reply({"replaced": [True] * len(data["items"])})
@@ -737,12 +745,11 @@ def account_fixture_handler(state, reached, release, v2=None):
                 return
             if self.path == "/pull" or self.path.startswith("/pull?"):
                 state["sync_pulls"] += 1
-                if state["sync_pulls"] == 2:
-                    self.reply({"error": "synthetic outage after preflight"}, 503)
-                else:
-                    blobs = list(state["sync_blobs"].values())
-                    self.reply({"blobs": blobs, "cursor": len(blobs), "total": len(blobs),
-                                "alive": sum(not item["deleted"] for item in blobs)})
+                state["transfer_http"].append({"stage": state["transfer_stage"],
+                    "method": "GET", "route": "/pull", "status": 200})
+                blobs = list(state["sync_blobs"].values())
+                self.reply({"blobs": blobs, "cursor": len(blobs), "total": len(blobs),
+                            "alive": sum(not item["deleted"] for item in blobs)})
                 return
             if self.path == "/auth/salt?user=synthetic":
                 if state.get("auth_salt") is None:
@@ -1281,7 +1288,9 @@ def main():
             cloud_salt, cloud_nonce = secrets.token_hex(16), secrets.token_bytes(12)
             state["vault"] = {"version": 4, "kdf_salt": cloud_salt, "urk_nonce": cloud_nonce.hex(),
                 "wrapped_urk": legacy.PREFIX + AESGCM(legacy.v4_kek(code, cloud_salt, legacy.PREFIX)).encrypt(cloud_nonce, cloud_urk, None).hex()}
-            state.update(sync_blobs={}, sync_pulls=0)
+            report["transfer_http"] = []
+            state.update(sync_blobs={}, sync_pulls=0, transfer_stage="initial_login",
+                         transfer_http=report["transfer_http"])
             # Keep the fresh cloud vault separate from main's existing remote identity.
             transfer_addr = f"http://localhost:{server.server_port}"
             transfer = ("--json", "login", "--interactive", "--addr", transfer_addr, "--user", "synthetic",
@@ -1291,8 +1300,14 @@ def main():
             report["transfer_initial_response"] = {"exit_code": first_result.returncode,
                 "diagnostic": safe_cli_diagnostic(first_result.stdout, first_result.stderr),
                 "sync_pulls": state["sync_pulls"], "synced_records": len(state["sync_blobs"])}
+            require(any(event == {"stage": "initial_login", "method": "POST",
+                        "route": "/push/batch", "status": 503} for event in state["transfer_http"]),
+                    "server_transfer_fault_not_observed")
             require(first_result.returncode == 2, "server_transfer_sync_warning_missing")
             first = json.loads(first_result.stdout)["summary"]
+            require(first["sync"]["status"] == "pending"
+                    and first["sync"]["reason"] == "post_import_sync_failed",
+                    "server_transfer_sync_warning_missing")
             require(first["import"]["imported"] == 1 and first["import"]["duplicates"] == 0,
                     "server_transfer_count_failed")
             target = Path(first["dir"])
@@ -1305,8 +1320,10 @@ def main():
             require(all(copied_payload[field] == original_payload[field] for field in ("content", "title")),
                     "server_transfer_not_reencrypted")
             report["stage"] = "server_transfer_select_source"
+            state["transfer_stage"] = "select_source"
             cli("--json", "account", "use", source_name)
             report["stage"] = "server_transfer_retry_login"
+            state["transfer_stage"] = "retry_login"
             retry_result = cli(*transfer)
             retry = json.loads(retry_result.stdout)["summary"]
             require(retry["import"]["imported"] == 0 and retry["import"]["duplicates"] == 1,
