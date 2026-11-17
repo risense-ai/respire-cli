@@ -438,6 +438,26 @@ class Smoke:
         self.read_entry(final_env, active, plaintext)
         with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
             remote = db.execute("SELECT id,ciphertext,nonce,deleted FROM memories WHERE id IN (?,?) ORDER BY id", (active, deleted)).fetchall()
+        expected = {row[0]: row for row in converted}
+        observed = {row[0]: row for row in remote}
+        with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            heads = {memory_id: json.loads(wire) for memory_id, wire in db.execute(
+                "SELECT id,wire FROM sync_remote_heads WHERE id IN (?,?)", (active, deleted))}
+        readback = {}
+        for label, memory_id in (("active", active), ("deleted", deleted)):
+            row = observed.get(memory_id)
+            head = heads.get(memory_id)
+            readback[label] = {"present": row is not None, "head_present": head is not None}
+            if row is not None:
+                readback[label].update(ciphertext_matches=row[1] == expected[memory_id][1],
+                    nonce_matches=row[2] == expected[memory_id][2], deleted_matches=row[3] == expected[memory_id][3],
+                    plaintext_matches=decrypt_content(urk, row[1], row[2]) == payloads[memory_id][0])
+            if head is not None:
+                readback[label].update(head_ciphertext_matches=head.get("ciphertext") == expected[memory_id][1],
+                    head_nonce_matches=head.get("nonce") == expected[memory_id][2],
+                    head_deleted_matches=head.get("deleted") == bool(expected[memory_id][3]))
+        self.report["database_sync_readback"] = readback
+        self.save()
         require(remote == converted, "new_device_ciphertext_or_tombstone_differs")
         require(self.api(account, "GET", "/api/self/vault") == vault, "database_sync_changed_current_vault")
         require((source / "session.json").read_bytes() == original_session
