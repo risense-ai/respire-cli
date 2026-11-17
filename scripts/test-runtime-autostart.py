@@ -66,6 +66,7 @@ def seed_local_credentials(binary, env, keys):
         text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
         text += "\n" + result.stderr
         categories = (
+            ("original_operation_changed", "offline keygen original operation changed"),
             ("handoff_unsupported", "offline_keygen_handoff_unsupported"),
             ("runtime_repair_required", "repair required"),
             ("unknown_owner", "offline keygen owner is unverifiable"),
