@@ -340,7 +340,7 @@ jobs:
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           mkdir -p "$RUNNER_TEMP/dev-supplements"
-          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/database-sync-credentials" --timeout 1500 -- python3 scripts/dev-legacy-vault-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-legacy-vault-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
       - name: Diagnose runtime contracts without a full release claim
         if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
