@@ -134,7 +134,8 @@ def verify(args, result):
     database_sync = legacy["cases"]["legacy_ciphertext_sync"]
     require(all(database_sync.get(field) is True for field in ("urk_preserved", "original_source_preserved",
             "old_content_decrypted", "ciphertext_reencrypted", "encrypted_tombstone_preserved",
-            "migrated_push", "independent_device_pull_decrypted", "current_host_login")),
+            "migrated_push", "independent_device_pull_decrypted", "current_host_login", "remote_tombstone_propagated"))
+            and database_sync.get("remote_tombstone_content") == "canonical_empty",
             "legacy_database_sync_not_proven")
     require(legacy.get("cloud_cleanup", {}).get("passed") is True, "legacy_vault_cleanup_failed")
     require(legacy.get("keyring_cleanup", {}).get("passed") is True

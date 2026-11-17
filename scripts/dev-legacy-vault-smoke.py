@@ -459,13 +459,26 @@ class Smoke:
                     head_deleted_matches=head.get("deleted") == bool(expected[memory_id][3]))
         self.report["database_sync_readback"] = readback
         self.save()
-        require(remote == converted, "new_device_ciphertext_or_tombstone_differs")
+        require(observed.get(active) == expected[active]
+            and readback["active"].get("plaintext_matches") is True
+            and readback["active"].get("head_ciphertext_matches") is True
+            and readback["active"].get("head_nonce_matches") is True
+            and readback["active"].get("head_deleted_matches") is True,
+            "new_device_active_ciphertext_differs")
+        # The current server propagates a content-free deletion head. The old
+        # encrypted tombstone was checked above before any remote synchronization.
+        require(observed.get(deleted) == (deleted, "", "", 1)
+            and heads.get(deleted, {}).get("id") == deleted
+            and heads[deleted].get("deleted") is True
+            and heads[deleted].get("ciphertext") == "" and heads[deleted].get("nonce") == "",
+            "new_device_tombstone_not_propagated")
         require(self.api(account, "GET", "/api/self/vault") == vault, "database_sync_changed_current_vault")
         require((source / "session.json").read_bytes() == original_session
             and digest(source / "onememory.db") == original_database, "original_source_changed")
         self.passed("legacy_ciphertext_sync", urk_preserved=True, original_source_preserved=True,
             old_content_decrypted=True, ciphertext_reencrypted=True, encrypted_tombstone_preserved=True,
             migrated_push=True, independent_device_pull_decrypted=True, current_host_login=True,
+            remote_tombstone_propagated=True, remote_tombstone_content="canonical_empty",
             historical_authentication_tested=False)
 
     def run_version(self, version):

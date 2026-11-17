@@ -101,7 +101,11 @@ vault, and encodes an active record and an encrypted tombstone in the historical
 records without changing plaintext, deletion state or the original source.
 The upgraded profile must push the converted records to the real DEV server;
 an independent current device logs in through host RPC, pulls them, decrypts
-the active record, and reads back the exact ciphertext and tombstone. Both cloud
+the active record, and reads back its exact ciphertext. Before synchronization,
+the migrated tombstone must still decrypt with the original URK. On the independent
+device, both the received head and the local record must contain the same ID,
+`deleted=true` and empty ciphertext/nonce, matching the current server's
+content-free tombstone protocol. Missing deletion records fail. Both cloud
 accounts and fixture-owned native credentials must be cleaned up.
 
 The final release no longer runs the old v1/v2/v3 authentication combinations,
