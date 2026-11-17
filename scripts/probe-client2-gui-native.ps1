@@ -1240,9 +1240,12 @@ function Fill-OfflineField([string]$Name, [string]$Text) {
 }
 
 function Read-CoreQueryControl([string]$Mode = '') {
-    $options = @{Uri=($binding.core_query.address + '/__fixture'); Headers=@{'X-Fixture-Control'=$binding.core_query.nonce}; TimeoutSec=10}
+    $options = @{Uri=($binding.core_query.address + '/__fixture'); Headers=@{'X-Fixture-Control'=$script:coreQueryControl.nonce}; TimeoutSec=10}
     if ($Mode) { $options.Method='POST'; $options.ContentType='application/json'; $options.Body=(@{mode=$Mode} | ConvertTo-Json -Compress) }
     $value = Invoke-RestMethod @options
+    $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope')
+    $actualKeys = @($value.PSObject.Properties.Name)
+    if ($actualKeys.Count -ne $publicKeys.Count -or @($actualKeys | Where-Object { $_ -cnotin $publicKeys }).Count) { throw 'Forwarding proof has non-public fields' }
     if (@($value.errors).Count -ne 0 -or $value.core_test_mode -ne $false) { throw 'Real forwarding fixture failed' }
     return $value
 }
@@ -1272,6 +1275,8 @@ function Find-CoreQuerySave {
 function Invoke-CoreQueryAcceptance {
     $report.offline = @{}
     $report.core_query = @{status='failed';phase=$binding.core_query.phase;diagnostic_only=$true;scope_rejection_boundary='CLI'}
+    $script:coreQueryControl = Get-Content -Raw -LiteralPath $binding.core_query.control_file | ConvertFrom-Json
+    if ($script:coreQueryControl.address -cne $binding.core_query.address -or $script:coreQueryControl.nonce -cnotmatch '^[a-f0-9]{64}$') { throw 'Private control binding differs' }
     if ($env:RSRS_CORE_TEST_MODE) { throw 'Real query mode cannot run with CORE_TEST_MODE' }
     $null = Read-CoreQueryControl
     Press-OfflineButton ([regex]::Unescape('\u005e\u6a21\u578b\u4e0e\u7d22\u5f15\u0024'))
@@ -1308,12 +1313,15 @@ function Invoke-CoreQueryAcceptance {
     Copy-Item -LiteralPath (Join-Path $OutputDirectory 'workspace.png') -Destination (Join-Path $OutputDirectory ($binding.core_query.phase + '-unknown.png'))
     if ($binding.core_query.phase -ceq 'core-resume') {
         $before = @($state.result_ids).Count
+        $beforeForwarded = $state.result_forwarded
+        $beforeLost = $state.result_response_lost
         Press-OfflineButton $querySelector
         $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u6838\u5fc3\u914d\u7f6e\u7ed3\u679c\u4ecd\u672a\u786e\u8ba4\uff1b\u4fdd\u7559\u539f\u8bf7\u6c42\uff0c\u4e0d\u4f1a\u91cd\u65b0\u5e94\u7528\u3002\u0024')) -Seconds 60
         $failed = Read-CoreQueryRecord
         $state = Read-CoreQueryControl
         if ($failed.state -cne 'unconfirmed' -or @($state.result_ids).Count -le $before -or
-            $state.dropped_result_replies -lt 1 -or (Find-CoreQuerySave).Current.IsEnabled) { throw 'Failed button query erased Unknown or did not reach Runtime result path' }
+            $state.result_forwarded -le $beforeForwarded -or $state.result_response_lost -le $beforeLost -or
+            $state.result_forwarded -ne $state.result_issued -or (Find-CoreQuerySave).Current.IsEnabled) { throw 'Failed button query erased Unknown or did not lose a real Runtime result response' }
         $null = Read-CoreQueryControl 'pass'
         Press-OfflineButton $querySelector
         $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u4e94\u8f74\u878d\u5408\u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u6838\u5fc3\u5df2\u5e94\u7528\uff1b\u4e0b\u4e00\u6b21\u53ec\u56de\u4f7f\u7528\u5df2\u786e\u8ba4\u7684\u8fd0\u884c\u914d\u7f6e\u3002\u0024')) -Seconds 60

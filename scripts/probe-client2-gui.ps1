@@ -700,11 +700,18 @@ public static class RespireGuiNative {
         }
         $bindingPath = Join-Path $root 'native-binding.json'
         if ($CoreConfigQuery) {
-            $report.native_binding.core_query = @{phase=$phase; address=$queryProxy.address; nonce=$queryProxy.nonce}
+            $report.native_binding.core_query = @{phase=$phase; address=$queryProxy.address}
             $report.native_binding.cli_exe = Join-Path $taskProfile 'bin/rsrs.exe'
             $report.native_binding.cli_sha256 = $report.cli_sha256
         }
-        $report.native_binding | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
+        $driverBinding = @{}
+        foreach ($key in $report.native_binding.Keys) { $driverBinding[$key] = $report.native_binding[$key] }
+        if ($CoreConfigQuery) {
+            # Private binding/control files are never selected by the upload.
+            # Keep control credentials out of the report's native_binding.
+            $driverBinding.core_query = @{phase=$phase; address=$queryProxy.address; control_file=$readyPath}
+        }
+        $driverBinding | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
         Write-Output 'GUI probe: window and WebView bound'
         $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
         $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
@@ -895,7 +902,12 @@ public static class RespireGuiNative {
         if ($report.status -ceq 'connectivity-passed') {
             try {
                 $finalQuery = Invoke-RestMethod -Uri ($queryProxy.address + '/__fixture') -Headers @{'X-Fixture-Control'=$queryProxy.nonce} -TimeoutSec 10
+                $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope')
+                $actualKeys = @($finalQuery.PSObject.Properties.Name)
+                if ($actualKeys.Count -ne $publicKeys.Count -or @($actualKeys | Where-Object { $_ -cnotin $publicKeys }).Count) { throw 'Forwarding proof has non-public fields' }
                 if (@($finalQuery.errors).Count -or @($finalQuery.apply_ids).Count -ne 1 -or $finalQuery.dropped_apply_replies -ne 1 -or
+                    $finalQuery.result_issued -ne @($finalQuery.result_ids).Count -or $finalQuery.result_forwarded -ne $finalQuery.result_issued -or
+                    $finalQuery.result_response_lost -lt 1 -or $finalQuery.result_response_lost -ge $finalQuery.result_forwarded -or
                     @($finalQuery.result_ids).Count -lt 2 -or @($finalQuery.result_ids | Where-Object { $_ -cne $report.core_query_original.operation_id }).Count) { throw 'Final forwarding evidence is not one original apply with original-only result queries' }
                 $report.core_query_final_counts = $finalQuery
             } catch { $report.core_query_evidence_error = $_.Exception.Message; $report.status = 'failed' }

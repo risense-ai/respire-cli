@@ -158,8 +158,8 @@ def serve(args):
     scope = {key: owner[key] for key in ("account_id", "instance_id", "generation")}
     lock = threading.Lock()
     state = {"mode": "idle", "operation_id": None, "apply_ids": [], "result_ids": [],
-             "dropped_apply_replies": 0, "dropped_result_replies": 0, "errors": [],
-             "core_test_mode": False, "scope": scope, "owner": owner}
+             "dropped_apply_replies": 0, "result_issued": 0, "result_forwarded": 0,
+             "result_response_lost": 0, "errors": [], "core_test_mode": False, "scope": scope}
     nonce = secrets.token_hex(32)
 
     def verify_owner():
@@ -168,7 +168,9 @@ def serve(args):
             require(live[key] == owner[key], 'Real Runtime owner changed')
 
     def snapshot():
-        return json.loads(json.dumps(state))
+        return {key: json.loads(json.dumps(state[key])) for key in (
+            'operation_id', 'apply_ids', 'result_ids', 'result_issued', 'result_forwarded',
+            'result_response_lost', 'dropped_apply_replies', 'errors', 'core_test_mode', 'scope')}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -214,6 +216,7 @@ def serve(args):
                 method = rpc.get("method")
                 apply = method == "core_config.apply"
                 result = method == "runtime.result"
+                drop_result_reply = False
                 if apply or result:
                     verify_owner()
                 with lock:
@@ -226,20 +229,30 @@ def serve(args):
                         require(rpc["operation_id"] == state["operation_id"] and rpc["scope"] == scope,
                                 "Result is not the original operation/scope")
                         state["result_ids"].append(rpc["operation_id"])
-                        if state["mode"] == "drop_results":
-                            state["dropped_result_replies"] += 1
-                            self.close_reply()
-                            return
+                        state["result_issued"] += 1
+                        drop_result_reply = state["mode"] == "drop_results"
                 connection = http.client.HTTPConnection("127.0.0.1", args.port, timeout=30)
                 try:
                     headers = {k: v for k, v in self.headers.items()
                                if k.lower() not in ("host", "connection", "content-length")}
                     connection.request(self.command, self.path, body=body, headers=headers)
+                    if result:
+                        with lock:
+                            state["result_forwarded"] += 1
                     response = connection.getresponse()
                     data, status = response.read(), response.status
                     response_type = response.getheader("Content-Type", "application/json")
                 finally:
                     connection.close()
+                if result and drop_result_reply:
+                    value = json.loads(data)
+                    require(status == 200 and value['ok'] is True
+                            and value['id'] == rpc['id'] and value['scope'] == scope,
+                            'Real Runtime did not return the original result response')
+                    with lock:
+                        state['result_response_lost'] += 1
+                    self.close_reply()
+                    return
                 if apply:
                     value = json.loads(data)
                     require(status == 200 and value["ok"] is True
