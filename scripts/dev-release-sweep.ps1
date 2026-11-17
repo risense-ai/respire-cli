@@ -135,6 +135,7 @@ trap { $failure = $_; if ($BusinessOnly) { $script:BusinessStatus = 'failed' }; 
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
 $script:PublishedRuntimePaths = @{}
+$script:RpcTokens = @{}
 
 function Write-SweepReport([switch]$Force) {
     # Keep periodic diagnostics without rebuilding the entire report after every assertion.
@@ -700,6 +701,11 @@ function Invoke-Om {
         [void]$psi.Environment.Remove($tokenName)
     }
     $psi.Environment['RSRS_DATA_DIR'] = $DataDir
+    # Host unlock needs authentication; keep each disposable device's token in memory.
+    if (-not $script:RpcTokens.ContainsKey($DataDir)) {
+        $script:RpcTokens[$DataDir] = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+    }
+    $psi.Environment['RSRS_RPC_TOKEN'] = $script:RpcTokens[$DataDir]
     $psi.Environment['RSRS_LANG'] = 'en'
     $psi.Environment['HOME'] = $SmokeHome
     $psi.Environment['USERPROFILE'] = $SmokeHome
