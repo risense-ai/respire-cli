@@ -149,7 +149,7 @@ def self_test():
     items = []
     keys.verify_owner = lambda: None
     keys.collection = SimpleNamespace(get_all_items=lambda: list(items))
-    for slot in ("super", "pass", "totp"):
+    for slot in ("super", "pass", "totp", "key-control"):
         item = SimpleNamespace(get_attributes=lambda slot=slot: {
             "service": "rsrs", "target": "default", "application": "rust-keyring",
             "username": slot + ":login-" + "a" * 32})
@@ -158,7 +158,8 @@ def self_test():
     keys.cleanup_business_entries()
     assert not items
     assert keys.business_cleanup == {"passed": True, "stage": "complete",
-        "observed_entries": 3, "validated_entries": 3, "deleted_entries": 3, "remaining_entries": 0}
+        "observed_entries": 4, "validated_entries": 4, "deleted_entries": 4, "remaining_entries": 0}
+    assert keys.business_classification["known_prefix_counts"]["key-control:"] == 1
     items.append(SimpleNamespace(get_attributes=lambda: {"service": "unknown"}))
     try:
         keys.cleanup_business_entries()
@@ -169,6 +170,22 @@ def self_test():
         assert "unknown" not in json.dumps(keys.business_cleanup)
     else:
         raise AssertionError("unknown credential accepted")
+
+    for username, service in (("key-control:legacy-" + "a" * 64, "rsrs"),
+            ("key-control:login-" + "a" * 31, "rsrs"),
+            ("key-control:login-" + "a" * 32 + ".backup", "rsrs"),
+            ("key-control:login-" + "a" * 32, "foreign")):
+        items.clear()
+        items.append(SimpleNamespace(get_attributes=lambda username=username, service=service: {
+            "service": service, "target": "default", "application": "rust-keyring", "username": username}))
+        try:
+            keys.cleanup_business_entries()
+        except RuntimeError:
+            assert len(items) == 1 and keys.business_cleanup["deleted_entries"] == 0
+            assert keys.business_cleanup["stage"] == "ownership_validation"
+            assert username not in json.dumps(keys.business_cleanup)
+        else:
+            raise AssertionError("foreign or malformed key-control accepted")
 
     class FakeManager:
         def __init__(self, cleanup_ok=True):

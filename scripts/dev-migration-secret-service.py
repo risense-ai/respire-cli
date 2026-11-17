@@ -175,7 +175,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         diagnostic["stage"] = "enumeration"
         items = list(self.collection.get_all_items())
         diagnostic["observed_entries"] = len(items)
-        prefixes = ("super:", "pass:", "totp:", "legacy-secret:", "classify:ds-model@", "classify:ds@", "classify:")
+        prefixes = ("super:", "pass:", "totp:", "legacy-secret:", "key-control:", "classify:ds-model@", "classify:ds@", "classify:")
         classification = self.business_classification = {
             "classified_entries": 0,
             "attribute_matches": {key: {"matched": 0, "mismatched": 0}
@@ -200,7 +200,7 @@ class SecretServiceKeys(_base.TrackedKeys):
                     and attributes.get("target") == "default"
                     and attributes.get("application") == "rust-keyring"
                     and isinstance(username, str)
-                    and re.fullmatch(r"(?:(?:super|pass|totp|legacy-secret):login-[a-f0-9]{32}"
+                    and re.fullmatch(r"(?:(?:super|pass|totp|legacy-secret|key-control):login-[a-f0-9]{32}"
                         r"|(?:super|pass|legacy-secret):legacy-(?:[a-f0-9]{16}|[a-f0-9]{64}))", username)))
         diagnostic["stage"] = "ownership_validation"
         for owned in ownership:
