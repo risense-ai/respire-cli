@@ -35,7 +35,10 @@ DASH = 'https://dash.rsrs.rs'
 
 
 DIRECT_CASE_IDS = frozenset({'owned_cli', 'nonloopback_unspecified_ipv4',
-                             'nonloopback_documentation_ipv4', 'nonloopback_dns'})
+                             'nonloopback_documentation_ipv4', 'nonloopback_dns',
+                             'account_profile_create', 'account_config_set', 'account_config_read',
+                             'account_model_install', 'account_register', 'account_model_probe',
+                             'runtime_prestart_stop', 'runtime_host_unlock'})
 CLI_REASONS = frozenset({'invalid_input', 'runtime_error', 'request_outcome_unknown'})
 
 
@@ -478,10 +481,13 @@ class Smoke:
         require(self.child.returncode == 0, 'owned_runtime_stop_exit_failed')
         self.child = None
 
-    def start(self):
+    def start(self, unlock=True):
         require(self.child is None, 'runtime_already_owned')
         if self.args.runtime_binary:
-            self.direct(['--runtime-internal', '--stop'])
+            self.direct(['--runtime-internal', '--stop'], case_id='runtime_prestart_stop')
+        token_path = self.root / 'runtime' / 'token'
+        # The host may already have created its unlock token; Runtime must not change it.
+        host_token = token_path.read_bytes() if token_path.exists() else None
         launch = ([str(self.args.runtime_binary), 'serve'] if self.args.runtime_binary else
                   [str(self.args.binary), '--runtime-internal'])
         self.child = subprocess.Popen([*launch, '--port', str(self.port),
@@ -490,8 +496,8 @@ class Smoke:
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
             require(self.child.poll() is None, 'owned_runtime_exited_before_ready')
-            token_path = self.root / 'runtime' / 'token'
-            require(not token_path.exists(), 'loopback_runtime_created_token')
+            require((token_path.read_bytes() if token_path.exists() else None) == host_token,
+                    'loopback_runtime_changed_host_token')
             if (self.root / 'runtime' / 'endpoint.json').is_file():
                 try:
                     code, health, _ = self.http(self.url, 'GET', '/api/health')
@@ -501,6 +507,17 @@ class Smoke:
                 if code == 200:
                     if self.args.runtime_binary:
                         verify_runtime_health(self.args, health, self.root, self.library, self.child.pid)
+                        if health.get('startup_complete') is not True:
+                            time.sleep(0.1)
+                            continue
+                        if unlock:
+                            receipt = self.direct(['runtime', 'unlock'], case_id='runtime_host_unlock')
+                            require(receipt.get('summary', {}).get('store_ready') is True,
+                                    'runtime_host_unlock_failed')
+                            code, health, _ = self.http(self.url, 'GET', '/api/health')
+                            require(code == 200, 'runtime_unlocked_health_failed')
+                            verify_runtime_health(self.args, health, self.root, self.library, self.child.pid)
+                        require(health.get('store_ready') is unlock, 'runtime_store_readiness_mismatch')
                     else:
                         require(health.get('v') == 1 and health.get('bin') == self.args.version
                             and health.get('pid') == self.child.pid
@@ -525,7 +542,7 @@ class Smoke:
         self.root.mkdir(mode=0o700)
         self.created = True
         self.library = self.root / 'library'
-        for name in ('home', 'library', 'config', 'data', 'cache', 'tmp', 'runtime', 'bin', 'models'):
+        for name in ('home', 'config', 'data', 'cache', 'tmp', 'runtime', 'bin', 'models'):
             (self.root / name).mkdir(mode=0o700)
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(('ONEMEMORY_', 'RESPIRE_', 'XDG_', 'DS_', 'JEV_', 'GNOME_'))
@@ -627,20 +644,28 @@ class Smoke:
         require(code == 200 and isinstance(health, dict) and health.get('source_revision') == expected,
                 'development_server_revision_mismatch')
         self.report['server_sha'] = expected
-        self.direct(['config', '--data-dir', str(self.library), '--addr', DEV, '--autosync', 'false', '--cure-auto', 'false'])
-        config = self.direct(['config'])['summary']
+        if self.args.runtime_binary:
+            # Only the host's creation transaction can select a fresh empty profile without a store.
+            self.library = self.root / 'accounts/runtime-smoke'
+            created = self.direct(['space', 'create', 'runtime-smoke'], case_id='account_profile_create')
+            require(Path(created.get('details', {}).get('dir', '')).resolve() == self.library,
+                    'owned_account_profile_mismatch')
+        self.direct(['config', '--data-dir', str(self.library), '--addr', DEV, '--autosync', 'false', '--cure-auto', 'false'],
+                    case_id='account_config_set')
+        config = self.direct(['config'], case_id='account_config_read')['summary']
         require(Path(config.get('data_dir', '')).resolve() == self.library and config.get('addr') == DEV,
                 'data_dir_configuration_failed')
         self.passed('data_dir_persisted')
-        installed = self.direct(['model', 'install-m3'], timeout=1200)
+        installed = self.direct(['model', 'install-m3'], timeout=1200, case_id='account_model_install')
         probe = installed['details']['backend_load']['evidence']
         require(probe.get('ready') is True and probe.get('inference_completed') is True
                 and probe.get('fresh_session') is True and probe.get('dimensions') == 1024
                 and str(probe.get('selected', '')).lower() == 'cpu', 'real_bge_cpu_probe_failed')
         self.attempted = True
-        registered = self.direct(['register', '--user', self.user, '--pass=' + self.password, '--addr', DEV])
+        registered = self.direct(['register', '--user', self.user, '--pass=' + self.password, '--addr', DEV],
+                                 case_id='account_register')
         require(registered['summary'].get('user') == self.user, 'owned_account_registration_failed')
-        probe = self.direct(['model', 'probe', '--model', 'm3'], timeout=180)['summary']
+        probe = self.direct(['model', 'probe', '--model', 'm3'], timeout=180, case_id='account_model_probe')['summary']
         require(probe.get('ready') is True and probe.get('dimensions') == 1024
                 and str(probe.get('selected', '')).lower() == 'cpu', 'real_bge_cpu_probe_failed')
         self.start()
@@ -703,7 +728,9 @@ class Smoke:
         # This is a host-owned profile change, not a fallback after an RPC failure.
         self.stop()
         value = self.direct(['agent-config', *args])
-        self.start()
+        mode = self.direct(['agent-config'])['summary']['memory_off']
+        require(type(mode) is bool, 'host_memory_off_state_invalid')
+        self.start(unlock=not mode)
         return value
 
     def settings(self):

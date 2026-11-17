@@ -30,6 +30,8 @@ class DiagnosticsTests(unittest.TestCase):
         for stdout in (SECRET, '[]', '{}', '', '{', 'null', '{"summary":null}'):
             result.stdout = stdout
             self.assertEqual(runtime.exit_diagnostic('nonloopback_dns', 1, result)['structured_reason'], 'unknown')
+        for case_id in runtime.DIRECT_CASE_IDS:
+            self.assertEqual(runtime.exit_diagnostic(case_id, 0, result)['case_id'], case_id)
 
     def test_direct_still_fails_and_success_unchanged(self):
         smoke = runtime.Smoke.__new__(runtime.Smoke)
@@ -44,6 +46,39 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(smoke.report['failure_diagnostic']['case_id'], 'nonloopback_dns')
             result.returncode = 1
             self.assertEqual(smoke.direct([SECRET], expected=1), value)
+
+        from unittest.mock import Mock
+        for standalone in (False, True):
+            with self.subTest(standalone=standalone):
+                smoke.args.runtime_binary = self.image if standalone else None
+                smoke.root, smoke.library = self.root, self.root / 'library'
+                smoke.user, smoke.password, smoke.attempted = 'owned-user', SECRET, False
+                smoke.http = Mock(return_value=(200, {'source_revision': 'a' * 40}, {}))
+                smoke.passed, smoke.start = Mock(), Mock()
+                profile = self.root / 'accounts/runtime-smoke' if standalone else smoke.library
+                probe = {'ready': True, 'inference_completed': True, 'fresh_session': True,
+                         'dimensions': 1024, 'selected': 'cpu'}
+                def direct(args, **kwargs):
+                    if args[0] == 'space':
+                        self.assertFalse(profile.exists())
+                        return {'details': {'dir': str(profile)}}
+                    if args[0] == 'config':
+                        return {'summary': {'data_dir': str(profile), 'addr': runtime.DEV}}
+                    if args[0] == 'register':
+                        self.assertTrue(smoke.attempted)
+                        return {'summary': {'user': smoke.user}}
+                    return {'details': {'backend_load': {'evidence': probe}}, 'summary': probe}
+                with patch.dict(os.environ, {'RSRS_DEV_SERVER_SHA': 'a' * 40,
+                                             'RSRS_DEV_SERVER_ADDR': runtime.DEV}), \
+                     patch.object(smoke, 'direct', side_effect=direct) as executed:
+                    smoke.account()
+                commands = [call.args[0] for call in executed.call_args_list]
+                self.assertEqual([args[0] for args in commands],
+                                 (['space'] if standalone else []) + ['config', 'config', 'model', 'register', 'model'])
+                self.assertEqual(commands[int(standalone)], ['config', '--data-dir', str(profile),
+                                 '--addr', runtime.DEV, '--autosync', 'false', '--cure-auto', 'false'])
+                smoke.passed.assert_called_once_with('data_dir_persisted')
+                smoke.start.assert_called_once_with()
 
     def test_health_unknown_reason_is_generic(self):
         for error in (RuntimeError(SECRET), AssertionError(SECRET), KeyError(SECRET), type(SECRET, (Exception,), {})(SECRET)):
@@ -113,6 +148,74 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(request.get_header('X-respire-health'),
                              'runtime-v1' if path == '/api/health' else None)
             self.assertEqual(smoke.opener.open.call_args.kwargs['timeout'], 90)
+
+        smoke.args, smoke.root, smoke.library = self.args, self.root, self.profile
+        smoke.env, smoke.port, smoke.url = {}, 1234, 'http://127.0.0.1:1234'
+        (self.root / 'runtime').mkdir()
+        (self.root / 'runtime/endpoint.json').write_text('{}')
+        token = self.root / 'runtime/token'
+        child = Mock(pid=123)
+        child.poll.return_value = None
+        # Cover first boot, restart with the host token, and the explicit Off state.
+        for existing_token, unlock in ((False, True), (True, True), (True, False)):
+            with self.subTest(existing_token=existing_token, unlock=unlock):
+                token.unlink(missing_ok=True)
+                if existing_token:
+                    token.write_text(SECRET)
+                smoke.child = None
+                waiting = dict(self.health, startup_complete=False, store_ready=False)
+                ready = dict(self.health, startup_complete=True, store_ready=False)
+                unlocked = dict(ready, store_ready=True)
+                health = [waiting, ready, unlocked] if unlock else [waiting, ready]
+                events = []
+                def direct(args, **kwargs):
+                    events.append(tuple(args))
+                    if args == ['runtime', 'unlock']:
+                        self.assertIn('identity', events)
+                        token.write_text(SECRET)
+                        return {'summary': {'store_ready': True}}
+                with patch.object(runtime.subprocess, 'Popen', return_value=child) as launched, \
+                     patch.object(runtime.time, 'sleep'), \
+                     patch.object(smoke, 'direct', side_effect=direct) as executed, \
+                     patch.object(smoke, 'http', side_effect=[(200, value, {}) for value in health]), \
+                     patch.object(runtime, 'verify_runtime_health', side_effect=lambda *a: events.append('identity')):
+                    smoke.start(unlock=unlock)
+                self.assertEqual(launched.call_args.args[0],
+                                 [str(self.image), 'serve', '--port', '1234', '--host', '127.0.0.1'])
+                self.assertEqual(sum(call.args[0] == ['runtime', 'unlock']
+                                     for call in executed.call_args_list), int(unlock))
+                self.assertEqual(events.count('identity'), len(health))
+        smoke.child = None
+        with patch.object(runtime.subprocess, 'Popen', return_value=child), \
+             patch.object(smoke, 'direct') as executed, \
+             patch.object(smoke, 'http', return_value=(200, ready, {})), \
+             patch.object(runtime, 'verify_runtime_health', side_effect=native.RuntimeHealthFailure(
+                 'runtime_health_fields_mismatch', ['pid'])):
+            with self.assertRaises(native.RuntimeHealthFailure):
+                smoke.start()
+        self.assertEqual(executed.call_count, 1)  # Stop only; no key delivery to a wrong owner.
+        for failure in ('unlock_receipt', 'store_locked', 'token_changed'):
+            smoke.child = None
+            token.write_text(SECRET)
+            def launch(*args, **kwargs):
+                if failure == 'token_changed':
+                    token.write_text('changed')
+                return child
+            with self.subTest(failure=failure), \
+                 patch.object(runtime.subprocess, 'Popen', side_effect=launch), \
+                 patch.object(smoke, 'direct', return_value={'summary': {
+                     'store_ready': failure != 'unlock_receipt'}}) as executed, \
+                 patch.object(smoke, 'http', return_value=(200, ready, {})), \
+                 patch.object(runtime, 'verify_runtime_health'):
+                with self.assertRaises(runtime.Failure):
+                    smoke.start()
+                self.assertEqual(sum(call.args[0] == ['runtime', 'unlock']
+                                     for call in executed.call_args_list), int(failure != 'token_changed'))
+        for off in (True, False):
+            with patch.object(smoke, 'stop'), patch.object(smoke, 'start') as started, \
+                 patch.object(smoke, 'direct', return_value={'summary': {'memory_off': off}}):
+                smoke.agent_config(['--set', 'memory_off=' + str(off).lower()])
+                started.assert_called_once_with(unlock=not off)
 
     def test_outbox_health_selectors_and_scoped_receipt_checks(self):
         import io
@@ -198,7 +301,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.health = dict(v=1, pid=123, exe=str(self.image), image_path=str(self.image), process_start_id='birth', runtime_version='fixture', bin='fixture', installation_root=str(self.root), installation_id=install, data_dir=str(self.profile), account_id=account, instance_id='instance', generation=1, image_sha256=digest)
         self.enterContext(patch.dict(sys.modules, {'psutil': types.SimpleNamespace(Process=lambda pid: self.owner)}))
         self.enterContext(patch.object(native, 'process_start_id', return_value='birth'))
-        self.enterContext(patch.object(native.sys, 'platform', 'fixture'))
+        self.enterContext(patch.object(native.sys, 'platform', 'win32' if os.name == 'nt' else 'fixture'))
         self.enterContext(patch.dict(os.environ, {}, clear=True))
 
     def verify(self):
@@ -256,7 +359,8 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_inspection_races_still_fail(self):
         real_stat = self.image.stat()
-        fake_stat = types.SimpleNamespace(st_dev=-1, st_ino=0, st_size=0, st_mtime_ns=0, st_ctime_ns=0)
+        fake_stat = types.SimpleNamespace(st_dev=-1, st_ino=0, st_size=0, st_mtime_ns=0, st_ctime_ns=0,
+                                         st_birthtime_ns=0)
         with patch.object(native.os, 'fstat', return_value=fake_stat):
             with self.assertRaisesRegex(native.RuntimeHealthFailure, 'runtime_health_os_disk_image_mismatch'):
                 self.verify()
