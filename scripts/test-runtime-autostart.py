@@ -845,6 +845,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 secondary = root / "accounts/secondary profile"
                 secondary_env = dict(env, RSRS_DATA_DIR=str(secondary), RSRS_BIN_DIR=str(secondary / "bin"))
                 secondary_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", secondary))
+                shutil.copy2(binary, secondary / "bin" / Path(binary).name)
                 seed_local_credentials(binary, secondary_env, keys)
                 assert (secondary / "rsrs.db").is_file(), "secondary fixture has no initialized store"
                 primary_session = json.loads((root / "session.json").read_text(encoding="utf-8"))

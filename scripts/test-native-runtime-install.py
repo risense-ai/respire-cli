@@ -5,6 +5,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -197,6 +198,31 @@ class FixtureInstallationTests(unittest.TestCase):
                       '(secondary / "rsrs.db").is_file()',
                       'secondary_session["keyring_account"] != primary_session["keyring_account"]'):
             self.assertIn(proof, source)
+        # Execute secondary installation setup with real file copies, without native credentials.
+        tree = ast.parse(source)
+        setup = next(node.body for node in ast.walk(tree) if isinstance(node, ast.Try)
+                     and any(isinstance(item, ast.Assign) and ast.unparse(item.targets[0]) == 'secondary_env'
+                             for item in node.body))
+        first = next(index for index, item in enumerate(setup) if isinstance(item, ast.Assign)
+                     and ast.unparse(item.targets[0]) == 'secondary')
+        last = next(index for index, item in enumerate(setup) if isinstance(item, ast.Expr)
+                    and ast.unparse(item.value) == 'seed_local_credentials(binary, secondary_env, keys)')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            stable = root / 'accounts/secondary profile/bin'
+            stable.mkdir(parents=True)
+            binary = root / 'rsrs.exe'
+            binary.write_bytes(b'offline-cli-image-never-executed')
+            seed = Mock()
+            copy_runtime = Mock(return_value=stable / 'runtime/official/rsrs-runtime.exe')
+            scope = dict(root=root, env={'RSRS_DATA_DIR': str(root), 'RSRS_BIN_DIR': str(root / 'bin')},
+                         binary=str(binary), managed_fixture=root / 'managed', Path=Path, keys=object(),
+                         shutil=shutil, copy_managed_installation=copy_runtime, seed_local_credentials=seed)
+            exec(compile(ast.Module(body=setup[first:last + 1], type_ignores=[]), '<secondary-installation>', 'exec'), scope)
+            self.assertEqual((stable / binary.name).read_bytes(), binary.read_bytes())
+            self.assertEqual(seed.call_args.args, (str(binary), scope['secondary_env'], scope['keys']))
+            self.assertEqual(scope['secondary_env']['RSRS_BIN_DIR'], str(stable))
+            self.assertEqual(scope['env']['RSRS_DATA_DIR'], str(root))
         # Run the actual switch block offline: config must stay idle before explicit start.
         from contextlib import nullcontext
         switch = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.For)
