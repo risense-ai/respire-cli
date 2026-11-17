@@ -36,7 +36,9 @@ jobs:
           github-token: ${{ github.token }}
           path: candidate-proof
       - name: Verify the unchanged candidate CLI
-        run: node npm/scripts/extract-artifact.mjs validated-cli cli
+        run: |
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          node npm/scripts/extract-artifact.mjs validated-cli cli
       - name: Reuse the candidate's exact public Runtime inventory
         env:
           GH_TOKEN: ${{ github.token }}
