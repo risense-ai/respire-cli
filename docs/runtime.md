@@ -1,5 +1,8 @@
 # Host runtime and sandbox clients
 
+The [component boundaries](component-boundaries.md) define the fixed Runtime23
+baseline, host configuration ownership and the remaining migration work.
+
 CLI and Client2 independently install and manage the same Runtime layout:
 `~/.rsrs/bin/rsrs[.exe]`, `~/.rsrs/bin/runtime/<version>/rsrs-runtime[.exe]`,
 and `~/.rsrs/bin/runtime.json`. Client2 does not invoke the CLI to install Runtime.
@@ -49,7 +52,7 @@ flowchart LR
 ```sh
 # Hosted dashboard (does not start the local runtime)
 rsrs web
-# Explicit legacy CLI shim (compatibility diagnostics only)
+# Private CLI host entry for the independent Runtime (not an in-process engine)
 rsrs --runtime-internal
 rsrs --runtime-internal --stop
 # Sandbox
@@ -62,11 +65,11 @@ caller; they never start the CLI as a business runtime. A damaged managed
 installation reports `repair required` and does not fall through to portable
 discovery. Restore it with a trusted complete release and its schema-2 metadata.
 
-The explicit `--runtime-internal` entry remains a legacy compatibility mode.
-Legacy CLI regressions that also need automatic restarts explicitly set
-`RSRS_RUNTIME_BIN` to that test's CLI executable. This override is a deliberate
-selection, not a response to a failed download. Existing overrides to independent
-Runtime binaries and portable discovery retain their selection rules.
+The private `--runtime-internal` entry remains a CLI host entry for the independent
+Runtime. Test fixtures identify the official Runtime separately from the CLI;
+the CLI executable cannot substitute for the fixed Runtime23 in new-stack
+acceptance. Old releases may seed historical databases, but their host commands
+are not run against the new Runtime as a compatibility requirement.
 
 Independent Runtime acceptance and candidate/G1 harnesses must use the actual
 Runtime artifact, without a CLI shim override or `--runtime-internal`. The legacy
