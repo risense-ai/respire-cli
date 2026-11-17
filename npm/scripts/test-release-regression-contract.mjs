@@ -130,7 +130,10 @@ test('supported Linux ARM targets require native runners, every source feedback 
   assert.match(text('release-native-validation.yml'),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
   assert.match(alpine,/--network none/);assert.match(alpine,/--direct model install-m3 --json/);
-  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,4);
+  assert.doesNotMatch(alpine,/-e RSRS_CPU_OWNED_ORT_FILE=/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,5);
+  const cache='/profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort';
+  const copied=alpine.indexOf('cp /cpu-model.ort '+cache),verified=alpine.indexOf('7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '+cache);
+  assert(copied>=0&&verified>copied&&verified<alpine.indexOf('--direct model install-m3'),'default CPU cache must be copied and verified before installation');
   assert.doesNotMatch(alpine,/--check|--status/);
   assert.doesNotMatch(alpine,/--json runtime start/);assert.match(alpine,/--json runtime stop/);assert.match(alpine,/trap .* EXIT/);
   assert.match(alpine,/p\["inference_completed"\] is True/);assert.match(alpine,/p\["fresh_session"\] is True/);
@@ -278,7 +281,10 @@ fs.writeFileSync(path.join(mount,'inference.json'),JSON.stringify({status:'ok',d
     };
     for(const [extra,selected] of [[{},cached],[{RSRS_CPU_OWNED_ORT_FILE:custom},custom]]){
       const result=run(extra);assert.equal(result.status,0,result.stderr);const args=JSON.parse(readFileSync(capture));
-      assert(args.includes(shellPath(selected)+':/cpu-model.ort:ro'));assert(args.includes(shellPath(models)+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
+      assert(args.includes(shellPath(selected)+':/cpu-model.ort:ro'));assert(args.includes(shellPath(models)+':/models:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_CPU_OWNED_ORT_FILE=')));assert.equal(args[args.indexOf('--network')+1],'none');
+      const container=args.at(-1),cache='/profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort';
+      assert(container.includes('cp /cpu-model.ort '+cache));
+      assert(container.includes('7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '+cache));
       assert(args.includes(shellPath(bundle)+':/runtime:ro'));assert(args.includes(shellPath(receipt)+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
       assert(args.includes('RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl'));
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
