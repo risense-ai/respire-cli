@@ -34,7 +34,7 @@ jobs:
           if ($LASTEXITCODE -or $run.head_sha -cne $env:CLI_SHA -or $run.run_attempt -ne 1 -or $run.repository.full_name -cne 'risense-ai/respire-cli') { throw 'Original run identity differs' }
           $job = gh api repos/risense-ai/respire-cli/actions/jobs/134099114118 | ConvertFrom-Json
           if ($LASTEXITCODE -or $job.run_id -ne 44098649710 -or $job.head_sha -cne $env:CLI_SHA -or $job.run_attempt -ne 1) { throw 'Original job identity differs' }
-          $log = @(gh api repos/risense-ai/respire-cli/actions/jobs/134099114118/logs)
+          $log = @(gh api --allow-escape-sequences repos/risense-ai/respire-cli/actions/jobs/134099114118/logs)
           if ($LASTEXITCODE) { throw 'Original input log unavailable' }
           $values = @($log | ForEach-Object { if ($_ -cmatch ' CANDIDATE_ASSETS: (\{.*\})$') { $Matches[1] } } | Select-Object -Unique)
           if ($values.Count -ne 1) { throw 'Require unique original candidate input' }
@@ -47,7 +47,7 @@ jobs:
           New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/original-cli" | Out-Null
           $download = [Diagnostics.ProcessStartInfo]::new('gh')
           $download.UseShellExecute = $false; $download.CreateNoWindow = $true; $download.RedirectStandardOutput = $true
-          foreach ($arg in @('api',"repos/risense-ai/respire-cli/actions/artifacts/$($artifact[0].id)/zip")) { [void]$download.ArgumentList.Add($arg) }
+          foreach ($arg in @('api','--allow-escape-sequences',"repos/risense-ai/respire-cli/actions/artifacts/$($artifact[0].id)/zip")) { [void]$download.ArgumentList.Add($arg) }
           $process = [Diagnostics.Process]::Start($download)
           $zip = [IO.File]::Create("$env:RUNNER_TEMP/original-cli.zip")
           try { $process.StandardOutput.BaseStream.CopyTo($zip) } finally { $zip.Dispose() }
