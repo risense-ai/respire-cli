@@ -787,6 +787,7 @@ class SnapshotTests(unittest.TestCase):
         native.TrackedKeys.__init__(self.keys, Path('unused'))
         self.keys.attribute_snapshots = {}
         self.keys.current_target_entries = set()
+        self.keys.recovered_super_entries = set()
         self.keys.generic_schema_observed = set()
         self.keys.normalized_current_entries = set()
         self.keys.collection = Collection()
@@ -863,7 +864,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(report['passed'])
         baseline = report['provider_schema_baseline']
         self.assertEqual(baseline['scope'],
-                         'two_new_owned_current_credentials_per_verified_registration_only')
+                         'verified_registration_pairs_and_verified_recovered_super_only')
         self.assertEqual(baseline['registered_entries'], 4)
         self.assertEqual(baseline['observed_normalizations'], 4)
         self.assertFalse(baseline['initial_raw_snapshots_overwritten'])
@@ -923,9 +924,40 @@ class SnapshotTests(unittest.TestCase):
         for prefix, value in (('super:', SUPER), ('key-control:', payload)):
             self.keys.collection.items.append(Item(self.keys.collection,
                 self.keys.attributes('rsrs', prefix + alias), value))
+        private_control = self.keys.collection.items[-1]
+        private_control.value = payload.replace(SUPER, 'foreign')
+        with self.assertRaisesRegex(RuntimeError, 'recovery_control_material_mismatch'):
+            self.keys.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+        self.assertFalse(self.keys.recovered_super_entries)
+        self.assertNotIn(('rsrs', 'key-control:' + alias), self.keys.entries)
+        private_control.value = payload
         self.keys.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+        recovery_super = next(item for item in self.keys.collection.items
+            if item.attributes['username'] == 'super:' + alias)
+        original_attributes = dict(recovery_super.attributes)
+        recovery_super.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+        self.keys.collection.items.append(Item(self.keys.collection,
+            self.keys.attributes('rsrs', 'pass:' + alias), PASSWORD))
+        self.keys.track_created_login(dict(candidate, user=USER, addr=legacy.UPSTREAM), USER, SUPER, PASSWORD,
+            recovery_operation=operation)
+        self.assertEqual(self.keys.attribute_snapshots['rsrs', 'super:' + alias], original_attributes)
         control = next(item for item in self.keys.collection.items
             if item.attributes['username'] == 'key-control:' + alias)
+        control.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+        with self.assertRaisesRegex(RuntimeError, 'attributes_changed'):
+            self.keys.read('rsrs', 'key-control:' + alias)
+        del control.attributes['xdg:schema']
+        del recovery_super.attributes['xdg:schema']
+        with self.assertRaisesRegex(RuntimeError, 'schema_reverted'):
+            self.keys.read('rsrs', 'super:' + alias)
+        recovery_super.attributes['xdg:schema'] = 'foreign'
+        with self.assertRaisesRegex(RuntimeError, 'schema_not_generic'):
+            self.keys.read('rsrs', 'super:' + alias)
+        recovery_super.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+        recovery_super.attributes['application'] = 'foreign'
+        with self.assertRaisesRegex(RuntimeError, 'attributes_mismatch'):
+            self.keys.read('rsrs', 'super:' + alias)
+        recovery_super.attributes['application'] = 'rust-keyring'
         control.value = 'third-party-private-material'
         rejected = self.keys.cleanup()
         self.assertFalse(rejected['passed'])
@@ -936,6 +968,8 @@ class SnapshotTests(unittest.TestCase):
         report = self.keys.cleanup()
         self.assertTrue(report['passed'])
         self.assertEqual(report['provider_schema_baseline']['registered_entries'], 2)
+        self.assertEqual(report['provider_schema_baseline']['recovered_super_entries'], 1)
+        self.assertEqual(report['provider_schema_baseline']['observed_normalizations'], 1)
         self.assertFalse(self.keys.collection.items)
 
 
