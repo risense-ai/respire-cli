@@ -75,12 +75,6 @@ jobs:
             assert.ok(!/[\r\n]/.test(value)); appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
           }
           NODE
-      - name: Prepare file tracing only for this account-free diagnostic
-        run: |
-          docker build -t respire-alpine-trace - <<'DOCKER'
-          FROM alpine:3.23
-          RUN apk add --no-cache strace
-          DOCKER
       - name: Install official host models and run only the offline Alpine probe
         env:
           RSRS_DATA_DIR: ${{ runner.temp }}/diagnostic-model
@@ -122,6 +116,5 @@ jobs:
           name: dev19-arm-alpine-model-plan-diagnostic
           path: |
             ${{ runner.temp }}/native-model-inference.json
-            ${{ runner.temp }}/arm-alpine-probe/inference.json
-            ${{ runner.temp }}/arm-alpine-probe/model-file-trace.log
+            ${{ runner.temp }}/arm-alpine-probe/model-probe-result.json
           if-no-files-found: warn
