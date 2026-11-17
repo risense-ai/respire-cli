@@ -467,7 +467,7 @@ class Smoke:
                 'http_status': code,
                 'actual_exit': reply.get('exit') if isinstance(reply, dict) and type(reply.get('exit')) is int else None,
                 'rpc_code': reply.get('code') if isinstance(reply, dict) and reply.get('code') in
-                    ('locked', 'scope_mismatch', 'invalid_config', 'daemon_unavailable',
+                    ('locked', 'runtime_locked', 'scope_mismatch', 'invalid_config', 'daemon_unavailable',
                      'runtime_maintenance', 'host_command_required') else 'unclassified',
             }
         require(code == 200 and isinstance(reply, dict) and reply.get('ok') is (expected == 0),
@@ -759,7 +759,19 @@ class Smoke:
         require(self.rpc(['show', memory_id])['details'].get('entry', {}).get('id') == memory_id, 'readonly_read_failed')
         self.agent_config(['--set', 'readonly=false'])
         self.agent_config(['--set', 'memory_off=true'])
-        skipped = self.rpc(['show', memory_id])
+        if self.args.runtime_binary:
+            code, health, _ = self.http(self.url, 'GET', '/api/health')
+            require(code == 200, 'off_runtime_health_failed')
+            verify_runtime_health(self.args, health, self.root, self.library, self.child.pid)
+            require(health.get('store_ready') is False, 'off_runtime_store_unlocked')
+            request = scoped_rpc_request(health, ['--json', 'show', memory_id])
+            code, reply, _ = self.http(self.url, 'POST', '/api/rpc', request, self.token)
+            verify_rpc_receipt(request, reply)
+            require(code == 200 and reply.get('ok') is False and reply.get('exit') == 1
+                    and reply.get('code') == 'runtime_locked', 'off_runtime_read_not_locked')
+            skipped = self.direct(['show', memory_id])
+        else:
+            skipped = self.rpc(['show', memory_id])
         require(skipped.get('summary') == {'mode': 'off', 'skipped': True, 'count': 0}
                 and skipped.get('items') == [] and skipped.get('details') == []
                 and skipped.get('errors') == [], 'off_read_empty_response_missing')
