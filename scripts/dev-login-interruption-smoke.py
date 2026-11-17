@@ -846,7 +846,7 @@ def main():
             if vault["wrapped_urk"].startswith(legacy.PREFIX):
                 value["crypto_namespace"] = legacy.PREFIX
             if keys:
-                alias = "login-" + secrets.token_hex(16)
+                alias = "legacy-" + secrets.token_hex(8)
                 keys.put("rsrs", "super:" + alias, code if vault["version"] == 4 else old_super)
                 keys.put("rsrs", "pass:" + alias, "synthetic-password")
                 value.update(keyring_account=alias, keyring_backend=keys.credential_backend)
