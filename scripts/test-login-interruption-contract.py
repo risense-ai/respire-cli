@@ -200,8 +200,16 @@ class JournalContract(unittest.TestCase):
         self.assertNotIn('"original": list(initial_session)', SOURCE)
         seed = next(node for node in ast.walk(TREE)
                     if isinstance(node, ast.FunctionDef) and node.name == 'write_session')
+        from importlib import util
+        spec = util.spec_from_file_location('source_fixture_keys', Path(__file__).with_name('dev-migration-keyring.py'))
+        key_module = util.module_from_spec(spec)
+        spec.loader.exec_module(key_module)
         with tempfile.TemporaryDirectory() as temporary:
-            keys = Mock(credential_backend='secret_service')
+            keys = key_module.TrackedKeys(Path(temporary))
+            keys.credential_backend = 'secret_service'
+            stored = {}
+            keys._read = Mock(side_effect=lambda service, slot: stored.get((service, slot)))
+            keys._put = Mock(side_effect=lambda service, slot, value: stored.__setitem__((service, slot), value))
             aliases = set()
             scope = dict(json=json, addr=self.addr, secrets=__import__('secrets'), legacy=Mock(PREFIX='rsrs:'),
                          session=Path(temporary) / 'session.json', keys=keys, code='synthetic-current-super',
@@ -212,9 +220,9 @@ class JournalContract(unittest.TestCase):
                 alias = value['keyring_account']
                 self.assertIn(alias, aliases)
                 self.assertEqual(value['keyring_backend'], 'secret_service')
-                keys.put.assert_any_call('rsrs', 'super:' + alias,
+                keys._put.assert_any_call('rsrs', 'super:' + alias,
                     'synthetic-current-super' if version == 4 else 'synthetic-original-super')
-                keys.put.assert_any_call('rsrs', 'pass:' + alias, 'synthetic-password')
+                keys._put.assert_any_call('rsrs', 'pass:' + alias, 'synthetic-password')
                 self.assertFalse(any(field in value for field in ('super', 'pass', 'secret', 'secret_key')))
             self.assertEqual(len(aliases), 2)
         self.assertIn('start_new_session=True', SOURCE)
