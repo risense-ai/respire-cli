@@ -142,15 +142,9 @@ pub(crate) fn review_agent_config(intent: respire_protocol::config_control::Agen
         }
     };
     let original_config = bytes.as_ref().map(|bytes| String::from_utf8(bytes.clone())).transpose()?;
-    let host_only = !matches!(intent.key.trim(), "read_heat" | "recall_fusion");
-    let original = if workspace || host_only {
-        let value: Value = original_config.as_deref().map(serde_json::from_str).transpose()
-            .context("agent config contains invalid JSON")?.unwrap_or_else(|| json!({}));
-        anyhow::ensure!(value.is_object(), "agent config must be an object");
-        value
-    } else {
-        original_config.as_deref().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_else(|| json!({}))
-    };
+    let original: Value = original_config.as_deref().map(serde_json::from_str).transpose()
+        .context("agent config contains invalid JSON")?.unwrap_or_else(|| json!({}));
+    anyhow::ensure!(original.is_object(), "agent config must be an object");
     let candidate = intent.apply(&original).map_err(anyhow::Error::msg)?;
     if workspace { config::validate_client_config(&candidate, &path)?; }
     let mut review = AgentConfigReview { operation_id: uuid::Uuid::new_v4().to_string(),
@@ -174,8 +168,6 @@ pub(crate) fn read_agent_config_for_write(profile: &Path) -> Result<Value> {
 fn reviewed_agent_config(
     review: &respire_protocol::config_control::AgentConfigReview,
 ) -> Result<(PathBuf, Vec<u8>)> {
-    anyhow::ensure!(!matches!(review.intent.key.trim(), "read_heat" | "recall_fusion"),
-        "Runtime setting requires its existing control entry point");
     let (root, profile) = config::control_roots()?;
     anyhow::ensure!(root.canonicalize()? == review.installation_root
         && profile.canonicalize()? == review.profile
@@ -220,6 +212,22 @@ pub(crate) fn publish_agent_config(
     replace_config(&path, Some(&candidate))?;
     anyhow::ensure!(agent_config_bytes(&path)?.as_deref() == Some(candidate.as_slice()),
         "agent config candidate changed after publication");
+    reviewed_agent_config(review)?;
+    publish_receipt()
+}
+
+/// Roll back only our exact candidate after a confirmed core rejection.
+pub(crate) fn rollback_agent_config(
+    review: &respire_protocol::config_control::AgentConfigReview,
+    publish_receipt: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let (path, candidate) = reviewed_agent_config(review)?;
+    let _lock = config_lock(&path)?;
+    anyhow::ensure!(agent_config_bytes(&path)?.as_deref() == Some(candidate.as_slice()),
+        "agent config rollback CAS conflict; no third-party edit was overwritten");
+    replace_config(&path, review.original_config.as_deref().map(str::as_bytes))?;
+    anyhow::ensure!(agent_config_bytes(&path)?.as_deref() == review.original_config.as_deref().map(str::as_bytes),
+        "agent config original changed during rollback");
     reviewed_agent_config(review)?;
     publish_receipt()
 }
@@ -558,6 +566,26 @@ mod tests {
         fs::remove_file(&agent)?;
         assert!(publish_agent_config(&review, || anyhow::bail!("synthetic receipt write failure")).is_err());
         assert_eq!(serde_json::from_slice::<Value>(&fs::read(&agent)?)?, json!({"diary_mode":"verbose"}));
+        rollback_agent_config(&review, || Ok(()))?;
+        assert!(!agent.exists());
+        assert!(rollback_agent_config(&review, || anyhow::bail!("rollback must not replay")).is_err());
+        let original = b"{ \"keep\": true, \"read_heat\": true }\n";
+        fs::write(&agent, original)?;
+        let special = review_agent_config(AgentConfigIntent { key: "read_heat".into(), raw_value: "false".into() },
+            root.clone(), root.clone())?;
+        publish_agent_config(&special, || Ok(()))?;
+        let candidate = fs::read(&agent)?;
+        fs::write(&agent, b"{\"third_party\":true}")?;
+        assert!(rollback_agent_config(&special, || anyhow::bail!("rollback overwrote external edit")).is_err());
+        assert_eq!(fs::read(&agent)?, b"{\"third_party\":true}");
+        fs::write(&agent, candidate)?;
+        rollback_agent_config(&special, || Ok(()))?;
+        assert_eq!(fs::read(&agent)?, original);
+        for corrupt in [b"{".as_slice(), b"[]".as_slice(), b"null".as_slice()] {
+            fs::write(&agent, corrupt)?;
+            assert!(review_agent_config(special.intent.clone(), root.clone(), root.clone()).is_err());
+            assert_eq!(fs::read(&agent)?, corrupt);
+        }
         Ok(())
     }
 
