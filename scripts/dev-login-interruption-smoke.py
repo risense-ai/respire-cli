@@ -86,6 +86,13 @@ def safe_cli_diagnostic(stdout, stderr):
     text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
     text += "\n" + stderr.decode("utf-8", errors="replace")
     categories = (
+        ("config_target_start", "config stage=target_start"),
+        ("config_target_owner", "config stage=target_owner_verification"),
+        ("config_private_validation", "Runtime did not confirm private config validation"),
+        ("config_profile_binding", "candidate selected a different target profile"),
+        ("config_source_binding", "config source profile changed since review"),
+        ("config_store_not_ready", "configured target Runtime did not confirm store readiness"),
+        ("runtime_rpc_transport", "runtime_rpc_transport_failed"),
         ("runtime_account_rejected", "Runtime rejected account control (account_outcome_unknown)"),
         ("control_spawn", "cannot start owned host control Runtime"),
         ("control_response_channel", "host control response channel failure"),
@@ -1210,6 +1217,16 @@ def main():
             require([legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in restored_rows]
                     == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
             report["stage"] = "legacy_recovery_select_profile"
+            report["profile_selection_probe"] = {
+                "installation_matches_fixture": Path(env["RSRS_DATA_DIR"]).resolve() == root.resolve(),
+                "runtime_inside_installation": Path(env["RSRS_RUNTIME_BIN"]).resolve().is_relative_to(root.resolve()),
+                "selection_before_switch": Path(json.loads(config.read_bytes())["data_dir"]).resolve() == root.resolve(),
+                "target_inside_installation": restored_root.resolve().is_relative_to(root.resolve()),
+                "target_alias_matches_migration": restored_session.get("keyring_account") == alias,
+                "target_backend": restored_session.get("keyring_backend") in ("native", "secret_service", "kernel"),
+                "target_inline_factors": any(key in restored_session for key in ("super", "pass", "secret", "secret_key")),
+                "target_primary_credential": migration_keys._read("rsrs", "super:" + alias) is not None,
+            }
             selected = json.loads(cli("--json", "account", "use", "recovered-original").stdout)["summary"]
             require(Path(selected["dir"]).resolve() == restored_root.resolve(), "original_profile_selection_failed")
             profiles = json.loads(cli("--json", "account", "list").stdout)["details"]["accounts"]
