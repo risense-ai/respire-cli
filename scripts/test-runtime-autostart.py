@@ -43,11 +43,12 @@ def foreground_health_ready(health, root, runtime, expected_ready, owner):
     return identity, health.get("startup_complete") is True and health.get("store_ready") is expected_ready
 
 
-def seed_local_credentials(binary, env, keys):
+def seed_local_credentials(binary, env, keys, profile):
     """Create only an owned, unbound session through the public host transaction."""
-    profile = Path(env["RSRS_DATA_DIR"]).resolve()
+    root = Path(env["RSRS_DATA_DIR"]).resolve()
+    profile = profile.resolve()
     session_path = profile / "session.json"
-    journal = profile / "runtime/autostart/key-control.json"
+    journal = root / "runtime/autostart/key-control.json"
     results = journal.parent / "key-results"
     offline = journal.with_name("offline-keygen.json")
     assert not any(path.exists() for path in (session_path, journal, results, offline)), "key fixture must be fresh"
@@ -103,7 +104,7 @@ def seed_local_credentials(binary, env, keys):
                 binding = json.loads(offline.read_text(encoding="utf-8"))
                 operation = uuid.UUID(binding["operation_id"])
                 assert binding["schema"] == 1 and operation.version == 4 and str(operation) == binding["operation_id"], "invalid key fixture operation"
-                assert all(os.path.samefile(binding[key], profile) for key in ("root", "source", "profile")), "foreign key fixture owner"
+                assert os.path.samefile(binding["root"], root) and all(os.path.samefile(binding[key], profile) for key in ("source", "profile")), "foreign key fixture owner"
                 stage = binding["stage"]
                 assert stage in ("prepared", "sent", "committed", "starting", "verified", "finished", "handed_off",
                                  "rolled_back", "rollback_starting", "rollback_finished", "rollback_handed_off"), "invalid key fixture stage"
@@ -339,7 +340,7 @@ def main():
         foreground(False)
         print("PASS: fresh default-off status, client-only denial, keyless locked foreground and owned stop")
         env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", root))
-        seed_local_credentials(binary, env, keys)
+        seed_local_credentials(binary, env, keys, root)
         health = foreground(True)
         print("PASS: CLI-created unbound credentials, real host unlock, foreground store readiness and owned stop")
         # A fresh off-mode installation must restart without opening/creating a
@@ -840,14 +841,15 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 print("PASS: verified cross-installation owner refused without replacement; persisted fence cleared only by explicit recovery after owner drain")
                 if sys.platform.startswith("linux"):
                     env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", root))
-                    seed_local_credentials(binary, env, keys)
-                # Seed an independent unbound profile while the shared port is idle.
-                secondary = root / "accounts/secondary profile"
-                secondary_env = dict(env, RSRS_DATA_DIR=str(secondary), RSRS_BIN_DIR=str(secondary / "bin"))
-                secondary_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", secondary))
-                shutil.copy2(binary, secondary / "bin" / Path(binary).name)
-                seed_local_credentials(binary, secondary_env, keys)
+                    seed_local_credentials(binary, env, keys, root)
+                # Unbound receipts belong to the installation, not just the session file.
+                secondary = root / "accounts/secondary-profile"
+                selected = command("account", "use", "secondary-profile")
+                assert selected.returncode == 0, "secondary profile selection failed"
+                seed_local_credentials(binary, env, keys, secondary)
                 assert (secondary / "rsrs.db").is_file(), "secondary fixture has no initialized store"
+                selected = command("account", "use", "main")
+                assert selected.returncode == 0, "main profile selection failed"
                 primary_session = json.loads((root / "session.json").read_text(encoding="utf-8"))
                 secondary_session = json.loads((secondary / "session.json").read_text(encoding="utf-8"))
                 assert secondary_session["keyring_account"] != primary_session["keyring_account"], "profile fixtures share credentials"
