@@ -15,8 +15,10 @@ assert.deepEqual(candidate.client2,{release:'v2.0.0-dev.15',source_sha:'f3455ce6
 assert.equal(candidate.runtime.version,'2.0.0-dev.24');
 assert.equal(candidate.runtime.source_sha,'7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b');
 // Ensure the actual executed probe is precisely the selected diagnostic probe source, not an unreviewed product change.
-const repaired=execFileSync('git',['show','7392cd7c08adc46de874146804588fb3829a870f:scripts/probe-client2-gui.ps1']);
-assert.equal(repaired.toString('utf8').replaceAll('\r\n','\n'),readFileSync('scripts/probe-client2-gui.ps1','utf8').replaceAll('\r\n','\n'));
+for(const path of ['scripts/probe-client2-gui.ps1','scripts/probe-client2-gui-native.ps1']) {
+  const repaired=execFileSync('git',['show','d90e2f69c9ed5fbbb021ee1e2a6592cff0fe8e34:'+path]);
+  assert.equal(repaired.toString('utf8').replaceAll('\r\n','\n'),readFileSync(path,'utf8').replaceAll('\r\n','\n'));
+}
 const target=process.env.CLI_TARGET, root=join(process.env.RUNNER_TEMP,'diagnostic-assets');
 mkdirSync(root); for(const kind of ['cli','runtime'])mkdirSync(join(root,kind));
 const cliAssets=publishedAssetNames('cli',target).map(name=>{
@@ -42,5 +44,5 @@ for(const [key,value] of Object.entries({...consumed.env,RSRS_ARTIFACT_SOURCE:'b
 // Probe must consume the identity receipt and bytes from the same verified directory.
 copyFileSync(join(destination,'candidate-consumer-identity.json'),join(process.env.RUNNER_TEMP,'diagnostic-cli','candidate-consumer-identity.json'));
 writeFileSync(join(process.env.RUNNER_TEMP,'diagnostic-input-proof.json'),JSON.stringify({diagnostic_only:true,
-  full_passed:false,harness_sha:process.env.GITHUB_SHA,repaired_probe_commit:'7392cd7c08adc46de874146804588fb3829a870f',
+  full_passed:false,harness_sha:process.env.GITHUB_SHA,repaired_probe_commit:'d90e2f69c9ed5fbbb021ee1e2a6592cff0fe8e34',
   candidate,release,runtimeProducer,identity:consumed.identity},null,2)+'\n');
