@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, ErrorCode};
 
 pub struct LibraryLock {
@@ -41,15 +41,15 @@ impl LibraryLock {
         loop {
             match conn.execute_batch("BEGIN EXCLUSIVE;") {
                 Ok(_) => return Ok(Self { _conn: conn }),
-                Err(rusqlite::Error::SqliteFailure(e, _))
+                Err(rusqlite::Error::SqliteFailure(e, message))
                     if e.code == ErrorCode::DatabaseBusy || e.code == ErrorCode::DatabaseLocked =>
                 {
                     let waited = began.elapsed();
                     if waited >= max_wait {
-                        anyhow::bail!(
+                        return Err(rusqlite::Error::SqliteFailure(e, message)).with_context(|| format!(
                             "memory library still locked after {}s \u{2014} check the holding process or retry later",
                             waited.as_secs()
-                        );
+                        ));
                     }
                     if waited >= next_report {
                         eprintln!(
@@ -79,7 +79,10 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let held = LibraryLock::acquire(dir.path(), Duration::from_secs(2))?;
         let err = LibraryLock::acquire(dir.path(), Duration::from_millis(400));
-        assert!(err.is_err(), "second locker must time out");
+        let err = err.err().ok_or_else(|| anyhow::anyhow!("second locker must time out"))?;
+        assert!(matches!(err.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(code.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)));
         drop(held);
         let _again = LibraryLock::acquire(dir.path(), Duration::from_secs(2))?;
         Ok(())

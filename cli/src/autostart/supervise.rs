@@ -200,7 +200,14 @@ pub(super) fn configure_background_owner(owner: &crate::net_rpc::Health) -> Resu
     let root = respire_client_host::config::control_roots()?.0;
     let marker = root.join("runtime/autostart/maintenance.json");
     if marker.try_exists()? { return Ok(false); }
-    let _takeover = crate::runtime_policy::takeover_lock()?;
+    // A stop owner holds takeover while waiting for this supervisor to exit.
+    let _takeover = match crate::runtime_policy::try_takeover_lock() {
+        Ok(ownership) => ownership,
+        Err(error) if matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
     if marker.try_exists()? { return Ok(false); }
     let current = crate::rpc::probe_runtime()?.context("background core owner exited")?;
     anyhow::ensure!(current.pid == owner.pid && current.process_start_id == owner.process_start_id
@@ -327,16 +334,19 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .map_err(|error| anyhow::anyhow!("test environment lock poisoned: {error}"))?;
-        struct Restore(Option<std::ffi::OsString>);
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for Restore {
             fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("RSRS_RUNTIME_BIN", value),
-                    None => std::env::remove_var("RSRS_RUNTIME_BIN"),
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }
-        let _restore = Restore(std::env::var_os("RSRS_RUNTIME_BIN"));
+        let _restore = Restore(["RSRS_RUNTIME_BIN", "RSRS_DATA_DIR", "RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART"]
+            .into_iter().map(|key| (key, std::env::var_os(key))).collect());
         let directory = tempfile::tempdir()?;
         std::env::set_var("RSRS_RUNTIME_BIN", directory.path().join("missing-runtime"));
         anyhow::ensure!(resolve_child_plan().is_err());
@@ -348,6 +358,33 @@ mod tests {
         anyhow::ensure!(resolve_child_plan()? == binary);
         std::env::set_var("RSRS_RUNTIME_BIN", std::env::current_exe()?);
         anyhow::ensure!(resolve_child_plan().is_err());
+
+        let root = directory.path().join("installation");
+        std::fs::create_dir(&root)?;
+        let root = root.canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::set_var("RSRS_CLIENT_ONLY", "0");
+        std::env::set_var("RSRS_NO_AUTOSTART", "0");
+        let owner = serde_json::from_value(serde_json::json!({
+            "server":"respire", "bin":"rsrs-runtime", "pid":0, "v":1
+        }))?;
+        let marker = root.join("runtime/autostart/maintenance.json");
+        std::fs::create_dir_all(marker.parent().context("fixture marker parent missing")?)?;
+        std::fs::write(&marker, b"{}")?;
+        assert!(!configure_background_owner(&owner)?);
+        std::fs::remove_file(marker)?;
+        let controller = crate::runtime_policy::takeover_lock()?;
+        // The controller cannot release takeover until its supervisor exits.
+        assert!(!configure_background_owner(&owner)?);
+        assert!(controller.protects(&root.join("runtime/takeover"))?);
+        drop(controller);
+        let lock_file = root.join("runtime/takeover/lock.db");
+        std::fs::remove_file(&lock_file)?;
+        std::fs::create_dir(&lock_file)?;
+        assert!(configure_background_owner(&owner).is_err());
+        // Busy is the only deferred error; host-policy denial remains fatal.
+        std::env::set_var("RSRS_CLIENT_ONLY", "1");
+        assert!(configure_background_owner(&owner).is_err());
         Ok(())
     }
 
