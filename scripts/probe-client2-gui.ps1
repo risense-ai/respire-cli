@@ -439,7 +439,8 @@ public static class RespireGuiNative {
             (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256 -or
             (Get-FileHash -LiteralPath $installedCli -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.cli_binary_sha256 -or
             (Get-Item -LiteralPath $installedCli).Length -ne (Get-Item -LiteralPath $cliPath).Length) { throw 'Online installed CLI/Runtime differs from the exact published assets' }
-        foreach ($file in $runtimeMetadata.files) {
+        # The installer verifies the full archive, then removes release-only core-notices.
+        foreach ($file in @($runtimeMetadata.files | Where-Object { -not $_.path.StartsWith('core-notices/', [StringComparison]::Ordinal) })) {
             $installedFile = Join-Path $managed $file.path
             if ((Get-Item -LiteralPath $installedFile).Length -ne $file.size -or
                 (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {
@@ -470,7 +471,8 @@ public static class RespireGuiNative {
         if ($candidateAssets) {
             if ($selection.version -cne $RuntimeVersion -or $selection.sha256 -cne $consumer.runtime_binary_sha256 -or
                 (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256) { throw 'Installed candidate Runtime image differs' }
-            foreach ($file in $runtimeMetadata.files) {
+            # The installer verifies the full archive, then removes release-only core-notices.
+            foreach ($file in @($runtimeMetadata.files | Where-Object { -not $_.path.StartsWith('core-notices/', [StringComparison]::Ordinal) })) {
                 $name = if ($file.path -ceq $runtimeMetadata.binary_file) { 'rsrs-runtime.exe' } else { $file.path }
                 $installedFile = Join-Path $managed $name
                 if ((Get-Item -LiteralPath $installedFile).Length -ne $file.size -or
