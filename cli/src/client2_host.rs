@@ -667,22 +667,36 @@ fn loopback_listener(port: u16, pid: u32) -> Result<u32> {
     anyhow::bail!("claimed compatibility host does not own the OS listener")
 }
 
+#[cfg(windows)]
+fn windows_listener_owner(output: &[u8], port: u16) -> Result<u32> {
+    let local = format!("127.0.0.1:{port}");
+    let wildcard = format!("0.0.0.0:{port}");
+    let mut owners = std::collections::BTreeSet::new();
+    for line in output.split(|byte| *byte == b'\n') {
+        let fields: Vec<_> = line.split(u8::is_ascii_whitespace)
+            .filter(|field| !field.is_empty()).collect();
+        // netstat headers use the system code page; TCP records must be ASCII.
+        if fields.first().copied() != Some(b"TCP".as_slice()) { continue; }
+        anyhow::ensure!(line.is_ascii() && fields.len() == 5, "invalid OS TCP listener record");
+        if fields[3] == b"LISTENING" && (fields[1] == local.as_bytes() || fields[1] == wildcard.as_bytes()) {
+            anyhow::ensure!(fields[4].iter().all(u8::is_ascii_digit), "invalid OS TCP listener PID");
+            owners.insert(std::str::from_utf8(fields[4])?.parse::<u32>()?);
+        }
+    }
+    anyhow::ensure!(owners.len() == 1 && !owners.contains(&0),
+        "compatibility loopback listener ownership is unavailable or ambiguous");
+    owners.into_iter().next().context("compatibility listener is missing")
+}
+
 #[cfg(not(target_os = "linux"))]
 fn loopback_listener(port: u16, _pid: u32) -> Result<u32> {
+    #[cfg(unix)]
     let mut owners = std::collections::BTreeSet::new();
     #[cfg(windows)]
     {
         let output = Command::new("netstat").args(["-ano", "-p", "tcp"]).output()?;
         anyhow::ensure!(output.status.success(), "cannot inspect compatibility listener");
-        let local = format!("127.0.0.1:{port}");
-        let wildcard = format!("0.0.0.0:{port}");
-        for line in String::from_utf8(output.stdout)?.lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() == 5 && fields[0] == "TCP" && fields[3] == "LISTENING"
-                && (fields[1] == local || fields[1] == wildcard) {
-                owners.insert(fields[4].parse::<u32>()?);
-            }
-        }
+        return windows_listener_owner(&output.stdout, port);
     }
     #[cfg(unix)]
     {
@@ -701,9 +715,12 @@ fn loopback_listener(port: u16, _pid: u32) -> Result<u32> {
             }
         }
     }
-    anyhow::ensure!(owners.len() == 1 && !owners.contains(&0),
-        "compatibility loopback listener ownership is unavailable or ambiguous");
-    owners.into_iter().next().context("compatibility listener is missing")
+    #[cfg(unix)]
+    {
+        anyhow::ensure!(owners.len() == 1 && !owners.contains(&0),
+            "compatibility loopback listener ownership is unavailable or ambiguous");
+        owners.into_iter().next().context("compatibility listener is missing")
+    }
 }
 
 fn listener_matches(public: &Value, port: u16, listener: Option<u32>) -> Result<u32> {
@@ -908,6 +925,31 @@ mod tests {
             drop(listener);
             assert!(loopback_listener(port, pid).is_err());
             drop(other);
+        }
+        #[cfg(windows)]
+        {
+            let header = b"\r\n\xbb\xee\xb6\xaf\xc1\xac\xbd\xd3\r\n";
+            let row = b"  TCP  127.0.0.1:15169  0.0.0.0:0  LISTENING  123\r\n";
+            let mut output = header.to_vec(); output.extend_from_slice(row);
+            assert_eq!(windows_listener_owner(&output, 15169)?, 123);
+            assert_eq!(windows_listener_owner(&[output.as_slice(), row].concat(), 15169)?, 123);
+            assert_eq!(windows_listener_owner(b"TCP 0.0.0.0:15169 0.0.0.0:0 LISTENING 123\n", 15169)?, 123);
+            for invalid in [
+                b"TCP 127.0.0.2:15169 0.0.0.0:0 LISTENING 123\n".as_slice(),
+                b"TCP 127.0.0.1:151690 0.0.0.0:0 LISTENING 123\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 ESTABLISHED 123\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 LISTENING 0\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 LISTENING +123\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 LISTENING 4294967296\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 LISTENING \xff\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 LISTENING\n",
+                b"TCP 127.0.0.1:15169 0.0.0.0:0 LISTENING 123 extra\n",
+            ] { assert!(windows_listener_owner(invalid, 15169).is_err()); }
+            let other = b"TCP 0.0.0.0:15169 0.0.0.0:0 LISTENING 456\n";
+            assert!(windows_listener_owner(&[row.as_slice(), other].concat(), 15169).is_err());
+            assert!(windows_listener_owner(header, 15169).is_err());
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            assert_eq!(loopback_listener(listener.local_addr()?.port(), pid)?, pid);
         }
         let claimed = json!({"pid":pid, "public_port":15169,
             "compatibility_host":"client2-v0256"});
