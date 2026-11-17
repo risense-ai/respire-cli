@@ -1095,18 +1095,6 @@ Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Enve
 # The installer owns the CPU cache per profile; later profiles use this shared model root.
 python -c "import sys; sys.path.insert(0, sys.argv[1]); from dev_model_fixture import share_cpu_container; share_cpu_container(sys.argv[2], {'RSRS_DATA_DIR': sys.argv[3]}, sys.argv[4])" $PSScriptRoot $Root $DirA (Join-Path $Root 'models/bge-m3')
 if ($LASTEXITCODE -ne 0) { throw 'Shared CPU model fixture preparation failed' }
-$engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
-Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
-if (-not $BusinessOnly) {
-foreach ($configuredEngine in @('gpu', 'npu')) {
-    $savedEngine = Invoke-Om -Name "model-engine-configure-$configuredEngine" -ArgList @('--json', 'model', 'engine', $configuredEngine) -DataDir $DirA -HostProfile
-    $engineSettings = Get-Content -LiteralPath (Join-Path $DirA 'inference.json') -Raw -Encoding utf8 | ConvertFrom-Json
-    # This asserts saved selection only; it does not claim accelerated inference.
-    Assert-Smoke "model-engine-$configuredEngine-selection-persisted" ($savedEngine.Ok -and [string]$engineSettings.engine -eq $configuredEngine -and $engineSettings.force_cpu -eq $false)
-}
-Invoke-Om -Name 'model-engine-restore-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA -HostProfile | Out-Null
-}
-
 if (-not $BusinessOnly) {
 $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
@@ -1139,6 +1127,19 @@ if ($reg.Envelope.summary.super) { $super = [string]$reg.Envelope.summary.super 
 if (-not $super) { throw 'register response has no summary.super' }
 $regAddr = [string]$reg.Envelope.summary.addr
 if ($regAddr -ne $Server) { throw "register address is not the test server: $regAddr" }
+
+# Engine selection is Runtime business RPC and requires the registered fixture's credentials.
+$engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
+Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
+if (-not $BusinessOnly) {
+foreach ($configuredEngine in @('gpu', 'npu')) {
+    $savedEngine = Invoke-Om -Name "model-engine-configure-$configuredEngine" -ArgList @('--json', 'model', 'engine', $configuredEngine) -DataDir $DirA
+    $engineSettings = Get-Content -LiteralPath (Join-Path $DirA 'inference.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    # This asserts saved selection only; it does not claim accelerated inference.
+    Assert-Smoke "model-engine-$configuredEngine-selection-persisted" ($savedEngine.Ok -and [string]$engineSettings.engine -eq $configuredEngine -and $engineSettings.force_cpu -eq $false)
+}
+Invoke-Om -Name 'model-engine-restore-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA | Out-Null
+}
 
 # Serving inference requires the explicitly registered fixture's session credentials.
 $probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
