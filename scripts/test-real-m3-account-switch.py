@@ -1,7 +1,7 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
 from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
-    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, stage_fixture_cli, canonical_scope_path)
+    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, canonical_scope_path)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from contextlib import closing
 
@@ -178,12 +178,16 @@ architecture.add_argument('--expect-in-process',action='store_true',help='Histor
 architecture.add_argument('--expect-supervised-worker',action='store_true',help='Verify one owned worker and its lifetime/SQLite boundary')
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
 parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
-parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then upgrade its running runtime')
+parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then verify the database upgrade')
 parser.add_argument('--database-dev-checkpoint', choices=['v1.0.11-dev.1', 'v1.0.17-dev.6'])
 add_runtime_arguments(parser)
 args=parser.parse_args()
 if args.database_dev_checkpoint and not args.seed_binary:
     parser.error('--database-dev-checkpoint requires an authenticated historical --seed-binary')
+database_upgrade = bool(args.seed_binary and args.runtime_binary)
+if database_upgrade and (args.expect_in_process or args.expect_supervised_worker
+        or args.resident_stress or args.expect_background_threads is not None):
+    parser.error('historical database upgrades leave worker and lifecycle fault checks to the resident fixture')
 runtime_config=args
 if sys.platform.startswith('linux') and args.seed_binary and os.environ.get('RSRS_SS_FIXTURE_BUS')!='private':
     os.execvpe('dbus-run-session', ['dbus-run-session','--',sys.executable,*sys.argv],
@@ -251,6 +255,7 @@ for binary in BINARIES:
     env['RSRS_RUNTIME_BIN']=str(args.runtime_binary or binary)
     if args.runtime_binary: env['LC_ALL']='C'
     runtime_installed_after_legacy_data = False
+    runtime_artifact_reused = False
     keys=None
     custody_slots={}
     custody_receipts={}
@@ -472,7 +477,7 @@ for binary in BINARIES:
                 for slot in slots: keys.reserve('rsrs',slot+':'+alias)
                 custody_slots[str(profile)]=(alias,version,slots)
         select(main)
-        if args.seed_binary:
+        if args.seed_binary and not database_upgrade:
             log=(root/'old-runtime.log').open('wb')
             web_help=subprocess.check_output([args.seed_binary,'web','--help'],env=seed_env,text=True,encoding='utf-8',timeout=30)
             runtime_args=['web','--internal','--no-open','--port',str(port)] if '--port' in web_help else ['--runtime-internal']
@@ -526,13 +531,14 @@ for binary in BINARIES:
                 old_runtime=None
                 legacy_handoff_actor='fixture'
         if args.seed_binary and args.runtime_binary:
-            # Upgrade the host only after its historical owner exits. Account bytes
-            # must survive the real default-pin download before any new Runtime starts.
-            assert not (main/'bin/runtime.json').exists(), 'upgrade fixture preinstalled the new Runtime'
-            stage_fixture_cli(binary, env, main)
-            args.runtime_binary = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
+            # Historical writers have exited. Reuse the independently verified
+            # artifact; installation/download behavior is a per-target host check.
+            legacy_data={str(profile):snapshot(profile) for profile in [main,alternate]}
+            installed = install_published_runtime(binary, env)
+            assert installed is not None, 'database upgrade requires the verified managed or published Runtime artifact'
+            args.runtime_binary = installed
             assert {str(profile):snapshot(profile) for profile in [main,alternate]} == legacy_data, 'Runtime installation changed old account data'
-            runtime_installed_after_legacy_data = True
+            runtime_artifact_reused = True
         if args.seed_binary:
             # This gate tests historical databases; fixture-owned custody is explicit
             # before target_start, rather than depending on startup to migrate secrets.
@@ -585,8 +591,9 @@ for binary in BINARIES:
             if old_runtime is not None:
                 assert old_runtime.wait(timeout=20)==0,'old runtime did not exit gracefully'
             assert run('model','engine')['summary']['engine']=='cpu'
-            assert (main/'inference.json').read_bytes()==global_engine
-            assert not (alternate/'inference.json').exists()
+            if not database_upgrade:
+                assert (main/'inference.json').read_bytes()==global_engine
+                assert not (alternate/'inference.json').exists()
             # A real model change may rebuild derived indexes once; never source data.
             rows = wait_index_ready()
             if args.seed_binary:
@@ -655,7 +662,8 @@ for binary in BINARIES:
             assert len(rows)==2 and all(item['status']=='ok' for item in rows.values()),rows
             assert pathlib.Path(json.loads((main/'client.json').read_text())['data_dir'])==profile
             config=json.loads((main/'client.json').read_text())
-            assert all(config.get(key)==value for key,value in public_config.items()),'upgrade/switch changed public API settings'
+            if not database_upgrade:
+                assert all(config.get(key)==value for key,value in public_config.items()),'upgrade/switch changed public API settings'
             assert library_state(snapshot(profile),recovery_factors[str(profile)])==original_state[str(profile)], 'switch/probe changed original records, sync work or URK'
             # Independent important entries avoid the intentional daily-trivia append behavior.
             written=run('remember','Post-upgrade real inference '+account+' '+str(time.time_ns()),'--title','post-upgrade-'+account,'--importance','important','--force')
@@ -876,6 +884,25 @@ for binary in BINARIES:
                 'both_lanes_observed':any(sample['foreground'].get('active') and sample['background'].get('active') for sample in samples),
                 'samples':samples}
             (BASE/'resident-stress-metrics.json').write_text(json.dumps(stress,indent=2),encoding='utf-8')
+        normal_reopen_checked=False
+        if database_upgrade:
+            before_close={str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}
+            closing_owner=observe_runtime()
+            owned=psutil.Process(closing_owner['pid'])
+            retired=[(owned.pid,owned.create_time()), *[(child.pid,child.create_time()) for child in owned.children(recursive=True)]]
+            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            assert stopped.returncode==0, 'normal database owner stop failed'
+            confirm_workers_exited(retired)
+            assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_close, 'normal close changed records, sync work or URK'
+            for account,profile in [('main',main),('alternate',alternate),('main',main)]:
+                run('account','use',account)
+                wait_index_ready()
+                reopened=observe_runtime()
+                assert reopened['instance_id']!=closing_owner['instance_id'], 'database reopen reused the stopped owner'
+                assert run('recall','Real account return fixture','--titles').get('items'), 'reopened database lost historical recall'
+                assert run('recall','Post-upgrade real inference','--titles').get('items'), 'reopened database lost post-upgrade recall'
+                assert library_state(snapshot(profile),recovery_factors[str(profile)])==before_close[str(profile)], 'normal reopen changed records, sync work or URK'
+            normal_reopen_checked=True
         restart_checked=False
         if args.expect_in_process or args.expect_supervised_worker:
             import psutil
@@ -969,7 +996,10 @@ for binary in BINARIES:
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'supervised_worker_checked':args.expect_supervised_worker,'owned_worker_identities':worker_identities,
-            'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,
+            'global_engine_preserved':not database_upgrade,'distinct_vault_keys':True,'sequence':statuses,
+            'coverage_scope':'historical-database' if database_upgrade else 'current-host',
+            'host_checks_delegated_to':'resident-concurrency' if database_upgrade else None,
+            'normal_reopen_checked':normal_reopen_checked,'runtime_artifact_reused':runtime_artifact_reused,
             'original_records_preserved':True,'original_sync_work_preserved':True,'urk_preserved':True,
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
             'encrypted_tombstones_preserved':bool(args.seed_binary),

@@ -106,6 +106,58 @@ class SeedReadinessTests(unittest.TestCase):
             self.assertEqual(self.exercise(directory, historical=True),
                              [(event, profile) for profile in ('main', 'alternate')
                               for event in ('select', 'legacy', 'legacy', 'legacy', 'legacy')])
+            old_host = next(node for node in ast.walk(TREE) if isinstance(node, ast.If)
+                            and any(isinstance(child, ast.Assign) and any(
+                                isinstance(target, ast.Name) and target.id == 'web_help'
+                                for target in child.targets) for child in node.body))
+            execute([old_host], dict(args=SimpleNamespace(seed_binary='old'), database_upgrade=True))
+            reopen = next(node for node in ast.walk(TREE) if isinstance(node, ast.If)
+                          and ast.unparse(node.test) == 'database_upgrade')
+            main, alternate = pathlib.Path(directory) / 'main', pathlib.Path(directory) / 'alternate'
+            for stop_code, same_owner, corrupt in ((0, False, False), (1, False, False),
+                                                   (0, True, False), (0, False, True)):
+                events = []
+                state = {'closed': False, 'profile': main}
+                snapshots = {str(main): 'main-state', str(alternate): 'alternate-state'}
+
+                def stop(*command, **kwargs):
+                    events.append('stop')
+                    self.assertIn('--stop', command[0])
+                    state['closed'] = True
+                    return SimpleNamespace(returncode=stop_code)
+
+                def run(*command):
+                    self.assertNotIn('restart', command)
+                    if command[0] == 'account':
+                        events.append('open-' + command[2])
+                        self.assertTrue(state['closed'])
+                        state['profile'] = main if command[2] == 'main' else alternate
+                        return {}
+                    self.assertEqual(command[0], 'recall')
+                    if corrupt:
+                        snapshots[str(state['profile'])] = 'changed-record-or-key'
+                    return {'items': ['actual-fixture-result']}
+
+                namespace = dict(database_upgrade=True, normal_reopen_checked=False,
+                    main=main, alternate=alternate, binary='cli', env={},
+                    recovery_factors={str(main): {}, str(alternate): {}},
+                    snapshot=lambda profile: snapshots[str(profile)], library_state=lambda value, factors: value,
+                    observe_runtime=lambda: {'pid': 7, 'instance_id': 'old' if not state['closed'] or same_owner else 'new'},
+                    psutil=SimpleNamespace(Process=lambda pid: SimpleNamespace(pid=pid, create_time=lambda: 1,
+                        children=lambda **kwargs: [])),
+                    captured_run=stop, confirm_workers_exited=lambda identities: events.append('reap'),
+                    run=run, wait_index_ready=lambda: events.append('ready'))
+                if stop_code or same_owner or corrupt:
+                    with self.assertRaises(AssertionError):
+                        execute([reopen], namespace)
+                    self.assertFalse(namespace['normal_reopen_checked'])
+                else:
+                    execute([reopen], namespace)
+                    self.assertTrue(namespace['normal_reopen_checked'])
+                    self.assertEqual(events[:3], ['stop', 'reap', 'open-main'])
+                    self.assertIn('open-alternate', events)
+                if stop_code:
+                    self.assertEqual(events, ['stop'])
 
     def test_in_process_seeding_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:

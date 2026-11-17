@@ -117,14 +117,15 @@ def verify_upgrade(source):
     runtime_args=(['--runtime-binary',str(args.runtime_binary),'--runtime-sha256',args.runtime_sha256,
                    '--runtime-version',args.runtime_version] if args.runtime_binary else [])
     checkpoint_args=['--database-dev-checkpoint',tag] if tag in DATABASE_DEV_CHECKPOINTS else []
+    architecture_args=[] if args.runtime_binary else ['--expect-supervised-worker']
     subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
-        '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
-        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args],check=True)
+        '--binary',args.binary,'--seed-binary',str(old),'--model-dir',args.model_dir,
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args,*architecture_args],check=True)
     checks=json.loads((result/'real-account-return-verification.json').read_text())
     assert isinstance(checks,list) and len(checks)==1,'expected one candidate upgrade report'
     check=checks[0]
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
-        'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
+        'passed','real_model','distinct_vault_keys',
         'original_records_preserved','original_sync_work_preserved','urk_preserved',
         'old_records_decrypted','post_upgrade_recall_checked','encrypted_tombstones_preserved',
     ]),'required real upgrade checks missing or failed'
@@ -147,13 +148,15 @@ def verify_upgrade(source):
     assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
     if upgrade_contract=='standalone-v1':
         assert all(check.get(name) is True for name in [
-            'live_owner_restart_rejected','safe_restart_checked',
-            'standalone_runtime_evidence','runtime_installed_after_legacy_data',
+            'standalone_runtime_evidence','runtime_artifact_reused','normal_reopen_checked',
         ]),'required standalone upgrade checks missing or failed'
         assert all(check.get(name) is False for name in [
-            'old_rpc_checked','forced_restart_checked',
-        ]),'standalone upgrade must not claim unsafe legacy behavior'
-        assert check.get('legacy_handoff_actor')=='fixture','legacy seed handoff was not fixture-owned'
+            'old_rpc_checked','forced_restart_checked','live_owner_restart_rejected','safe_restart_checked',
+            'supervised_worker_checked','in_process_checked','global_engine_preserved',
+        ]),'database upgrade must not claim delegated host or legacy checks'
+        assert check.get('legacy_handoff_actor') is None, 'database upgrade must not require a running legacy host'
+        assert check.get('coverage_scope')=='historical-database', 'historical database coverage scope missing'
+        assert check.get('host_checks_delegated_to')=='resident-concurrency', 'current host checks must remain in the resident fixture'
         assert check.get('runtime_mode')=='standalone_runtime','standalone Runtime mode missing'
         assert check.get('runtime_binary_sha256')==args.runtime_sha256,'upgrade Runtime digest differs'
         assert check.get('runtime_version')==args.runtime_version,'upgrade Runtime version differs'
@@ -162,7 +165,7 @@ def verify_upgrade(source):
             'upgrade Runtime identity receipts missing'
     else:
         assert all(check.get(name) is True for name in [
-            'forced_restart_checked','old_rpc_checked',
+            'forced_restart_checked','old_rpc_checked','supervised_worker_checked','global_engine_preserved',
         ]),'required legacy shim upgrade checks missing or failed'
     assert check.get('binary_sha256')==report['candidate_sha256'],'candidate changed during upgrade validation'
     assert check.get('engine')=='cpu','upgrade did not verify real CPU inference'
@@ -174,6 +177,9 @@ def verify_upgrade(source):
             row.get('status')=='ok' for row in rows.values()),'upgrade model readiness checks missing or failed'
     return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'upgrade_contract':upgrade_contract,
             'database_dev_checkpoint':check.get('database_dev_checkpoint'),
+            'coverage_scope':check.get('coverage_scope'),
+            'normal_reopen_checked':check.get('normal_reopen_checked') is True,
+            'host_checks_delegated_to':check.get('host_checks_delegated_to'),
             'post_upgrade_sync_checked':check.get('post_upgrade_sync_checked') is True,
             'report':str(result/'real-account-return-verification.json')}
 
