@@ -331,8 +331,8 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertIn('macos-15-intel', product)
                 preparation = product.split('      - name: Prepare hosted Linux credentials and user systemd\n')[1].split('      - uses:')[0]
                 for proof in ('test "$GITHUB_ACTIONS" = true', 'test "$RUNNER_ENVIRONMENT" = github-hosted',
-                              'dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3',
-                              'sudo loginctl enable-linger "$(id -un)"', 'sudo systemctl start "user@$uid.service"',
+                              'dbus-user-session dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3',
+                              'sudo loginctl enable-linger "$(id -un)"', 'sudo systemctl restart "user@$uid.service"',
                               'sudo systemctl is-active --quiet "user@$uid.service"',
                               "stat -c '%u:%a'", 'test -S "$XDG_RUNTIME_DIR/bus"',
                               "NameHasOwner s org.freedesktop.systemd1)",
