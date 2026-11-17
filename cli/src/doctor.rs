@@ -383,6 +383,23 @@ mod tests {
                     let mut body = String::new();
                     request.as_reader().read_to_string(&mut body)?;
                     let body: Value = serde_json::from_str(&body)?;
+                    // This diagnostic fixture represents an already configured owner.
+                    // Startup must observe its nonzero revision without applying over it.
+                    if body["method"] == "core_config.read" {
+                        let mut current = json!({"v":1,"ok":true,"exit":0,
+                            "pid":health["pid"],"data_dir":health["data_dir"],
+                            "envelope":ResultEnvelope::new("core-config", Status::Ok, json!({
+                                "state":"current","revision":1,
+                                "candidate":{"read_heat":null,"recall_fusion":null},
+                                "effective":{"read_heat":true,"recall_fusion":{}},
+                                "capabilities":{"read_heat_contract":1,"recall_fusion_contract":1},
+                                "applies":"next_query"}), Vec::new())});
+                        for key in ["id", "operation_id", "idempotency_key", "scope"] {
+                            current[key] = body[key].clone();
+                        }
+                        request.respond(tiny_http::Response::from_string(current.to_string()))?;
+                        continue;
+                    }
                     ensure!(
                         body["method"] == method,
                         "unexpected doctor RPC method: {body}"

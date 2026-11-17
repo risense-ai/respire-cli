@@ -158,8 +158,11 @@ pub(crate) fn review_agent_config(intent: respire_protocol::config_control::Agen
 }
 
 pub(crate) fn read_agent_config_for_write(profile: &Path) -> Result<Value> {
-    let value: Value = agent_config_bytes(&profile.join("agent.json"))?
-        .as_deref().map(serde_json::from_slice).transpose()
+    parse_agent_config_bytes(agent_config_bytes(&profile.join("agent.json"))?.as_deref())
+}
+
+pub(crate) fn parse_agent_config_bytes(bytes: Option<&[u8]>) -> Result<Value> {
+    let value: Value = bytes.map(serde_json::from_slice).transpose()
         .context("agent config contains invalid JSON")?.unwrap_or_else(|| json!({}));
     anyhow::ensure!(value.is_object(), "agent config must be an object");
     Ok(value)
@@ -190,7 +193,7 @@ fn reviewed_agent_config(
     Ok((path, bytes))
 }
 
-fn agent_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn agent_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     config::normalize_control_path(path)?;
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -571,6 +574,13 @@ mod tests {
         assert!(rollback_agent_config(&review, || anyhow::bail!("rollback must not replay")).is_err());
         let original = b"{ \"keep\": true, \"read_heat\": true }\n";
         fs::write(&agent, original)?;
+        let captured = agent_config_bytes(&agent)?;
+        fs::write(&agent, br#"{"read_heat":false}"#)?;
+        assert_eq!(parse_agent_config_bytes(captured.as_deref())?["read_heat"], true);
+        fs::write(&agent, original)?;
+        assert_eq!(captured, Some(fs::read(&agent)?));
+        assert_eq!(parse_agent_config_bytes(None)?, json!({}));
+        assert!(parse_agent_config_bytes(Some(b"")).is_err());
         let special = review_agent_config(AgentConfigIntent { key: "read_heat".into(), raw_value: "false".into() },
             root.clone(), root.clone())?;
         publish_agent_config(&special, || Ok(()))?;

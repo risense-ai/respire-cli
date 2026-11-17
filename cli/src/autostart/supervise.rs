@@ -19,6 +19,7 @@ pub(crate) mod offline_keygen;
 pub(crate) use launch_authorization::migration_control::control_migrate_profile;
 pub(crate) use launch_authorization::metadata_control::{control_metadata, control_offline_read, discover_legacy_snapshot};
 pub(crate) use launch_authorization::agent_config_control::control_agent_config;
+pub(crate) use launch_authorization::agent_config_control::apply_startup_core_config;
 pub(crate) use launch_authorization::key_control::{
     control_super_reset, control_super_reset_step, control_key_result, control_key_rollback,
     control_fivekeys,
@@ -194,6 +195,21 @@ pub(crate) fn control_memory_revision() -> Result<respire_commands::output::Resu
     launch_authorization::control_memory_revision()
 }
 
+/// Parent-driven startup completes configuration under its own maintenance lock.
+pub(super) fn configure_background_owner(owner: &crate::net_rpc::Health) -> Result<bool> {
+    let root = respire_client_host::config::control_roots()?.0;
+    let marker = root.join("runtime/autostart/maintenance.json");
+    if marker.try_exists()? { return Ok(false); }
+    let _takeover = crate::runtime_policy::takeover_lock()?;
+    if marker.try_exists()? { return Ok(false); }
+    let current = crate::rpc::probe_runtime()?.context("background core owner exited")?;
+    anyhow::ensure!(current.pid == owner.pid && current.process_start_id == owner.process_start_id
+        && crate::net_rpc::request_scope(&current)? == crate::net_rpc::request_scope(owner)?,
+        "background core owner changed");
+    apply_startup_core_config(&current, None)?;
+    Ok(true)
+}
+
 /// Wait for the child, honoring a signal flag. `Ok(None)` means the supervisor
 /// was signalled and the child has been stopped.
 fn wait_child(
@@ -201,6 +217,7 @@ fn wait_child(
     stopped: &AtomicBool,
 ) -> Result<Option<std::process::ExitStatus>> {
     let mut credentials_checked = false;
+    let mut configuration_checked = false;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
@@ -212,12 +229,24 @@ fn wait_child(
                 .context("cannot reap the stopped runtime child")?;
             return Ok(None);
         }
-        if !credentials_checked {
+        if !credentials_checked || !configuration_checked {
             if let Ok(Some(health)) = crate::rpc::probe_runtime() {
                 if health.pid == child.id() {
-                    credentials_checked = true;
-                    if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
-                        eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                    if !configuration_checked {
+                        match configure_background_owner(&health) {
+                            Ok(checked) => configuration_checked = checked,
+                            Err(error) => {
+                                child.kill().context("stop owned Runtime after core configuration failure")?;
+                                child.wait().context("reap owned Runtime after core configuration failure")?;
+                                return Err(error);
+                            }
+                        }
+                    }
+                    if !credentials_checked {
+                        credentials_checked = true;
+                        if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
+                            eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                        }
                     }
                 }
             }
