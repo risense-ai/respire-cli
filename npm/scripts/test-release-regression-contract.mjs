@@ -222,7 +222,8 @@ test('workflow runs independent fixture work before the join, and keeps Linux su
   const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const part=name=>workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
   const migration=part('native-migration'),join=part('migration-gate'),base=part('cloud-sweep'),publish=part('publish'),ready=part('publication-ready');
-  assert.match(migration,/needs: \[plan, artifact-inputs, published-assets-verification\]/);assert.doesNotMatch(migration,/needs:.*cloud-sweep|dev-smoke-gate.py|continue-on-error/);
+  for(const consumer of [migration,base])assert.match(consumer,/needs: \[plan, validate, artifact-inputs, published-assets-verification\]/);
+  assert.doesNotMatch(migration,/needs:.*cloud-sweep|dev-smoke-gate.py|continue-on-error/);
   assert.match(migration,/dev-profile-migration-smoke.py/);assert.match(migration,/extract-artifact.mjs/);assert.match(migration,/verified-build.json/);
   assert.match(join,/\$schema = if \(\$manifest.artifactLayout -ceq 'cli-frontend-v2'\) \{ 2 \} else \{ 1 \}/);
   assert.match(join,/\$build.schema_version -ne \$schema -or \$build.artifact_layout -cne \$manifest.artifactLayout/);
@@ -555,7 +556,7 @@ test('published consumers declare every condition dependency and cannot execute 
     for(const mode of ['build','published-assets']) {
       const context={always:()=>true,needs:make(mode),inputs:{artifact_source:mode,reuse_dev12_validation:false,prepared_run:''}};
       assert.equal(Boolean(runInNewContext(js(condition),context)),true,name+' '+mode);
-      const required=mode==='published-assets'?['artifact-inputs','published-assets-verification',...(name==='native-regression'?['validate']:[]),...(name==='migration-gate'?['cloud-sweep','native-migration']:[])]:dependencies.filter(id=>!['artifact-inputs','published-assets-verification'].includes(id));
+      const required=mode==='published-assets'?['artifact-inputs','published-assets-verification',...(['native-regression','cloud-sweep','native-migration'].includes(name)?['validate']:[]),...(name==='migration-gate'?['cloud-sweep','native-migration']:[])]:dependencies.filter(id=>!['artifact-inputs','published-assets-verification'].includes(id));
       for(const failed of required)assert.equal(Boolean(runInNewContext(js(condition),{...context,needs:make(mode,failed)})),false,name+' accepted failed '+failed);
     }
   }
