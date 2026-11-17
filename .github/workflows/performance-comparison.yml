@@ -165,18 +165,19 @@ jobs:
           export HOME="$RUNNER_TEMP/db-model-home" USERPROFILE="$RUNNER_TEMP/db-model-home"
           mkdir -p "$HOME"
           exe="$GITHUB_WORKSPACE/verified-cli/rsrs-x86_64-pc-windows-msvc.exe"
-          "$exe" --json runtime install > "$RUNNER_TEMP/db-runtime-install.json"
-          "$exe" --direct model engine cpu --json > "$RUNNER_TEMP/db-engine.json"
-          "$exe" --direct model install-m3 --json > "$RUNNER_TEMP/db-model-inference.json"
-          "$exe" --runtime-internal --stop --json
+          test ! -e db-model-preparation.json
+          python scripts/diagnose-db-model-preparation.py runtime_install "$exe" --json runtime install
+          python scripts/diagnose-db-model-preparation.py model_engine_cpu "$exe" --direct model engine cpu --json
+          python scripts/diagnose-db-model-preparation.py model_install_m3 "$exe" --direct model install-m3 --json
+          python scripts/diagnose-db-model-preparation.py runtime_stop "$exe" --runtime-internal --stop --json
           mkdir -p "$RUNNER_TEMP/db-legacy-model/onnx"
-          cp "$RSRS_M3_DIR/tokenizer.json" "$RUNNER_TEMP/db-legacy-model/tokenizer.json"
-          cp "$RSRS_M3_DIR/onnx/model_quantized.onnx" "$RUNNER_TEMP/db-legacy-model/onnx/model_quantized.onnx"
-          cp "$RSRS_M3_DIR/onnx/model_quantized.cpu-v1.ort" "$RUNNER_TEMP/db-legacy-model/onnx/model_quantized.cpu-v1.ort"
+          python scripts/diagnose-db-model-preparation.py copy_tokenizer cp "$RSRS_M3_DIR/tokenizer.json" "$RUNNER_TEMP/db-legacy-model/tokenizer.json"
+          python scripts/diagnose-db-model-preparation.py copy_quantized_model cp "$RSRS_M3_DIR/onnx/model_quantized.onnx" "$RUNNER_TEMP/db-legacy-model/onnx/model_quantized.onnx"
+          python scripts/diagnose-db-model-preparation.py copy_cpu_container cp "$RSRS_M3_DIR/onnx/model_quantized.cpu-v1.ort" "$RUNNER_TEMP/db-legacy-model/onnx/model_quantized.cpu-v1.ort"
           if [ "$MODEL_CACHE_HIT" != true ]; then
-            curl --fail --location 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' --output "$RUNNER_TEMP/db-legacy-model/onnx/model_fp16.onnx"
+            python scripts/diagnose-db-model-preparation.py download_legacy_fp16 curl --fail --location 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' --output "$RUNNER_TEMP/db-legacy-model/onnx/model_fp16.onnx"
           fi
-          python scripts/native-model-cache.py verify --model-dir "$RSRS_M3_DIR" --legacy-dir "$RUNNER_TEMP/db-legacy-model"
+          python scripts/diagnose-db-model-preparation.py verify_model_bytes python scripts/native-model-cache.py verify --model-dir "$RSRS_M3_DIR" --legacy-dir "$RUNNER_TEMP/db-legacy-model"
       - name: Run unchanged two-source historical database harness
         shell: bash
         env:
@@ -231,4 +232,5 @@ jobs:
             db-cli-identity.json
             db-runtime-identity.json
             db-safe-results.json
+            db-model-preparation.json
             ${{ runner.temp }}/db-upgrades/published-upgrades.json
