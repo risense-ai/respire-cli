@@ -14,7 +14,7 @@ import zipfile
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 FIXED = REPOSITORY / 'scripts/fixtures/arm64-ai-native-20261118.json'
-MANIFEST_HASH = '29dffa8d41d52070df33db4c916512a64429c943910c8b77074832e12653ac26'
+MANIFEST_HASH = '4cec0104845b006ad8cfaadd202cdadca1c7423a99cd245225c477e30d16a2fa'
 
 
 def digest(value):

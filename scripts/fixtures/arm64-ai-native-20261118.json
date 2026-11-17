@@ -3,7 +3,7 @@
   "kind": "immutable-cli-ai-diagnostic",
   "target": "aarch64-unknown-linux-gnu",
   "fixture_source": "88e0861bc7483d364a8a142c334959742437359b",
-  "diagnostic_commit": "bb21a097cf5add31354c40fd43afa7670fd7bde4",
+  "diagnostic_commit": "ef2fa25b4753cae43f4fe12511cee9df6ec0e98f",
   "build_job_id": 134258965941,
   "cli": {
     "repository": "risense-ai/respire-cli",
@@ -54,5 +54,6 @@
     "original": "a941613bee1ce48a8778aa6cd51a00515a3b2c1a43dabb6223cdaea4741d2da3",
     "cli_method": "1a4aacada981b43e5c53fbac3b06c41c0503d4da1d9844987dc5fc809c4ee278",
     "projected": "b3fbfb8a788ee016cfaa4815ac3f7d5f8fb34d4de4b3c02e52bdfede3a585f2d"
-  }
+  },
+  "reviewed_diagnostic_head": "bb21a097cf5add31354c40fd43afa7670fd7bde4"
 }
