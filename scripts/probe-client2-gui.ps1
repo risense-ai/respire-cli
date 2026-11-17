@@ -526,7 +526,7 @@ public static class RespireGuiNative {
             $childEnv['RSRS_DATA_DIR'] = $taskProfile; $childEnv['RSRS_BIN_DIR'] = Join-Path $taskProfile 'bin'
             $managed = Join-Path $taskProfile "bin/runtime/$RuntimeVersion"
             $accountReceipt = Join-Path $root 'account-fixture-counts.json'
-            $serverStart = [Diagnostics.ProcessStartInfo]::new((Get-Command python -CommandType Application).Source)
+            $serverStart = [Diagnostics.ProcessStartInfo]::new((Get-Command python -CommandType Application | Select-Object -First 1).Source)
             $serverStart.UseShellExecute = $false; $serverStart.CreateNoWindow = $true
             $serverStart.RedirectStandardOutput = $true; $serverStart.RedirectStandardError = $true
             $serverStart.Environment.Clear()
