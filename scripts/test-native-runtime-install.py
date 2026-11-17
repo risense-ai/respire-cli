@@ -310,7 +310,8 @@ class FixtureInstallationTests(unittest.TestCase):
         install = next(node for node in calls if node.func.id == 'install_official_runtime')
         stage = next(node for node in calls if node.func.id == 'stage_fixture_cli')
         self.assertLess(stage.lineno, install.lineno)
-        session = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+        loop = next(node for node in tree.body if isinstance(node, ast.For))
+        session = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
                        and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text'
                        and any(isinstance(part, ast.Constant) and part.value == 'session.json'
                                for part in ast.walk(node.func.value)))
@@ -325,6 +326,13 @@ class FixtureInstallationTests(unittest.TestCase):
                                and any(isinstance(part, ast.Name) and part.id == 'legacy_data'
                                        for part in ast.walk(node.test)))
         self.assertGreater(snapshot_assert.lineno, install.lineno)
+        custody = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name) and node.func.id == 'migrate_fixture_custody')
+        switch = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name) and node.func.id == 'run'
+                      and [getattr(arg, 'value', None) for arg in node.args[:2]] == ['account', 'use'])
+        self.assertLess(snapshot_assert.lineno, custody.lineno)
+        self.assertLess(custody.lineno, switch.lineno)
 
     def run_fixture(self, fault=None):
         with tempfile.TemporaryDirectory() as temporary:

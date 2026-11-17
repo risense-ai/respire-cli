@@ -128,6 +128,15 @@ def verify_upgrade(source):
         'old_records_decrypted','post_upgrade_recall_checked',
     ]),'required real upgrade checks missing or failed'
     assert check.get('seed_vault_versions')==[1,3] and all(type(value) is int for value in check['seed_vault_versions']), 'historical v1/v3 session coverage missing'
+    assert check.get('historical_credential_migration_actor')=='fixture', 'explicit fixture credential migration missing'
+    custody=check.get('host_credential_custody')
+    assert isinstance(custody,dict) and custody.get('required') is True and custody.get('cleanup_passed') is True, 'historical credential custody or cleanup unconfirmed'
+    accounts=custody.get('verified_accounts')
+    assert isinstance(accounts,list) and len(accounts)==2 and all(isinstance(item,dict) for item in accounts), 'historical account custody evidence missing'
+    assert [(item.get('account'),item.get('vault_version')) for item in accounts]==[('main',1),('alternate',3)], 'historical credential account coverage differs'
+    assert all(item.get('urk_preserved') is True for item in accounts), 'historical credential custody changed a data key'
+    cleanup=check.get('native_credential_cleanup')
+    assert isinstance(cleanup,dict) and cleanup.get('passed') is True and cleanup.get('remaining_entries')==[], 'native credential cleanup unconfirmed'
     assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
     if upgrade_contract=='standalone-v1':
         assert all(check.get(name) is True for name in [
