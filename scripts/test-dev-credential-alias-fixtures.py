@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline fixture regressions; no native credential store or network access."""
 import ast
-from contextlib import closing
+from contextlib import closing, nullcontext
 import importlib.util
 import json
 from pathlib import Path
@@ -61,6 +61,41 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
 
     def test_exact_identity_passes(self):
         self.verify()
+        smoke = object.__new__(profile.Smoke)
+        smoke.args = SimpleNamespace(binary=self.runtime)
+        installation = self.profile / '.rsrs'
+        destination = installation / 'accounts' / 'first'
+        sibling = installation / 'accounts' / 'second'
+        destination.mkdir(parents=True)
+        sibling.mkdir()
+        session = dict(user=USER, keyring_account=ALIAS, token='fixture-session')
+        (destination / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+        (sibling / 'session.json').write_text(json.dumps(dict(session, user='other')), encoding='utf-8')
+        config = destination / 'client.json'
+        original = (json.dumps({'data_dir': str(sibling), 'addr': legacy.UPSTREAM}) + '\n').encode()
+        default = {'HOME': str(self.profile)}
+        for contents in (original, None):
+            for fails in (False, True):
+                with self.subTest(config_present=contents is not None, fails=fails):
+                    if contents is not None:
+                        config.write_bytes(contents)
+                    with patch.object(legacy, 'install_published_runtime'):
+                        with self.assertRaisesRegex(RuntimeError, '^fixture-check-failed$') if fails else nullcontext():
+                            with smoke.selected_profile(default, {'destination': destination}) as env:
+                                self.assertEqual(smoke.session(env), session)
+                                self.assertTrue(smoke.profile(env).samefile(destination))
+                                if fails:
+                                    raise RuntimeError('fixture-check-failed')
+                    self.assertEqual(config.read_bytes() if config.exists() else None, contents)
+                    config.unlink(missing_ok=True)
+        outside = json.dumps({'data_dir': str(self.other)}).encode()
+        config.write_bytes(outside)
+        with patch.object(legacy, 'install_published_runtime') as install:
+            with self.assertRaisesRegex(RuntimeError, '^login_profile_selection_outside_fixture$'):
+                with smoke.selected_profile(default, {'destination': destination}):
+                    self.fail('external selection accepted')
+            install.assert_not_called()
+        self.assertEqual(config.read_bytes(), outside)
 
     @unittest.skipUnless(sys.platform == 'win32', 'Windows final-path identity')
     def test_windows_extended_path_and_case_use_full_file_identity(self):
@@ -69,6 +104,37 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
             with self.subTest(path_form=path[:7]):
                 self.health['image_path'] = path
                 self.verify()
+
+        smoke = object.__new__(profile.Smoke)
+        root = self.profile / 'owned'
+        child = root / 'accounts' / 'fixture-account'
+        child.mkdir(parents=True)
+        outside = self.profile / 'owned-other'
+        outside.mkdir()
+        env = {'RSRS_DATA_DIR': str(root)}
+        config = root / 'client.json'
+        session = dict(user=USER, token='synthetic-session')
+        for target in (root, child):
+            (target / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+            for selected in (str(target), '\\\\?\\' + str(target),
+                             ('\\\\?\\' + str(target)).upper().replace('\\', '/')):
+                with self.subTest(selected=selected):
+                    config.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
+                    self.assertTrue(smoke.profile(env).samefile(target))
+                    self.assertEqual(smoke.session(env), session)
+        for target in (self.profile, outside):
+            for selected in (str(target), '\\\\?\\' + str(target)):
+                with self.subTest(outside=selected):
+                    config.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
+                    with self.assertRaisesRegex(RuntimeError, '^login_profile_selection_outside_fixture$'):
+                        smoke.session(env)
+        for selected in ('', None):
+            config.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
+            with self.assertRaisesRegex(RuntimeError, '^login_profile_selection_invalid$'):
+                smoke.session(env)
+        config.write_text('{', encoding='utf-8')
+        with self.assertRaises(json.JSONDecodeError):
+            smoke.session(env)
 
     def test_every_identity_field_remains_strict(self):
         for field, value in dict(v=2, pid=456, runtime_version='2.0.0-dev.21',
