@@ -42,7 +42,7 @@ profile="$(realpath "$profile")"
 docker run --rm --network none --user "$(id -u):$(id -g)" \
   -v "$binary:/rsrs:ro" -v "$models:/models:ro" -v "$cpu:/cpu-model.ort:ro" -v "$profile:/profile" \
   -v "$bundle:/runtime:ro" -v "$receipt:/runtime-selection.json:ro" \
-  -e RSRS_ENGINE=cpu -e RSRS_DATA_DIR=/profile -e RSRS_M3_DIR=/models \
+  -e RSRS_ENGINE=cpu -e RSRS_DATA_DIR=/profile -e RSRS_M3_DIR=/profile/models/bge-m3 \
   -e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl \
   -e NATIVE_RUNTIME_SHA256="$runtime_sha256" -e NATIVE_RUNTIME_VERSION="$runtime_version" \
   -e RSRS_NO_AUTOSYNC=1 -e RSRS_UPDATE_CHECK=0 \
@@ -71,6 +71,11 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
     cp /runtime-selection.json /profile/bin/runtime.json
     cmp /runtime-selection.json /profile/bin/runtime.json
     mkdir -p /profile/models/bge-m3/onnx
+    # Keep host inputs read-only; install and staging cleanup need an owned target.
+    cp /models/tokenizer.json /profile/models/bge-m3/tokenizer.json
+    cp /models/onnx/model_quantized.onnx /profile/models/bge-m3/onnx/model_quantized.onnx
+    cmp /models/tokenizer.json /profile/models/bge-m3/tokenizer.json
+    cmp /models/onnx/model_quantized.onnx /profile/models/bge-m3/onnx/model_quantized.onnx
     cp /cpu-model.ort /profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort
     echo "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  /profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort" | sha256sum -c >/dev/null
     trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
