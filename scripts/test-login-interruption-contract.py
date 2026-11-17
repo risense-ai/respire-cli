@@ -672,7 +672,7 @@ class ReportContract(unittest.TestCase):
                                 ('auth_diagnostic=auth_parent_revoked_or_channel_interrupted; private-account-material', 'control_parent_or_channel'),
                                 ('private-account-material', 'unclassified')) + tuple(
                 (text + '; private-account-material', category)
-                for category, text in categories if category.startswith('key_')):
+                for category, text in categories if category.startswith(('key_', 'config_', 'runtime_'))):
             with self.subTest(category=category):
                 observation = {}
 
