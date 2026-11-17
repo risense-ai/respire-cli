@@ -1,72 +1,209 @@
-name: Published performance comparison
-on:
-  workflow_dispatch:
-    inputs:
-      comparison_mode:
-        description: Candidate-only cold/warm consistency with normal heat updates
-        type: choice
-        default: candidate-only
-        options:
-          - candidate-only
-      release_inventory:
-        description: Official published-assets schema 2 JSON (schema/cli/runtime), seven CLI and seven Runtime targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
-        type: string
-        required: true
-      release_inventory_sha256:
-        description: SHA256 of the exact reviewed release_inventory UTF-8 bytes
-        type: string
-        required: true
+# Temporary branch-only wrapper; never merge or use as publication evidence.
+name: Temporary Mac Intel Runtime24 custody diagnostic
+'on':
+  workflow_dispatch: {}
 permissions:
   contents: read
   actions: read
 jobs:
-  compare:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+  mac-custody:
+    name: Mac Intel v1.0.20 custody (diagnostic only)
+    runs-on: macos-15-intel
+    timeout-minutes: 75
+    env:
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      CLI_SHA: 7e625e0073afcd207b2d9aec3e93e3d3aea65972
+      CLI_VERSION: 2.0.0-dev.19
+      RSRS_RUNTIME_TRIPLE: x86_64-apple-darwin
+      RSRS_ENGINE: cpu
+      GH_TOKEN: ${{ github.token }}
+      RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+      RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/performance-model
-          key: performance-m3-quantized-0826f8c1-${{ runner.os }}
-      - name: Install benchmark dependencies
-        run: python -m pip install cryptography==46.0.3 psutil==7.1.0
-      - name: Compare immutable published binaries on the same runner
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PERF_COMPARISON_MODE: ${{ inputs.comparison_mode }}
-          PERF_RELEASE_INVENTORY: ${{ inputs.release_inventory }}
-          PERF_RELEASE_INVENTORY_SHA256: ${{ inputs.release_inventory_sha256 }}
-          PERF_TARGET: ${{ matrix.target }}
-          PERF_ROOT: ${{ runner.temp }}/comparison
-          PERF_MODEL: ${{ runner.temp }}/performance-model
-        run: python scripts/compare-published-performance.py
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          retention-days: 1
-          name: performance-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/comparison/report.json
-            ${{ runner.temp }}/comparison/published-assets-receipt.json
-          if-no-files-found: error
+    - uses: actions/checkout@v5
+      with:
+        ref: 7e625e0073afcd207b2d9aec3e93e3d3aea65972
+        persist-credentials: false
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - uses: dtolnay/rust-toolchain@1.95.0
+      with:
+        targets: x86_64-apple-darwin
+    - name: Verify exact source and hosted Intel hardware
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$RUNNER_OS" = macOS
+        test "$RUNNER_ARCH" = X64
+        test "$(uname -m)" = x86_64
+        test "$(git rev-parse HEAD)" = "$CLI_SHA"
+        test "$(node -p 'JSON.parse(require("fs").readFileSync("runtime-pin.json")).required')" = 2.0.0-dev.24
+        node -e 'const u=new URL(process.env.RSRS_DEV_SERVER_ADDR); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password)throw Error("Exact DEV endpoint required");if(!/^[a-f0-9]{40}$/.test(process.env.RSRS_DEV_SERVER_SHA||""))throw Error("Exact DEV source required")'
+        python -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.1.0
+    - name: Key release compilation dependencies before version rewriting
+      id: release-key
+      shell: bash
+      env:
+        RELEASE_TARGET: x86_64-apple-darwin
+        RUSTFLAGS: ''
+      run: |
+        set -euo pipefail
+        if [[ "$RELEASE_TARGET" == *-musl ]]; then
+          bash scripts/build-linux-musl.sh "$RELEASE_TARGET" key
+        else
+          node scripts/rust-ci-cache.mjs key release "$RELEASE_TARGET"
+        fi
+    - uses: actions/cache/restore@v4
+      id: release-cache
+      with:
+        path: .rust-release-cache
+        key: ${{ steps.release-key.outputs.key }}
+        enableCrossOsArchive: true
+    - name: Restore native release compilation dependencies
+      run: node scripts/rust-ci-cache.mjs restore release x86_64-apple-darwin
+    - name: Validate release manifests
+      run: |
+        node npm/scripts/check-manifest.mjs
+    - name: Prepare diagnostic CLI version without publication
+      shell: bash
+      run: |
+        node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+    - name: Build release binary
+      run: cargo build --release --locked -p respire --bin rsrs --target x86_64-apple-darwin --target-dir target/ci
+      env:
+        RUSTFLAGS: ''
+    - name: Stage reusable exact CLI bytes and producer identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        node --input-type=module <<'NODE'
+        import assert from 'node:assert/strict';
+        import {copyFileSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+        import {createHash} from 'node:crypto';
+        import {execFileSync} from 'node:child_process';
+        const source=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+        assert.equal(source,process.env.CLI_SHA);
+        const pin=JSON.parse(readFileSync('runtime-pin.json'));
+        assert.equal(pin.required,'2.0.0-dev.24');
+        const original='target/ci/x86_64-apple-darwin/release/rsrs';
+        assert.equal(execFileSync(original,['--version'],{encoding:'utf8'}).trim(),'rsrs '+process.env.CLI_VERSION);
+        mkdirSync('reusable-cli');
+        copyFileSync(original,'reusable-cli/rsrs');
+        const hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
+        assert.equal(hash(original),hash('reusable-cli/rsrs'));
+        const manifest={schema:1,diagnostic_only:true,publication_reusable:false,
+        git_sha:source,target:process.env.RSRS_RUNTIME_TRIPLE,version:process.env.CLI_VERSION,
+        binary_sha256:hash(original),required_runtime:pin.required,
+        producer:{repository:process.env.GITHUB_REPOSITORY,workflow:'performance-comparison.yml',
+        workflow_sha:process.env.GITHUB_SHA,run_id:process.env.GITHUB_RUN_ID,run_attempt:process.env.GITHUB_RUN_ATTEMPT}};
+        writeFileSync('reusable-cli/cli-build-x86_64-apple-darwin.json',JSON.stringify(manifest,null,2)+'\n');
+        NODE
+    - uses: actions/upload-artifact@v4
+      with:
+        name: cli-custody-x86_64-apple-darwin
+        retention-days: 3
+        if-no-files-found: error
+        path: reusable-cli/*
+    - name: Install authenticated public Runtime24
+      shell: bash
+      run: |
+        set -euo pipefail
+        node scripts/ci-install-pinned-runtime.mjs target/ci/x86_64-apple-darwin/release/rsrs
+      env:
+        RSRS_DATA_DIR: ${{ runner.temp }}/diagnostic-runtime-proof
+    - name: Record immutable source and binary identities
+      shell: bash
+      run: |
+        set -euo pipefail
+        node --input-type=module <<'NODE'
+        import assert from 'node:assert/strict';
+        import {readFileSync,writeFileSync} from 'node:fs';
+        import {createHash} from 'node:crypto';
+        import {execFileSync} from 'node:child_process';
+        const hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
+        const cli='target/ci/x86_64-apple-darwin/release/rsrs';
+        assert.equal(execFileSync(cli,['--version'],{encoding:'utf8'}).trim(),'rsrs '+process.env.CLI_VERSION);
+        assert.equal(process.env.NATIVE_RUNTIME_VERSION,'2.0.0-dev.24');
+        const receipt=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/diagnostic-runtime-proof/bin/runtime.json'));
+        assert.equal(hash(process.env.NATIVE_RUNTIME_BIN),receipt.sha256);
+        const proof={diagnostic_only:true,publication_reusable:false,full_acceptance:false,
+        run_id:process.env.GITHUB_RUN_ID,run_attempt:process.env.GITHUB_RUN_ATTEMPT,
+        harness_sha:process.env.GITHUB_SHA,cli_source_sha:process.env.CLI_SHA,
+        cli_version:process.env.CLI_VERSION,cli_binary_sha256:hash(cli),
+        target:process.env.RSRS_RUNTIME_TRIPLE,historical_source:'v1.0.20',
+        runtime:{version:receipt.version,binary_sha256:receipt.sha256,release_metadata_sha256:receipt.release.metadata_sha256,release_metadata:JSON.parse(receipt.release.metadata_json)}};
+        writeFileSync(process.env.RUNNER_TEMP+'/custody-diagnostic-identity.json',JSON.stringify(proof,null,2)+'\n');
+        NODE
+    - name: Key the four fixed public model inputs
+      id: model-key
+      shell: bash
+      run: |
+        set -euo pipefail
+        key="$(python scripts/native-model-cache.py key)"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache/restore@v4
+      id: model-cache
+      with:
+        path: .native-model-cache
+        key: ${{ steps.model-key.outputs.key }}
+        enableCrossOsArchive: true
+    - name: Require an exact cache and verify every public model byte before restoring
+      if: steps.model-cache.outputs.cache-matched-key != ''
+      shell: bash
+      env:
+        EXPECTED_KEY: ${{ steps.model-key.outputs.key }}
+        MATCHED_KEY: ${{ steps.model-cache.outputs.cache-matched-key }}
+      run: |
+        set -euo pipefail
+        test "$MATCHED_KEY" = "$EXPECTED_KEY"
+        python scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
+    - name: Prepare current model through the existing isolated installer
+      shell: bash
+      run: |
+        set -euo pipefail
+        python - "$PWD/target/ci/x86_64-apple-darwin/release/rsrs" <<'PY'
+        import importlib.util, os, pathlib, sys
+        from types import SimpleNamespace
+        sys.path.insert(0,'scripts')
+        spec=importlib.util.spec_from_file_location('history_model','scripts/dev-legacy-vault-smoke.py')
+        module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        args=SimpleNamespace(binary=pathlib.Path(sys.argv[1]),root=pathlib.Path(os.environ['RUNNER_TEMP'])/'release-probe',
+        source_sha=os.environ['CLI_SHA'],version=os.environ['CLI_VERSION'],binary_sha256=module.digest(pathlib.Path(sys.argv[1])))
+        smoke=module.Smoke(args)
+        env=smoke.env('install')
+        smoke.cli(env,'model','install-m3',timeout=900)
+        module.share_cpu_container(smoke.root,env,smoke.model)
+        PY
+        mkdir -p native-legacy-model/onnx
+        cp "$RUNNER_TEMP/release-probe/models/bge-m3/tokenizer.json" native-legacy-model/tokenizer.json
+        cp "$RUNNER_TEMP/release-probe/models/bge-m3/onnx/model_quantized.onnx" native-legacy-model/onnx/model_quantized.onnx
+        cp "$RUNNER_TEMP/release-probe/models/bge-m3/onnx/model_quantized.cpu-v1.ort" native-legacy-model/onnx/model_quantized.cpu-v1.ort
+        if [ "$MODEL_CACHE_HIT" != true ]; then
+          curl --fail --location --connect-timeout 20 --max-time 1200 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' --output native-legacy-model/onnx/model_fp16.onnx
+        fi
+        python scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
+      env:
+        MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
+    - name: Verify only v1.0.20 historical DB and real Mac custody
+      shell: bash
+      run: |
+        set -euo pipefail
+        python scripts/test-published-upgrades.py --binary "$PWD/target/ci/x86_64-apple-darwin/release/rsrs" --target "$RSRS_RUNTIME_TRIPLE"   --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION"   --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-model-dir "$PWD/native-legacy-model"   --output-dir "$RUNNER_TEMP/published-upgrades" --source v1.0.20
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: mac-intel-runtime24-custody
+        retention-days: 3
+        if-no-files-found: error
+        path: |
+          ${{ runner.temp }}/custody-diagnostic-identity.json
+          ${{ runner.temp }}/published-upgrades/published-upgrades.json
+          ${{ runner.temp }}/published-upgrades/**/cli-build-*.json
+          ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
+          ${{ runner.temp }}/published-upgrades/**/results/fixture-dependencies.json
+          ${{ runner.temp }}/published-upgrades/**/results/**/boundary-inspector/inspection-failure.json
