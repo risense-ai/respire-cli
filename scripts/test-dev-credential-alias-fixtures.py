@@ -268,6 +268,11 @@ class AliasTests(unittest.TestCase):
                 aliases = iter((ALIAS, OTHER))
                 current = {}
                 def cli(env, *args, **kwargs):
+                    prompts = kwargs['prompts']
+                    self.assertEqual(prompts[-1][1] == 'n', not bool(current.get('token')))
+                    if not current.get('token'):
+                        prompt = prompts[-1][0].lstrip()
+                        self.assertIn('"' + prompt + '"', (HERE.parent / 'cli/src/login.rs').read_text(encoding='utf-8'))
                     alias = next(aliases)
                     keys.created(alias, None if version == 1 else SUPER)
                     current.update(user=USER, keyring_account=alias, token="synthetic-token", vault_version=version)
@@ -297,7 +302,8 @@ class AliasTests(unittest.TestCase):
                 self.assertEqual(child_env.get('RSRS_SUPER'), SUPER if version == 1 else None)
                 prompts = kwargs['prompts']
                 self.assertEqual(prompts[1], ('  login password: ', PASSWORD))
-                self.assertEqual(len(prompts), 2 if version == 1 else 3)
+                self.assertEqual(len(prompts), 3 if version == 1 else 4)
+                self.assertEqual(prompts[-1], ('  Merge selected local memories into this server account (skip identical bodies; keep existing records)? [y/N]: ', 'n'))
                 if version != 1:
                     self.assertEqual(prompts[2], ('  super password (A3-…): ', SUPER))
                 self.assertNotIn(SUPER, args)
@@ -342,7 +348,8 @@ class AliasTests(unittest.TestCase):
 
                     def cli(env, *args, **kwargs):
                         self.assertFalse((Path(env['RSRS_DATA_DIR']) / 'session.json').exists())
-                        self.assertEqual(kwargs['prompts'][-1], ('  original v1 Account Secret: ', factor))
+                        self.assertEqual(kwargs['prompts'][-2], ('  original v1 Account Secret: ', factor))
+                        self.assertEqual(kwargs['prompts'][-1][1], 'n')
                         self.assertNotIn(factor, args)
                         if fails:
                             raise RuntimeError('auth_failed')

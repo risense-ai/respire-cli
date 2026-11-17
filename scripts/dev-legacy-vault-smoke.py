@@ -197,7 +197,11 @@ class Smoke:
             # Prove the original factor through explicit TTY/stdin input,
             # without letting an environment factor satisfy the login.
             login_env.pop("RSRS_SUPER", None)
-        previous_alias = self.session(env).get("keyring_account")
+        previous = self.session(env)
+        previous_alias = previous.get("keyring_account")
+        if version != 3 and not previous.get("token"):
+            # Runtime creates the source DB before offering a merge, even on a fresh device.
+            prompts.append(("  Merge selected local memories into this server account (skip identical bodies; keep existing records)? [y/N]: ", "n"))
         completed = False
         try:
             if version == 3:
