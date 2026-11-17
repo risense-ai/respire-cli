@@ -904,6 +904,8 @@ def main():
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
                     "failed_login_original_profile_not_restored")
             # Resolve only this failed login's original operation; do not replay authentication.
+            report["failed_login_diagnostic"] = safe_cli_diagnostic(json.dumps(rejected).encode(), b"")
+            require(recovery_path.is_file(), "failed_login_recovery_binding_invalid")
             journal = json.loads(recovery_path.read_bytes())
             active = journal.get("active") or {}
             operation_id = rejected.get("details", {}).get("operation_id")
