@@ -968,7 +968,7 @@ def main():
                     command_env["RSRS_SUPER"] = old_super
                 child = subprocess.Popen([str(args.binary), *migration], env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 require(reached.wait(120), "commit_barrier_not_reached")
-                alias = json.loads(session.read_bytes()).get("keyring_account")
+                alias = (json.loads(recovery_path.read_bytes()).get("active") or {}).get("alias")
                 if keys:
                     require(re.fullmatch(r"login-[a-f0-9]{32}", alias or "") is not None, "native_alias_missing")
                     native_aliases.add(alias)
