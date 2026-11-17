@@ -86,6 +86,11 @@ def safe_cli_diagnostic(stdout, stderr):
     text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
     text += "\n" + stderr.decode("utf-8", errors="replace")
     categories = (
+        ("runtime_unlock_rejected", "Runtime V2 unlock rejected"),
+        ("runtime_unlock_transport", "Runtime V2 unlock transport failed"),
+        ("runtime_startup_timeout", "host runtime did not become ready"),
+        ("runtime_startup_exit", "host runtime exited before readiness"),
+        ("runtime_startup_identity", "runtime owner changed during startup"),
         ("config_target_start", "config stage=target_start"),
         ("config_target_owner", "config stage=target_owner_verification"),
         ("config_private_validation", "Runtime did not confirm private config validation"),
@@ -1216,6 +1221,9 @@ def main():
             require(len(restored_rows) == len(original_rows) and all(ciphertext.startswith(legacy.PREFIX) for _, ciphertext, _ in restored_rows), "full_library_namespace_not_migrated")
             require([legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in restored_rows]
                     == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
+            require(AESGCM(legacy.legacy_kek(2, old_super, "", restored_session["kdf_salt"], current=True)).decrypt(
+                bytes.fromhex(restored_session["urk_nonce"]), legacy.encrypted_bytes(restored_session["wrapped_urk"]), None) == urk,
+                "data_key_changed")
             report["stage"] = "legacy_recovery_select_profile"
             report["profile_selection_probe"] = {
                 "installation_matches_fixture": Path(env["RSRS_DATA_DIR"]).resolve() == root.resolve(),
