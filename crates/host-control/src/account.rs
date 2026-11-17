@@ -414,9 +414,6 @@ impl AccountCoordinator {
                 .map_err(|_| {
                     anyhow::anyhow!("invalid login continuation receipt shape").context(unknown())
                 })?;
-            if supplemental.is_some() && receipt.outcome != HostAuthAccountOutcome::AwaitingInput {
-                return Ok(queried);
-            }
             if receipt.outcome == HostAuthAccountOutcome::AwaitingInput {
                 if let Some((input, super_password, totp)) = supplemental {
                     operation = crate::login_custody::LoginCustody::open(&takeover,

@@ -192,7 +192,8 @@ class JournalContract(unittest.TestCase):
                           'interrupted_native_password_not_deleted', 'fresh_login_replayed_authentication',
                           'unknown_rollback_deleted_credentials', 'unknown_result_released_maintenance',
                           'unknown_result_replayed_effect', 'migration_effects_not_exactly_once',
-                          'original_ciphertexts_changed', 'original_source_changed'):
+                          'original_ciphertexts_changed', 'original_source_changed',
+                          'login_continuation_maintenance_not_finished'):
             self.assertIn('"' + assertion + '"', SOURCE)
         self.assertIn('start_new_session=True', SOURCE)
         self.assertLess(SOURCE.index('= interrupt_owned_control(child)'),

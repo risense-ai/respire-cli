@@ -42,6 +42,7 @@ FAILURE_CODES = FAILURE_CODES | frozenset({
     "login_continuation_identity_mismatch", "login_continuation_inputs_mismatch",
     "login_continuation_transport_mismatch", "login_continuation_envelope_mismatch",
     "login_continuation_query_failed", "login_continuation_admission_effects_mismatch",
+    "login_continuation_maintenance_not_finished",
     "login_continuation_target_escaped", "unowned_fixture_login_custody",
     "key_continuation_identity_mismatch", "key_continuation_inputs_mismatch",
     "key_continuation_effects_mismatch", "key_continuation_material_changed",
@@ -624,6 +625,8 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
         require(repeated_transport not in (initial_transport, continue_transport, operation_id),
                 "login_continuation_transport_mismatch")
         login_continuation_receipt(repeated, operation_id, source, addr, "committed")
+        require(not (source / "runtime/autostart/maintenance.json").exists(),
+                "login_continuation_maintenance_not_finished")
         require((session_path.read_bytes(), journal_path.read_bytes()) == saved,
                 "repeated_result_changed_material")
         require((state["logins"], state["posts"], state["password_posts"]) == effects,
