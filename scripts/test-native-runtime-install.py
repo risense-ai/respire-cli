@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest.mock import Mock, call, patch
 
-from native_fixture_process import install_official_runtime, same_existing_path, canonical_scope_path, runtime_scope_ids
+from native_fixture_process import install_official_runtime, same_existing_path, canonical_scope_path, runtime_scope_ids, runtime_install_diagnostic
 
 
 class FixtureInstallationTests(unittest.TestCase):
@@ -425,7 +425,10 @@ class FixtureInstallationTests(unittest.TestCase):
                     self.assertNotIn(key, kwargs['env'])
                 self.assertEqual(kwargs['env']['RSRS_DATA_DIR'], str(root))
                 if fault == 'exit':
-                    return types.SimpleNamespace(returncode=1)
+                    return types.SimpleNamespace(returncode=1, stdout=json.dumps({
+                        'summary': {'reason': 'runtime_error', 'token': 'private-installer-sentinel'},
+                        'errors': ['runtime restart blocked: owner roots do not match this installation',
+                                   'private-installer-sentinel']}), stderr='private-installer-sentinel')
                 installed.parent.mkdir(parents=True)
                 installed.write_bytes(b'corrupt' if fault == 'image' else image)
                 if fault == 'target':
@@ -451,8 +454,14 @@ class FixtureInstallationTests(unittest.TestCase):
                 hosted['RUNNER_TEMP'] = str(root)
             with patch.dict(os.environ, hosted, clear=True), patch('subprocess.run', side_effect=installer) as run:
                 if fault:
-                    with self.assertRaises((ValueError, RuntimeError)):
+                    with self.assertRaises((ValueError, RuntimeError)) as raised:
                         install_official_runtime('fixture-cli', env, version, digest)
+                    if fault == 'exit':
+                        diagnostic = json.loads(str(raised.exception).split('; diagnostic=', 1)[1])
+                        self.assertEqual(diagnostic, {'exit_code': 1, 'structured_reason': 'runtime_error',
+                            'category': 'owner_roots_mismatch', 'envelope': 'object'})
+                        self.assertNotIn('private-installer-sentinel', str(raised.exception))
+                        run.assert_called_once()
                     self.assertEqual(env['RSRS_RUNTIME_BIN'], '/external/runtime')
                     if fault in ('host', 'outside', 'existing'):
                         run.assert_not_called()
@@ -569,6 +578,19 @@ console.log('PASS: both workflow verifiers bind explicit source and original rec
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_invalid_installation_never_rebinds_runtime(self):
+        secret = 'private-installer-sentinel'
+        for stdout, envelope in ((secret, 'invalid_json'), (b'\xff', 'invalid_json'),
+                                 ('null', 'non_object'), ('[]', 'non_object')):
+            diagnostic = runtime_install_diagnostic(types.SimpleNamespace(returncode=7, stdout=stdout, stderr=secret))
+            self.assertEqual(diagnostic, {'exit_code': 7, 'structured_reason': 'unknown',
+                'category': 'unclassified', 'envelope': envelope})
+        for reason in (secret, {'token': secret}, [secret], None, 'invalid_input', 'runtime_error', 'request_outcome_unknown'):
+            stdout = json.dumps({'summary': {'reason': reason}, 'errors': [secret], 'details': {'path': secret}})
+            diagnostic = runtime_install_diagnostic(types.SimpleNamespace(returncode=1, stdout=stdout, stderr=secret))
+            self.assertEqual(diagnostic['structured_reason'], reason if type(reason) is str and reason in
+                ('invalid_input', 'runtime_error', 'request_outcome_unknown') else 'unknown')
+            self.assertEqual(diagnostic['category'], 'unclassified')
+            self.assertNotIn(secret, json.dumps(diagnostic))
         for fault in ('exit', 'image', 'target', 'proof', 'version', 'existing', 'host', 'outside'):
             with self.subTest(fault=fault):
                 self.run_fixture(fault)
