@@ -34,6 +34,15 @@ pub fn agent_config_snapshot() -> Result<Value> {
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     let object = agent.as_object_mut().context("agent config must be an object")?;
+    for key in ["readonly_team", "readonly", "memory_off"] {
+        if let Some(value) = object.get(key) {
+            anyhow::ensure!(value.is_boolean(), "{key} must be true or false");
+        }
+    }
+    if let Some(mode) = client.as_ref().and_then(|value| value.get("service_mode")) {
+        anyhow::ensure!(matches!(mode.as_str(), Some("normal" | "readonly" | "off")),
+            "service_mode must be normal, readonly or off");
+    }
     let mode = device_service_mode(client.as_ref());
     let readonly = object.get("readonly_team").and_then(Value::as_bool).unwrap_or(false)
         || match mode {
