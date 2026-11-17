@@ -109,8 +109,8 @@ class UpgradeProfileTest(unittest.TestCase):
             with tarfile.open(fileobj=archive, mode="w:gz"):
                 pass
             releases = [self.release(tag, missing=(missing_latest and tag == "v1.0.18") or
-                                     (missing_checkpoint and tag == "v1.0.15-dev.10"))
-                        for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045", "v1.0.15-dev.10"]]
+                                     (missing_checkpoint and tag == "v1.0.11-dev.1"))
+                        for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045", "v1.0.11-dev.1", "v1.0.17-dev.6"]]
             for release in releases[2:]:
                 release["prerelease"] = True
             releases.append(self.release("v2.0.0-dev.1", prerelease=True))
@@ -171,6 +171,11 @@ class UpgradeProfileTest(unittest.TestCase):
                         "sequence": [{"account": account, "model_rows": {
                             name: {"name": name, "status": "ok"} for name in ["embedder", "model index"]}}
                             for account in ["main", "alternate", "main"]]}]
+                    if '--database-dev-checkpoint' in command:
+                        checks[0]['database_dev_checkpoint'] = {
+                            'tag': command[command.index('--database-dev-checkpoint') + 1],
+                            'special_state_seeded': True, 'special_state_preserved': True,
+                            'verified_accounts': ['main', 'alternate']}
                     if standalone:
                         checks[0].update(upgrade_contract="standalone-v1", source_rpc_checked=False,
                             legacy_client_rejected=False, legacy_handoff_actor="fixture",
@@ -235,9 +240,9 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_critical_runs_latest_and_database_dev_checkpoints_and_marks_partial_coverage(self):
         upgraded, report = self.run_fixture("critical")
-        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.15-dev.10"})
-        self.assertEqual(report["selected_sources"], ["v1.0.15-dev.10", "v1.0.18"])
-        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.15-dev.10"})
+        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.11-dev.1", "v1.0.17-dev.6"})
+        self.assertEqual(report["selected_sources"], ["v1.0.11-dev.1", "v1.0.17-dev.6", "v1.0.18"])
+        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.11-dev.1", "v1.0.17-dev.6"})
         self.assertEqual(report["profile"], "critical")
         self.assertTrue(report["passed"])
         self.assertEqual(report["upgrade_contract"], "legacy-shim-v1")
@@ -252,7 +257,7 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_default_full_keeps_stables_and_database_dev_checkpoints(self):
         upgraded, report = self.run_fixture()
-        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.15-dev.10"})
+        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.11-dev.1", "v1.0.17-dev.6"})
         self.assertEqual(report["profile"], "full")
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])
@@ -330,6 +335,11 @@ class UpgradeProfileTest(unittest.TestCase):
                 {**checks[0], 'source_and_keys_unchanged': True, 'compatible_index_reused': True}.items()
                 if key not in ('original_records_preserved', 'original_sync_work_preserved', 'urk_preserved',
                                'old_records_decrypted', 'post_upgrade_recall_checked')}], standalone)
+            for checkpoint in (None, {}, {'tag': 'v1.0.15-dev.10', 'special_state_seeded': True,
+                                         'special_state_preserved': True, 'verified_accounts': ['main', 'alternate']},
+                               {'tag': 'v1.0.11-dev.1', 'special_state_seeded': False,
+                                'special_state_preserved': True, 'verified_accounts': ['main', 'alternate']}):
+                self.assert_rejected_checks(lambda checks: [{**checks[0], 'database_dev_checkpoint': checkpoint}], standalone)
 
     def test_candidate_hash_and_cpu_engine_must_match(self):
         for standalone in [False, True]:

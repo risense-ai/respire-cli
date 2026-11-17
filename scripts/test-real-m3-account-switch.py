@@ -122,6 +122,43 @@ def library_state(snapshot, factors):
     return records, rows[1], urk
 
 
+def database_checkpoint_state(profile, checkpoint, snapshot_value, records):
+    if checkpoint == 'v1.0.11-dev.1':
+        links = []
+        for memory_id, plaintext, _, _ in records:
+            payload = json.loads(plaintext)
+            links.append((memory_id, payload.get('supersedes', ''),
+                          payload.get('superseded_by', ''), tuple(sorted(payload.get('see_also', [])))))
+        return {'kind': 'legacy_relation_payload', 'links': sorted(links),
+                'legacy_domain': all(not row[1].startswith(vault_crypto.PREFIX) for row in snapshot_value[0][0])}
+    if checkpoint != 'v1.0.17-dev.6':
+        raise ValueError('unsupported database checkpoint: ' + checkpoint)
+    database = profile / 'rsrs.db'
+    if not database.exists():
+        database = profile / 'onememory.db'
+    with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
+        witness = db.execute('SELECT schema_version,library_id,seq,ts,action,entry_id,previous_entry_id,'
+            'before_digest,after_digest,prev,hash FROM witness_log ORDER BY seq').fetchall()
+        requests = db.execute('SELECT request_id FROM query_log WHERE request_id IS NOT NULL ORDER BY request_id').fetchall()
+        feedback = db.execute('SELECT q.request_id,f.memory_id,f.good,f.source,f.marked_at,f.revision '
+            'FROM query_feedback f JOIN query_log q ON q.id=f.query_log_id '
+            'ORDER BY q.request_id,f.memory_id').fetchall()
+        recovery_table = db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_recovery_intents')").fetchone()[0]
+    return {'kind': 'witness_feedback', 'witness': witness, 'requests': requests,
+            'feedback': feedback, 'recovery_table': bool(recovery_table)}
+
+
+def assert_database_checkpoint_preserved(before, after):
+    assert before['kind'] == after['kind'], 'database checkpoint kind changed'
+    if before['kind'] == 'legacy_relation_payload':
+        current = {row[0]: row for row in after['links']}
+        assert all(current.get(row[0]) == row for row in before['links']), 'encrypted historical relation fields changed'
+    else:
+        assert after['witness'][:len(before['witness'])] == before['witness'], 'historical witness prefix changed'
+        assert set(before['requests']) <= set(after['requests']), 'historical query request identity lost'
+        assert set(before['feedback']) <= set(after['feedback']), 'historical explicit feedback changed'
+
+
 parser=argparse.ArgumentParser()
 parser.add_argument('--binary',action='append',required=True)
 parser.add_argument('--model-dir',required=True)
@@ -135,8 +172,11 @@ architecture.add_argument('--expect-supervised-worker',action='store_true',help=
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
 parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
 parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then upgrade its running runtime')
+parser.add_argument('--database-dev-checkpoint', choices=['v1.0.11-dev.1', 'v1.0.17-dev.6'])
 add_runtime_arguments(parser)
 args=parser.parse_args()
+if args.database_dev_checkpoint and not args.seed_binary:
+    parser.error('--database-dev-checkpoint requires an authenticated historical --seed-binary')
 runtime_config=args
 if sys.platform.startswith('linux') and args.seed_binary and os.environ.get('RSRS_SS_FIXTURE_BUS')!='private':
     os.execvpe('dbus-run-session', ['dbus-run-session','--',sys.executable,*sys.argv],
@@ -350,9 +390,29 @@ for binary in BINARIES:
         for profile in [main,alternate]:
             select(profile)
             if args.seed_binary:
-                for command in [('model','activate','m3'),('remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')]:
+                def seed_command(*command):
                     seeded=captured_run([str(pathlib.Path(args.seed_binary).resolve()),'--json','--direct',*command],env=seed_env,timeout=180)
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
+                    return seeded
+                seed_command('model','activate','m3')
+                seed_command('remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
+                if args.database_dev_checkpoint == 'v1.0.11-dev.1':
+                    first_ids = {row[0] for row in snapshot(profile)[0][0]}
+                    assert len(first_ids) == 1, 'relation checkpoint requires exactly one original entry'
+                    seed_command('remember','Independent checkpoint companion for network routing policy',
+                        '--title','checkpoint-companion','--importance','important','--force')
+                    peer_ids = {row[0] for row in snapshot(profile)[0][0]} - first_ids
+                    assert len(peer_ids) == 1, 'historical CLI did not create the relation companion'
+                    seed_command('remember','Replacement checkpoint conclusion preserving encrypted relationship fields',
+                        '--title','checkpoint-replacement','--importance','important','--force',
+                        '--supersedes',next(iter(first_ids)),'--see-also',next(iter(peer_ids)))
+                elif args.database_dev_checkpoint == 'v1.0.17-dev.6':
+                    recalled = json.loads(seed_command('recall','Real account return fixture '+profile.name,'--limit','3').stdout)
+                    request = recalled['summary']['query_log_id']
+                    assert isinstance(request, str) and request, 'historical recall did not expose its request identity'
+                    memory_ids = [row[0] for row in snapshot(profile)[0][0]]
+                    assert len(memory_ids) == 1, 'feedback checkpoint requires its original candidate'
+                    seed_command('query-log','mark',memory_ids[0],'--good','--query-log-id',request,'--source','human')
             else:
                 run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
                 if args.runtime_binary:
@@ -370,6 +430,20 @@ for binary in BINARIES:
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}
         assert [json.loads(original[str(profile)][2]).get('vault_version',1) for profile in [main,alternate]]==seed_vault_versions, 'historical preparation replaced the selected session formats'
         original_state={name:library_state(value,recovery_factors[name]) for name,value in original.items()}
+        checkpoint_before = {}
+        if args.database_dev_checkpoint:
+            for profile in [main, alternate]:
+                state = database_checkpoint_state(profile, args.database_dev_checkpoint,
+                    original[str(profile)], original_state[str(profile)][0])
+                if state['kind'] == 'legacy_relation_payload':
+                    assert state['legacy_domain'] and any(row[1] for row in state['links']) \
+                        and any(row[2] for row in state['links']) and any(row[3] for row in state['links']), \
+                        'checkpoint lacks old-domain encrypted association state'
+                else:
+                    assert state['witness'] and state['requests'] and state['feedback'] \
+                        and not state['recovery_table'], 'checkpoint lacks its intermediate witness/feedback state'
+                    assert original_state[str(profile)][1], 'checkpoint has no pending synchronization work'
+                checkpoint_before[str(profile)] = state
         assert all(state[2]==expected_urks[name] for name,state in original_state.items()), 'seed changed the fixture URK'
         if args.seed_binary:
             for profile in [main,alternate]:
@@ -869,6 +943,15 @@ for binary in BINARIES:
             restart_checked=True
         if args.seed_binary:
             assert set(custody_receipts)==set(custody_slots) and len(custody_receipts)==2, 'host custody evidence missing for a historical account'
+        checkpoint_evidence = None
+        if args.database_dev_checkpoint:
+            for profile in [main, alternate]:
+                current = snapshot(profile)
+                state = database_checkpoint_state(profile, args.database_dev_checkpoint,
+                    current, library_state(current, recovery_factors[str(profile)])[0])
+                assert_database_checkpoint_preserved(checkpoint_before[str(profile)], state)
+            checkpoint_evidence = {'tag': args.database_dev_checkpoint, 'special_state_seeded': True,
+                'special_state_preserved': True, 'verified_accounts': ['main', 'alternate']}
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'supervised_worker_checked':args.expect_supervised_worker,'owned_worker_identities':worker_identities,
@@ -876,6 +959,7 @@ for binary in BINARIES:
             'original_records_preserved':True,'original_sync_work_preserved':True,'urk_preserved':True,
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
             'seed_vault_versions':seed_vault_versions,
+            'database_dev_checkpoint':checkpoint_evidence,
             'host_credential_custody':{'required':bool(args.seed_binary),'verified_accounts':list(custody_receipts.values())},
             'historical_credential_migration_actor':'fixture' if args.seed_binary else None,
             'resident_stress':stress,
