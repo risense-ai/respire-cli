@@ -1,42 +1,22 @@
-name: Published performance comparison
-on:
+# Branch-only diagnostic; never merge or claim final full coverage.
+name: Temporary Windows Runtime24 database diagnostic
+'on':
   workflow_dispatch:
-    inputs:
-      comparison_mode:
-        description: Candidate-only cold/warm consistency with normal heat updates
-        type: choice
-        default: candidate-only
-        options:
-          - candidate-only
-      release_inventory:
-        description: Official published-assets schema 2 JSON (schema/cli/runtime), seven CLI and seven Runtime targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
-        type: string
-        required: true
-      release_inventory_sha256:
-        description: SHA256 of the exact reviewed release_inventory UTF-8 bytes
-        type: string
-        required: true
 permissions:
   contents: read
   actions: read
 jobs:
-  compare:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+  windows-database:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CLI_SHA: 91aa3b1410fdc9c26b6d741141035f01cdc55e9d
+      CLI_VERSION: 2.0.0-dev.19
+      RSRS_RUNTIME_TRIPLE: x86_64-pc-windows-msvc
+      RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+      RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -45,28 +25,210 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/performance-model
-          key: performance-m3-quantized-0826f8c1-${{ runner.os }}
-      - name: Install benchmark dependencies
-        run: python -m pip install cryptography==46.0.3 psutil==7.1.0
-      - name: Compare immutable published binaries on the same runner
+      - name: Verify original producer and exact CLI zip
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          PERF_COMPARISON_MODE: ${{ inputs.comparison_mode }}
-          PERF_RELEASE_INVENTORY: ${{ inputs.release_inventory }}
-          PERF_RELEASE_INVENTORY_SHA256: ${{ inputs.release_inventory_sha256 }}
-          PERF_TARGET: ${{ matrix.target }}
-          PERF_ROOT: ${{ runner.temp }}/comparison
-          PERF_MODEL: ${{ runner.temp }}/performance-model
-        run: python scripts/compare-published-performance.py
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ARCH -ne 'X64') { throw 'Native Windows x64 required' }
+          @'
+          import hashlib,io,json,pathlib,subprocess,zipfile
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api','repos/risense-ai/respire-cli/'+path]))
+          run=api('actions/runs/44194707088/attempts/1')
+          assert run['id']==44194707088 and run['run_attempt']==1
+          assert run['head_sha']=='91aa3b1410fdc9c26b6d741141035f01cdc55e9d'
+          assert run['repository']['full_name']==run['head_repository']['full_name']=='risense-ai/respire-cli'
+          assert run['head_branch']=='main' and run['event']=='workflow_dispatch'
+          assert run['path']=='.github/workflows/release.yml' and run['conclusion']=='success'
+          pages=json.loads(subprocess.check_output(['gh','api','--paginate','--slurp','repos/risense-ai/respire-cli/actions/runs/44194707088/attempts/1/jobs?per_page=100']))
+          jobs=[j for p in pages for j in p['jobs'] if j['name']=='validate / Release (x86_64-pc-windows-msvc)']
+          assert len(jobs)==1
+          job=jobs[0]
+          assert job['id']==134433197218 and job['head_sha']==run['head_sha'] and job['run_attempt']==1 and job['conclusion']=='success'
+          for name in ['Build release binary','Verify the native executable','Prepare versioned CLI artifacts','Run actions/upload-artifact@v4']:
+              steps=[s for s in job['steps'] if s['name']==name and s['conclusion']!='skipped']
+              assert len(steps)==1 and steps[0]['conclusion']=='success'
+          a=api('actions/artifacts/14378487259')
+          digest='sha256:a8d8ff6de541b94f66ddfd7a3faa4614047c1ab093cd3c8553abbe5f7b010666'
+          assert a['id']==14378487259 and a['name']=='cli-release-x86_64-pc-windows-msvc'
+          assert a['expired'] is False and a['digest']==digest
+          assert a['workflow_run']['id']==run['id'] and a['workflow_run']['head_sha']==run['head_sha']
+          assert job['started_at']<=a['created_at']<=a['updated_at']<=job['completed_at']
+          b=subprocess.check_output(['gh','api','repos/risense-ai/respire-cli/actions/artifacts/14378487259/zip'])
+          assert len(b)==a['size_in_bytes']==6140863 and 'sha256:'+hashlib.sha256(b).hexdigest()==digest
+          z=zipfile.ZipFile(io.BytesIO(b))
+          assert sorted(z.namelist())==['cli-build-x86_64-pc-windows-msvc.json','rsrs-x86_64-pc-windows-msvc.exe']
+          z.extractall('verified-cli')
+          pathlib.Path('db-producer.json').write_text(json.dumps({'diagnostic_only':True,'publication_reusable':False,'run_id':run['id'],'run_attempt':1,'source':run['head_sha'],'job_id':job['id'],'artifact_id':a['id'],'zip_digest':digest},indent=2)+'\n')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'CLI producer or zip verification failed' }
+      - name: Verify CLI manifest source version bytes and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          import {validateBuildMetadata,verifyBinary} from './npm/scripts/verify-binary.mjs';
+          const target=process.env.RSRS_RUNTIME_TRIPLE,file=`rsrs-${target}.exe`,path=`verified-cli/${file}`;
+          const bytes=readFileSync(path),m=JSON.parse(readFileSync(`verified-cli/cli-build-${target}.json`));
+          const manifest=JSON.parse(readFileSync('npm/artifact-manifest.json'));
+          validateBuildMetadata(m,manifest,target,{sha:process.env.CLI_SHA,version:process.env.CLI_VERSION,run_id:'44194707088',run_attempt:1},
+            {file,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')});
+          assert.equal(m.binary_sha256,'7e783d3a2d889979d17f84d68ceeb55d7aa620002c1c4faff6856680d2f61b16');
+          verifyBinary(path,target);
+          assert.equal(execFileSync(path,['--version'],{encoding:'utf8'}).trim(),'rsrs '+process.env.CLI_VERSION);
+          writeFileSync('db-cli-identity.json',JSON.stringify(m,null,2)+'\n');
+          NODE
+      - name: Verify official Runtime24 and full Core SDK inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download v2.0.0-dev.24 --repo risense-ai/respire-runtime --pattern runtime-build-x86_64-pc-windows-msvc.json --pattern rsrs-runtime-x86_64-pc-windows-msvc.tar.gz --dir official-runtime
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync,appendFileSync,realpathSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          import {extractPublishedArchive,verifyCorePayload} from './npm/scripts/extract-artifact.mjs';
+          import {verifyBinary} from './npm/scripts/verify-binary.mjs';
+          const hash=b=>createHash('sha256').update(b).digest('hex'),target=process.env.RSRS_RUNTIME_TRIPLE;
+          const bytes=readFileSync(`official-runtime/runtime-build-${target}.json`),m=JSON.parse(bytes);
+          assert.equal(hash(bytes),'8bfec27b13dc0097737351cce573b43b5e19172fc3c2eec881410eb5ac68ad5a');
+          assert.equal(m.runtime_version,'2.0.0-dev.24');assert.equal(m.target_triple,target);
+          assert.equal(m.source_commit,'7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b');
+          assert.equal(m.archive_file,`rsrs-runtime-${target}.tar.gz`);
+          assert.equal(m.archive_sha256,'b3ff684566ca0ae85e23cf9cc0a1c2c2819431a8a65d78af3f4ee9e36e3106bf');
+          assert.equal(hash(readFileSync('official-runtime/'+m.archive_file)),m.archive_sha256);
+          await extractPublishedArchive('official-runtime/'+m.archive_file,'runtime-payload');
+          const content=JSON.parse(execFileSync('gh',['api',`repos/risense-ai/respire-runtime/contents/crates/core-sdk/core-sdk.lock.json?ref=${m.source_commit}`],{encoding:'utf8'}));
+          const lock=JSON.parse(Buffer.from(content.content,'base64')).targets[target];
+          const sdk=verifyCorePayload('runtime-payload',target,lock,m.files);
+          const runtime=realpathSync('runtime-payload/'+m.binary_file);
+          assert.equal(m.binary_file,`rsrs-runtime-${target}.exe`);verifyBinary(runtime,target);
+          assert.equal(m.binary_sha256,'e708488ba8c4112d1613f9b56bf270ff0e15374ee75b3a7b2a9e292cf7f0f68d');
+          assert.equal(hash(readFileSync(runtime)),m.binary_sha256);
+          assert.equal(JSON.parse(readFileSync('runtime-pin.json')).required,m.runtime_version);
+          for(const [key,value] of Object.entries({NATIVE_RUNTIME_BIN:runtime,NATIVE_RUNTIME_SHA256:m.binary_sha256,NATIVE_RUNTIME_VERSION:m.runtime_version})) {
+            assert.ok(!/[\r\n]/.test(value));appendFileSync(process.env.GITHUB_ENV,`${key}=${value}\n`);
+          }
+          writeFileSync('db-runtime-identity.json',JSON.stringify({version:m.runtime_version,source:m.source_commit,target,metadata_sha256:hash(bytes),archive_sha256:m.archive_sha256,binary_sha256:m.binary_sha256,sdk},null,2)+'\n');
+          NODE
+      - name: Key fixed public model inputs
+        id: model-key
+        shell: bash
+        run: echo "key=$(python scripts/native-model-cache.py key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: model-cache
+        with:
+          path: .native-model-cache
+          key: ${{ steps.model-key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Restore only exact verified public model cache
+        if: steps.model-cache.outputs.cache-matched-key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.model-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.model-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          python scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/db-model/models/bge-m3" --legacy-dir "$RUNNER_TEMP/db-legacy-model"
+      - name: Prepare existing native fixture dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/upgrade-python"
+          py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+          "$py" -m pip install --only-binary=:all: pip==26.2.2 setuptools==84.2.1 wheel==0.48.0 cryptography==46.0.3
+          "$py" scripts/native-psutil-wheel-cache.py build --directory .native-psutil-wheels
+          "$py" scripts/native-psutil-wheel-cache.py validate --directory .native-psutil-wheels
+          "$py" scripts/native-psutil-wheel-cache.py install --directory .native-psutil-wheels
+      - name: Prepare official CPU model and verify legacy bytes
+        shell: bash
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/db-model
+          RSRS_M3_DIR: ${{ runner.temp }}/db-model/models/bge-m3
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+          MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          export HOME="$RUNNER_TEMP/db-model-home" USERPROFILE="$RUNNER_TEMP/db-model-home"
+          mkdir -p "$HOME"
+          exe="$GITHUB_WORKSPACE/verified-cli/rsrs-x86_64-pc-windows-msvc.exe"
+          "$exe" --json runtime install > "$RUNNER_TEMP/db-runtime-install.json"
+          "$exe" --direct model engine cpu --json > "$RUNNER_TEMP/db-engine.json"
+          "$exe" --direct model install-m3 --json > "$RUNNER_TEMP/db-model-inference.json"
+          "$exe" --runtime-internal --stop --json
+          mkdir -p "$RUNNER_TEMP/db-legacy-model/onnx"
+          cp "$RSRS_M3_DIR/tokenizer.json" "$RUNNER_TEMP/db-legacy-model/tokenizer.json"
+          cp "$RSRS_M3_DIR/onnx/model_quantized.onnx" "$RUNNER_TEMP/db-legacy-model/onnx/model_quantized.onnx"
+          cp "$RSRS_M3_DIR/onnx/model_quantized.cpu-v1.ort" "$RUNNER_TEMP/db-legacy-model/onnx/model_quantized.cpu-v1.ort"
+          if [ "$MODEL_CACHE_HIT" != true ]; then
+            curl --fail --location 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' --output "$RUNNER_TEMP/db-legacy-model/onnx/model_fp16.onnx"
+          fi
+          python scripts/native-model-cache.py verify --model-dir "$RSRS_M3_DIR" --legacy-dir "$RUNNER_TEMP/db-legacy-model"
+      - name: Run unchanged two-source historical database harness
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test ! -e "$RUNNER_TEMP/db-upgrades"
+          "$RUNNER_TEMP/upgrade-python/Scripts/python.exe" scripts/test-published-upgrades.py \
+            --binary "$GITHUB_WORKSPACE/verified-cli/rsrs-x86_64-pc-windows-msvc.exe" --target "$RSRS_RUNTIME_TRIPLE" \
+            --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
+            --model-dir "$RUNNER_TEMP/db-model/models/bge-m3" --legacy-model-dir "$RUNNER_TEMP/db-legacy-model" \
+            --output-dir "$RUNNER_TEMP/db-upgrades" --profile full --source v1.0.20 --source v1.0.11-dev.1
+      - name: Project safe database and cleanup evidence without credentials
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import ast,json,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'db-upgrades'
+          messages=set()
+          for name in ['test-published-upgrades.py','test-real-m3-account-switch.py','native_fixture_process.py']:
+              tree=ast.parse((pathlib.Path('scripts')/name).read_text(encoding='utf-8'))
+              messages.update(n.msg.value for n in ast.walk(tree) if isinstance(n,ast.Assert) and isinstance(n.msg,ast.Constant) and isinstance(n.msg.value,str))
+          reports=[]
+          for path in sorted(root.glob('*/results/real-account-return-verification.json')):
+              for row in json.loads(path.read_text(encoding='utf-8')):
+                  result={'source':path.parents[1].name}
+                  result.update({k:v for k,v in row.items() if type(v) is bool})
+                  for k in ['coverage_scope','upgrade_contract','engine','runtime_mode','runtime_version','seed_vault_versions','host_checks_delegated_to','historical_credential_migration_actor']:
+                      if k in row: result[k]=row[k]
+                  if 'error' in row:
+                      result['first_error']=row['error'] if row['error'] in messages else 'unclassified_fixture_failure'
+                  if 'cleanup_errors' in row: result['cleanup_error_count']=len(row['cleanup_errors'])
+                  for k in ['cloud_cleanup','native_credential_cleanup','host_credential_custody','post_upgrade_sync','database_dev_checkpoint']:
+                      if k in row:
+                          result[k]={name:value for name,value in row[k].items() if type(value) is bool}
+                          for name in ['remaining_users','remaining_entries']:
+                              if name in row[k]: result[k][name+'_count']=len(row[k][name])
+                  reports.append(result)
+          pathlib.Path('db-safe-results.json').write_text(json.dumps({'diagnostic_only':True,'full_coverage':False,'sources':reports},indent=2)+'\n',encoding='utf-8')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Safe evidence projection failed' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          retention-days: 1
-          name: performance-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/comparison/report.json
-            ${{ runner.temp }}/comparison/published-assets-receipt.json
+          name: windows-runtime24-two-source-db-diagnostic
+          retention-days: 3
           if-no-files-found: error
+          path: |
+            db-producer.json
+            db-cli-identity.json
+            db-runtime-identity.json
+            db-safe-results.json
+            ${{ runner.temp }}/db-upgrades/published-upgrades.json
