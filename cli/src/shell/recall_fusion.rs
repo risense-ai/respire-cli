@@ -77,8 +77,8 @@ impl Form {
                     .map(|(_, value)| Input::new(value.to_string()))
                     .collect();
                 self.message = t(
-                    "已恢复默认草稿；保存后生效",
-                    "Default draft restored; save to apply",
+                    "已恢复默认草稿；保存后写入配置",
+                    "Default draft restored; save to persist configuration",
                 );
             }
             KeyCode::Enter if self.field == save + 2 => return true,
@@ -146,8 +146,8 @@ impl Form {
             Ok(receipt) => {
                 self.receipt = receipt;
                 self.message = t(
-                    "已保存并回读；下次召回生效",
-                    "Saved and read back; applies to the next recall",
+                    "配置已保存并回读；尚未验证常驻 Runtime 已应用",
+                    "Configuration saved and read back; resident Runtime application is unverified",
                 );
             }
             Err(error) => self.message = error,
@@ -158,9 +158,10 @@ impl Form {
         let mut lines = vec![
             line(t("五轴注意力融合", "Five-axis attention fusion")),
             line(self.message.clone()),
+            line(t("配置来自宿主；常驻 Runtime 应用状态未知。", "Host configuration; resident Runtime application is unknown.")),
             line(format!(
                 "{}: {}",
-                t("当前生效模式", "Effective mode"),
+                t("本地解析模式", "Locally resolved mode"),
                 self.receipt["effective"]["fusion"]
             )),
             line(format!(
@@ -191,7 +192,7 @@ impl Form {
             row.spans.push(
                 format!(
                     "  {}: {}",
-                    t("生效", "Effective"),
+                    t("本地配置", "Local setting"),
                     self.receipt["effective"][*key]
                 )
                 .into(),

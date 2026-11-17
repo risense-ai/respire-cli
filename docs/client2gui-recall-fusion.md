@@ -6,15 +6,17 @@ Core PR #38 提供五轴融合算法，CLI PR #194 提供环境变量映射。�
 
 GUI 只编辑设置和显示宿主回执。算法仍在 Core 内执行。GUI 不计算 softmax、候选库大小门控或最终排名。
 
-配套 SDK 必须声明 `recall_fusion_contract: 1`。CLI 构建会检查该能力，防止旧 SDK 静默忽略设置。部署时应使用包含本次设置扩展的 CLI dev 包；Apple 推理修复 dev 先发布，再发布包含五轴设置的新 dev。最终版本以发布回执为准。
+核心执行需要配套 SDK 声明 `recall_fusion_contract: 1`。CLI 本地读取配置不加载 SDK，也不验证该能力。
+本轮固定 Runtime23，读取成功不能证明核心支持或常驻 Runtime 已应用设置；当前拆分状态以
+[组件职责文档](component-boundaries.md) 为准，公开版本以发布回执为准。
 
 ## 界面位置与行为
 
 在现有“推理设置”页面增加“五轴注意力融合”区域。当前 client2 源码对应 `internal/desktop/frontend/pages/models.js`。
 
-- 首行显示“当前生效模式”。编辑区显示“已保存设置”。两者可能因环境覆盖而不同。
+- 首行显示“本地解析模式”。编辑区显示“已保存设置”。两者可能因本命令的环境覆盖而不同，不能据此显示常驻 Runtime 已生效。
 - 模式使用下拉框。八个数值参数放入“高级参数”，默认折叠。
-- 提供“保存”和“恢复默认”按钮。“恢复默认”只修改草稿，用户保存后才生效。
+- 提供“保存”和“恢复默认”按钮。“恢复默认”只修改草稿，用户保存后才写入配置。
 - 进入页面时读取配置。保存后回读配置，成功后更新界面。
 - 未保存就离开页面时，不写入 Runtime。保存期间禁用重复提交。
 - 若回执没有 `recall_fusion_runtime.effective`，禁用保存并提示升级 CLI。不要只根据版本号猜测能力。
@@ -78,6 +80,8 @@ const draft = { ...state.defaults, ...state.configured };
 
 ```json
 {
+  "scope": "host_configuration",
+  "runtime_verified": false,
   "configured": { "fusion": "auto" },
   "effective": {
     "fusion": "auto",
@@ -106,7 +110,7 @@ const draft = { ...state.defaults, ...state.configured };
 }
 ```
 
-`configured` 是已保存的部分或完整对象。`defaults` 补全未设置字段。`effective` 是 Runtime 下一次请求会使用的设置，不代表某条查询最终选择的算法。例如 `effective.fusion=auto` 表示启用自动选择，不是固定选择 attention。
+`configured` 是已保存的部分或完整对象。`defaults` 补全未设置字段。`effective` 是本命令根据配置、默认值和本进程环境变量解析的值；它不代表常驻 Runtime 的环境或已加载状态。`scope=host_configuration` 且 `runtime_verified=false` 时，界面必须显示运行态未知。`effective.fusion=auto` 只表示本地配置选择了自动模式，不证明核心已应用该模式。
 
 保存整个对象，不能逐字段写入顶层键：
 
@@ -120,7 +124,7 @@ if (!readBack?.configured ||
     Object.keys(draft).some(key => readBack.configured[key] !== draft[key])) {
   throw new Error("保存后的回读不一致，请刷新设置");
 }
-// 比较通过后显示已保存，并显示 readBack.effective / overrides。
+// 比较通过后显示配置已保存，并显示本地 readBack.effective / overrides；运行态仍未验证。
 ```
 
 不要把 JSON 拼成 shell 命令。`setting` 是结构化参数中的一个字符串，现有命令层会将它作为单个 argv 传给 CLI。
@@ -145,9 +149,9 @@ if (!readBack?.configured ||
 
 `overrides` 返回被环境覆盖的字段名。若数组非空，显示“已保存，但这些字段由 Runtime 环境覆盖”，并逐项显示生效值。不要显示“设置已启用”后隐藏覆盖情况。
 
-宿主在每次召回前读取持久配置，无需重建索引、重载模型或重启 Runtime。已经开始的请求保留自己的设置快照。修改 Runtime 的环境变量通常需要重启该进程；修改 GUI 进程的环境不会改变已运行的 Runtime。
+目标是由宿主提供已验证的召回设置，已经开始的请求保留自己的设置快照。固定 Runtime23 下，设置的保存、验证及应用仍须按组件职责文档分别验收，本地读取没有完成这些步骤。修改 Runtime 的环境变量通常需要重启该进程；修改 GUI 进程的环境不会改变已运行的 Runtime。
 
-设置作用于当前数据目录下的 Runtime 配置，不是服务器共享偏好。切换数据目录后必须重新读取，不能复用旧草稿。
+持久设置属于所选账号的宿主配置，不是服务器共享偏好。切换数据目录后必须重新读取，不能复用旧草稿。
 
 ## 错误处理与验收
 
@@ -159,8 +163,8 @@ if (!readBack?.configured ||
 2. 选择四种模式分别保存，关闭并重开页面后读取一致。
 3. 拒绝空数字、字符串、越界值、零温度及 alpha + beta 大于 1；失败不修改已保存配置。
 4. 修改参数后取消，确认持久配置不变。恢复默认只改草稿，保存后再回读。
-5. 启动 Runtime 时设置一个环境覆盖；保存后显示 configured 与 effective 的区别及字段提示。
-6. 同一 Runtime 中保存设置后执行下一次召回，确认请求采用新设置。无需重建模型索引。
+5. 为 CLI 读取命令设置环境覆盖；显示 configured 与本地 effective 的区别，同时显示常驻 Runtime 状态未知。
+6. 单独验证同一 Runtime 的下一次召回是否采用已保存设置；配置回读不能替代该验证。无需重建模型索引。
 7. 保存期间禁用重复提交；模拟回读失败后只刷新，不自动重写。
 8. 切换数据目录后重新读取；验证小窗口、键盘导航、中英文文案和高级参数布局。
 

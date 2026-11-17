@@ -106,7 +106,8 @@ pub(crate) fn receipt(configured: Value) -> Result<Value> {
         }
     }
     validate(&Value::Object(effective.clone()))?;
-    Ok(json!({"configured":configured,"effective":effective,"defaults":defaults,
+    Ok(json!({"scope":"host_configuration","runtime_verified":false,
+        "configured":configured,"effective":effective,"defaults":defaults,
         "overrides":overrides,"applies":"next_query"}))
 }
 

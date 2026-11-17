@@ -197,11 +197,11 @@ fn run_agent_config_read() -> Result<()> {
     let mut config = respire_client_host::settings::agent_config_snapshot()?;
     let configured_heat = config.get("read_heat").map(|value|
         value.as_bool().context("read_heat must be true or false")).transpose()?;
-    // Like the former offline helper, this receipt describes this process's configuration,
-    // not the loaded state of a resident Runtime or Core scoring.
+    // Local resolution does not prove Core support or the resident Runtime's loaded state.
     config["read_heat_runtime"] = serde_json::json!({
-        "configured":configured_heat, "loaded":configured_heat,
-        "effective":configured_heat.unwrap_or(true), "default":true, "pending_reload":false,
+        "scope":"host_configuration", "runtime_verified":false,
+        "configured":configured_heat, "loaded":null,
+        "effective":configured_heat.unwrap_or(true), "default":true, "pending_reload":null,
     });
     config["recall_fusion_runtime"] = recall_fusion::receipt(
         config.get("recall_fusion").cloned().unwrap_or_else(|| serde_json::json!({})))?;

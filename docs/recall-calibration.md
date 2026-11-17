@@ -1,6 +1,6 @@
 # Recall calibration
 
-This CLI requires the paired Core SDK with `recall_calibration_contract=1`.
+Runtime scoring requires the paired Core SDK with `recall_calibration_contract=1`.
 The 2026-10-31 repair includes cosine admission, mailbox floor alignment,
 remaining-weight ablation normalization, plain document embeddings, BM25/IDF
 lexical coverage, Latin token boundaries, diagnostic receipts and read-heat caps.
@@ -9,9 +9,12 @@ indexes. No extra model inference or remote selector request is introduced.
 
 Five-axis fusion settings additionally require `recall_fusion_contract=1` in the
 paired SDK. The TUI model page provides a persistent editor; `agent-config`
-reports saved and effective settings under `recall_fusion_runtime`. Environment
-overrides take priority and saved changes apply to the next recall without
-reindexing. See [client2gui integration](client2gui-recall-fusion.md) for the
+reports saved and locally resolved settings under `recall_fusion_runtime`.
+`scope=host_configuration` and `runtime_verified=false` identify a host configuration
+receipt. Environment overrides belong to this CLI process; this read does not verify
+Core support or the resident Runtime's environment and loaded settings. A next-query
+configuration policy is not evidence that a running Runtime applied it. See
+[client2gui integration](client2gui-recall-fusion.md) for the
 shared settings contract and GUI implementation steps.
 
 ## Controls
