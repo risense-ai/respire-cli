@@ -4,6 +4,7 @@ param(
     [switch]$OfflineAcceptance,
     [switch]$SourceCandidateStability,
     [switch]$ExistingKeys,
+    [switch]$CoreConfigQuery,
     [ValidateSet('issue','resume','verified')][string]$RecoveryPhase
 )
 $ErrorActionPreference = 'Stop'
@@ -1238,6 +1239,133 @@ function Fill-OfflineField([string]$Name, [string]$Text) {
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
 
+function Read-CoreQueryControl([string]$Mode = '') {
+    $options = @{Uri=($binding.core_query.address + '/__fixture'); Headers=@{'X-Fixture-Control'=$binding.core_query.nonce}; TimeoutSec=10}
+    if ($Mode) { $options.Method='POST'; $options.ContentType='application/json'; $options.Body=(@{mode=$Mode} | ConvertTo-Json -Compress) }
+    $value = Invoke-RestMethod @options
+    if (@($value.errors).Count -ne 0 -or $value.core_test_mode -ne $false) { throw 'Real forwarding fixture failed' }
+    return $value
+}
+function Read-CoreQueryRecord {
+    $records = @(Get-Content -Raw -LiteralPath (Join-Path $binding.data_directory 'client2/requests.json') | ConvertFrom-Json)
+    $jobs = @($records | Where-Object { $_.name -ceq 'agent_set' -and $_.transaction.kind -ceq 'core_config' })
+    if ($jobs.Count -ne 1 -or $jobs[0].transaction.request_bound -ne $true -or
+        $jobs[0].id -cne ('desktop-' + $jobs[0].transaction.operation_id)) { throw 'Expected one durable RequestBound core operation' }
+    return $jobs[0]
+}
+function Find-CoreQuerySave {
+    $combo = Find-OfflineControl 'ControlType.ComboBox' ([regex]::Unescape('\u005e\u878d\u5408\u6a21\u5f0f\u0024')) -Seconds 30
+    $walker = [Windows.Automation.TreeWalker]::ControlViewWalker
+    $parent = $walker.GetParent($combo)
+    while ($parent -and $parent.Current.ControlType -ne [Windows.Automation.ControlType]::Document) {
+        $null = Assert-Target $true
+        $condition = [Windows.Automation.AndCondition]::new(
+            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Button),
+            [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,([regex]::Unescape('\u4fdd\u5b58'))))
+        $buttons = $parent.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
+        if ($buttons.Count -gt 1) { throw 'Fusion save control is ambiguous' }
+        if ($buttons.Count -eq 1) { return $buttons[0] }
+        $parent = $walker.GetParent($parent)
+    }
+    throw 'Fusion form save control is not identifiable'
+}
+function Invoke-CoreQueryAcceptance {
+    $report.offline = @{}
+    $report.core_query = @{status='failed';phase=$binding.core_query.phase;diagnostic_only=$true;scope_rejection_boundary='CLI'}
+    if ($env:RSRS_CORE_TEST_MODE) { throw 'Real query mode cannot run with CORE_TEST_MODE' }
+    $null = Read-CoreQueryControl
+    Press-OfflineButton ([regex]::Unescape('\u005e\u6a21\u578b\u4e0e\u7d22\u5f15\u0024'))
+    $save = Find-CoreQuerySave
+    if ($binding.core_query.phase -ceq 'core-issue') {
+        if (-not $save.Current.IsEnabled) { throw 'Fresh fusion save is disabled' }
+        $combo = Find-OfflineControl 'ControlType.ComboBox' ([regex]::Unescape('\u005e\u878d\u5408\u6a21\u5f0f\u0024'))
+        $initialSelection = @($combo.GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern).GetCurrentSelection())
+        if ($initialSelection.Count -ne 1 -or $initialSelection[0].Current.Name -cne ([regex]::Unescape('\u539f\u6709\u878d\u5408\uff08\u9ed8\u8ba4\uff09'))) { throw 'Fresh Runtime fusion selection is not legacy' }
+        Focus-OfflineControl $combo
+        # One selection change, followed by one save; never replay these effects.
+        $combo.GetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+        Send-OfflineKey 0x24
+        Send-OfflineKey 0x28
+        Send-OfflineKey 0x0D
+        $selected = @($combo.GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern).GetCurrentSelection())
+        if ($selected.Count -ne 1 -or $selected[0].Current.Name -cne ([regex]::Unescape('\u4e94\u8f74\u6ce8\u610f\u529b\u878d\u5408'))) { throw 'Fusion selection did not become attention' }
+        $null = Read-CoreQueryControl 'lose_reply'
+        $mismatch = $null
+        $prepared = Prepare-OfflineButtonInvoke (Find-CoreQuerySave) ([ref]$mismatch)
+        $prepared.pattern.Invoke()
+    } elseif ($binding.core_query.phase -cne 'core-resume') { throw 'Unknown core query phase' }
+    $querySelector = [regex]::Unescape('\u005e\u67e5\u8be2\u539f\u8bf7\u6c42\u0024')
+    $null = Find-OfflineControl 'ControlType.Button' $querySelector -Seconds 60
+    $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u6838\u5fc3\u914d\u7f6e\u7ed3\u679c\u672a\u786e\u8ba4\uff1b\u8bf7\u67e5\u8be2\u539f\u8bf7\u6c42\uff0c\u4e0d\u8981\u91cd\u65b0\u4fdd\u5b58\u3002\u0024')) -Seconds 30
+    if ((Find-CoreQuerySave).Current.IsEnabled) { throw 'Unknown permits another save' }
+    $job = Read-CoreQueryRecord
+    $state = Read-CoreQueryControl
+    if ($job.state -cne 'unconfirmed' -or @($state.apply_ids).Count -ne 1 -or
+        $state.apply_ids[0] -cne $job.transaction.operation_id -or $state.dropped_apply_replies -ne 1 -or
+        ($job.transaction.scope | ConvertTo-Json -Compress) -cne ($state.scope | ConvertTo-Json -Compress)) { throw 'Unknown is not the single real applied operation' }
+    $report.core_query.transaction = $job.transaction
+    $report.core_query.unknown_screenshot = Capture-Target (Assert-Target $true).client_bounds
+    Copy-Item -LiteralPath (Join-Path $OutputDirectory 'workspace.png') -Destination (Join-Path $OutputDirectory ($binding.core_query.phase + '-unknown.png'))
+    if ($binding.core_query.phase -ceq 'core-resume') {
+        $before = @($state.result_ids).Count
+        Press-OfflineButton $querySelector
+        $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u6838\u5fc3\u914d\u7f6e\u7ed3\u679c\u4ecd\u672a\u786e\u8ba4\uff1b\u4fdd\u7559\u539f\u8bf7\u6c42\uff0c\u4e0d\u4f1a\u91cd\u65b0\u5e94\u7528\u3002\u0024')) -Seconds 60
+        $failed = Read-CoreQueryRecord
+        $state = Read-CoreQueryControl
+        if ($failed.state -cne 'unconfirmed' -or @($state.result_ids).Count -le $before -or
+            $state.dropped_result_replies -lt 1 -or (Find-CoreQuerySave).Current.IsEnabled) { throw 'Failed button query erased Unknown or did not reach Runtime result path' }
+        $null = Read-CoreQueryControl 'pass'
+        Press-OfflineButton $querySelector
+        $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u4e94\u8f74\u878d\u5408\u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u6838\u5fc3\u5df2\u5e94\u7528\uff1b\u4e0b\u4e00\u6b21\u53ec\u56de\u4f7f\u7528\u5df2\u786e\u8ba4\u7684\u8fd0\u884c\u914d\u7f6e\u3002\u0024')) -Seconds 60
+        $done = Read-CoreQueryRecord
+        if ($done.state -cne 'done' -or -not (Find-CoreQuerySave).Current.IsEnabled -or
+            ($done.transaction | ConvertTo-Json -Compress) -cne ($job.transaction | ConvertTo-Json -Compress)) { throw 'Original query did not close the same RequestBound operation' }
+        $state = Read-CoreQueryControl
+        if (@($state.apply_ids).Count -ne 1 -or @($state.result_ids | Where-Object { $_ -cne $job.transaction.operation_id }).Count) { throw 'Query replayed apply or used another operation' }
+        # The UI never accepts caller scope. Check foreign scope at the real CLI boundary.
+        $foreign = @{scope=@{account_id=$job.transaction.scope.account_id;instance_id=$job.transaction.scope.instance_id;generation=($job.transaction.scope.generation + 1)};
+            operation_id=$job.transaction.operation_id;idempotency_key=$job.transaction.operation_id}
+        $start = [Diagnostics.ProcessStartInfo]::new($binding.cli_exe)
+        $start.UseShellExecute=$false; $start.CreateNoWindow=$true; $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+        $start.Arguments = '--json runtime core-config-result --context "' + (($foreign | ConvertTo-Json -Depth 5 -Compress).Replace('"','\"')) + '" --source-profile "' + $job.transaction.source_profile.TrimEnd('\') + '"'
+        if ((Get-FileHash -LiteralPath $binding.cli_exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $binding.cli_sha256) { throw 'Scope query CLI bytes changed' }
+        $journal = Join-Path $binding.data_directory 'client2/requests.json'
+        $marker = Join-Path $binding.data_directory ('runtime/autostart/core-config-results/' + $job.transaction.operation_id + '.json')
+        $journalHash = (Get-FileHash -LiteralPath $journal -Algorithm SHA256).Hash
+        $markerHash = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash
+        $originalContext = @{scope=$job.transaction.scope;operation_id=$job.transaction.operation_id;idempotency_key=$job.transaction.operation_id}
+        $foreignArguments = $start.Arguments
+        $start.Arguments = '--json runtime core-config-result --context "' + (($originalContext | ConvertTo-Json -Depth 5 -Compress).Replace('"','\"')) + '" --source-profile "' + $job.transaction.source_profile.TrimEnd('\') + '"'
+        $valid = [Diagnostics.Process]::Start($start)
+        try {
+            $validOut = $valid.StandardOutput.ReadToEndAsync(); $validErr = $valid.StandardError.ReadToEndAsync()
+            if (-not $valid.WaitForExit(30000)) { throw 'Original terminal query timed out' }
+            $originalReply = $validOut.GetAwaiter().GetResult() | ConvertFrom-Json
+            $validErr.GetAwaiter().GetResult() | Out-Null
+            if ($valid.ExitCode -ne 0 -or $originalReply.summary.core_application.state -cne 'applied' -or
+                $originalReply.details.operation_id -cne $job.transaction.operation_id) { throw 'Original CLI context cannot query its real terminal result' }
+        } finally { if (-not $valid.HasExited) { $valid.Kill(); $valid.WaitForExit() }; $valid.Dispose() }
+        $start.Arguments = $foreignArguments
+        $query = [Diagnostics.Process]::Start($start)
+        try {
+            $output = $query.StandardOutput.ReadToEndAsync(); $errors = $query.StandardError.ReadToEndAsync()
+            if (-not $query.WaitForExit(30000)) { throw 'Foreign scope query timed out' }
+            $value = $output.GetAwaiter().GetResult() | ConvertFrom-Json
+            $errors.GetAwaiter().GetResult() | Out-Null
+            if ($query.ExitCode -eq 0 -or $value.status -cne 'fail' -or $value.summary.core_application.state -ceq 'applied') { throw 'Foreign scope was accepted' }
+        } finally { if (-not $query.HasExited) { $query.Kill(); $query.WaitForExit() }; $query.Dispose() }
+        if ((Get-FileHash -LiteralPath $journal -Algorithm SHA256).Hash -cne $journalHash -or
+            (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash -cne $markerHash) { throw 'Foreign scope query changed the original journal' }
+        $report.core_query.foreign_scope_rejected = $true
+        $state = Read-CoreQueryControl
+        if (@($state.apply_ids).Count -ne 1 -or @($state.result_ids | Where-Object { $_ -cne $job.transaction.operation_id }).Count) { throw 'CLI boundary check replayed apply or queried another operation' }
+        $report.core_query.applied_screenshot = Capture-Target (Assert-Target $true).client_bounds
+        Copy-Item -LiteralPath (Join-Path $OutputDirectory 'workspace.png') -Destination (Join-Path $OutputDirectory 'core-applied.png')
+        $report.core_query.final_state = 'applied'
+    }
+    $report.core_query.counts = $state
+    $report.core_query.status = $binding.core_query.phase + '-passed'
+}
 function Read-OfflineHttp([string]$Path, $Body = $null) {
     if ($Path -notin @('/api/health','/api/rpc')) { throw 'Offline oracle permits only fixed local health/RPC paths' }
     $request = [Net.HttpWebRequest]::Create('http://127.0.0.1:' + $binding.rpc_port + $Path)
@@ -1834,7 +1962,8 @@ public static class RespireNativeInput {
         Focus-Target
         Wait-TargetDocument
     } else { Invoke-NativeGuiProbe }
-    if ($RecoveryPhase) { Invoke-RecoveryMaterialAcceptance }
+    if ($CoreConfigQuery) { Invoke-CoreQueryAcceptance }
+    elseif ($RecoveryPhase) { Invoke-RecoveryMaterialAcceptance }
     elseif ($OfflineAcceptance) {
         if ($ExistingKeys) { Invoke-ExistingKeysAcceptance } else { Invoke-OfflineGuiAcceptance }
     }
@@ -1844,6 +1973,7 @@ finally {
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'), $json + "`n", [Text.UTF8Encoding]::new($false))
 }
 if ($report.status -ne 'native-connectivity-passed' -or
+    ($CoreConfigQuery -and $report.core_query.status -ne ($binding.core_query.phase + '-passed')) -or
     ($RecoveryPhase -and $report.recovery.status -ne 'recovery-subset-passed') -or
     ($OfflineAcceptance -and -not $RecoveryPhase -and $report.offline.status -ne 'offline-subset-passed')) { exit 1 }
 exit 0
