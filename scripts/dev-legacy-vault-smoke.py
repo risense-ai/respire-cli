@@ -139,8 +139,7 @@ class Smoke:
             diagnostic = ""
         diagnostic = diagnostic or output.stderr.decode("utf-8", errors="replace")[-1500:]
         secrets_to_redact = set(self.diagnostic_secrets)
-        data_dir = env.get("RSRS_DATA_DIR")
-        session_path = Path(data_dir) / "session.json" if data_dir else None
+        session_path = self.profile(env) / "session.json" if env.get("RSRS_DATA_DIR") else None
         if session_path is not None and session_path.is_file():
             session = json.loads(session_path.read_text())
             secrets_to_redact.update(session.get(key) for key in
@@ -234,9 +233,20 @@ class Smoke:
                     None if version == 1 else original_super, password)
         return result
 
+    def profile(self, env):
+        # RSRS_DATA_DIR is the installation root; client.json selects its account.
+        root = Path(env["RSRS_DATA_DIR"]).resolve()
+        config_path = root / "client.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        selected = config.get("data_dir", str(root))
+        require(isinstance(selected, str) and bool(selected), "login_profile_selection_invalid")
+        profile = Path(selected).resolve()
+        require(profile.is_relative_to(root), "login_profile_selection_outside_fixture")
+        return profile
+
     def session(self, env):
         # A new-device login starts without a session; existing files must parse.
-        path = Path(env["RSRS_DATA_DIR"]) / "session.json"
+        path = self.profile(env) / "session.json"
         return json.loads(path.read_text()) if path.exists() else {}
 
     def write_session(self, env, value):
@@ -457,12 +467,12 @@ class Smoke:
             new_plaintext = "Original credentials still permit new encrypted memory writes after authentication salt migration."
             self.cli(final_env, "remember", new_plaintext, "--title", new_title, "--force", "--importance", "important")
             self.cli(final_env, "sync")
-            with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
                 written = db.execute("SELECT id,ciphertext,nonce FROM memories WHERE title=? AND deleted=0", (new_title,)).fetchall()
             require(len(written) == 1 and written[0][1].startswith(PREFIX), "post_migration_write_missing")
             self.read_entry(final_env, written[0][0], new_plaintext)
             require(new_plaintext.encode() in decrypt_content(urk, written[0][1], written[0][2]), "post_migration_write_wrong_key")
-        with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
             require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone() == converted,
                 "new_device_ciphertext_differs")
         if version == 1:

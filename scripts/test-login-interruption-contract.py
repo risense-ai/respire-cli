@@ -2,6 +2,7 @@
 """Bounded fixture tests, not a substitute for published CLI/Runtime regression."""
 import ast
 import copy
+import hashlib
 import json
 import io
 from unittest.mock import Mock
@@ -19,7 +20,7 @@ import uuid
 
 SOURCE = Path(__file__).with_name('dev-login-interruption-smoke.py').read_text()
 TREE = ast.parse(SOURCE)
-NAMES = {'original_operation', 'account_recovery_flags', 'terminal_operation',
+NAMES = {'original_operation', 'account_recovery_flags', 'terminal_operation', 'login_terminal_operation',
          'process_group_members', 'interrupt_owned_control', 'stop_owned_control', 'login_continuation_receipt',
          'runtime_stop_receipt', 'fixture_runtime_owners', 'key_continuation_receipt', 'remove_fixture_super',
          'safe_cli_diagnostic'}
@@ -130,6 +131,44 @@ class JournalContract(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 terminal_operation(terminal, self.record, phase)
 
+        alias = 'login-' + uuid.uuid4().hex
+        target = str(self.root / 'accounts' / 'synthetic')
+        session = json.dumps(dict(user='synthetic', addr=self.addr, keyring_account=alias)).encode()
+        sha256 = hashlib.sha256(session).hexdigest()
+        summary = dict(target_profile=target, session_sha256=sha256)
+        terminal = copy.deepcopy(self.journal)
+        terminal['active'] = None
+        terminal['operations'][0].update(phase='committed', alias=alias, candidate_sha256=sha256)
+        terminal['operations'][0]['account']['target'] = target
+        before = copy.deepcopy(terminal)
+        login_terminal_operation(terminal, self.record, summary, session)
+        self.assertEqual(terminal, before)
+        mutations = [
+            lambda j: j.update(schema_version=1),
+            lambda j: j.update(active=self.journal['active']),
+            lambda j: j['operations'].clear(),
+            lambda j: j['operations'].append(copy.deepcopy(j['operations'][0])),
+            lambda j: j['operations'][0].update(alias=self.record['alias']),
+            lambda j: j['operations'][0].update(phase='awaiting_verification'),
+            lambda j: j['operations'][0].update(candidate_sha256='foreign'),
+            lambda j: j['operations'][0].update(idempotency_key=str(uuid.uuid4())),
+            lambda j: j['operations'][0].update(root='/other'),
+            lambda j: j['operations'][0].update(profile='/other'),
+            lambda j: j['operations'][0]['account'].update(target='/other'),
+            lambda j: j['operations'][0]['account'].update(user='other'),
+            lambda j: j['operations'][0]['account'].update(addr='http://other.invalid'),
+        ]
+        for mutate in mutations:
+            candidate = copy.deepcopy(terminal)
+            mutate(candidate)
+            with self.assertRaisesRegex(RuntimeError, 'original_terminal_receipt_missing|operation_recovery_not_retired'):
+                login_terminal_operation(candidate, self.record, summary, session)
+        for changed in (dict(summary, session_sha256='foreign'), dict(summary, target_profile='/other')):
+            with self.assertRaisesRegex(RuntimeError, 'original_terminal_receipt_missing'):
+                login_terminal_operation(terminal, self.record, changed, session)
+        with self.assertRaisesRegex(RuntimeError, 'original_terminal_receipt_missing'):
+            login_terminal_operation(terminal, self.record, summary, session + b' ')
+
     def test_continuation_requires_original_identity_and_actual_required_input(self):
         for outcome in ('awaiting_input', 'committed'):
             summary = {'operation_id': self.id, 'source_profile': str(self.root), 'outcome': outcome,
@@ -177,6 +216,27 @@ class JournalContract(unittest.TestCase):
             for field, wrong in wrong_fields:
                 with self.subTest(outcome=outcome, field=field), self.assertRaises(RuntimeError):
                     key_continuation_receipt(dict(summary, **{field: wrong}), self.id, self.root, outcome)
+
+        function = next(node for node in TREE.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'host_key_continuation')
+        start = next(index for index, node in enumerate(function.body)
+                     if isinstance(node, ast.Assign) and ast.unparse(node.targets[0]) == 'journal_path')
+        code = compile(ast.Module(body=function.body[start:start + 2], type_ignores=[]),
+                       '<actual-key-journal-path>', 'exec')
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / 'accounts' / 'synthetic'
+            target.mkdir(parents=True)
+            journal = root / '.login-recovery.json'
+            journal.write_bytes(b'original-journal')
+            scope = dict(Path=Path, env={'RSRS_DATA_DIR': str(root)}, source=target)
+            exec(code, scope)
+            self.assertEqual(scope['journal_path'], journal)
+            self.assertEqual(scope['pending_journal'], b'original-journal')
+            journal.unlink()
+            (target / '.login-recovery.json').write_bytes(b'wrong-account-journal')
+            with self.assertRaises(FileNotFoundError):
+                exec(code, scope)
 
     def test_post_reset_recall_waits_for_exact_record_and_rejects_failure(self):
         from types import SimpleNamespace
