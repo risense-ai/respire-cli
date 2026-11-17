@@ -78,7 +78,18 @@ class Smoke(support.Smoke):
             value = json.loads(output.stdout)
         except (ValueError, UnicodeError):
             pass
-        failed = output.returncode != 0 or not isinstance(value, dict) \
+        # An empty destination has no key material; Runtime reports this as warn/2.
+        locked_status = (args == ("status",) and output.returncode == 2
+            and isinstance(value, dict) and value.get("command") == "status"
+            and value.get("status") == "warn" and not value.get("errors")
+            and isinstance(value.get("summary"), dict)
+            and value["summary"].get("unlocked") is False
+            and value["summary"].get("store_ready") is False
+            and value["summary"].get("credential_state") == "required"
+            and isinstance(value["summary"].get("data_dir"), str)
+            and keyring_backend.canonical_identity(value["summary"]["data_dir"])
+                == keyring_backend.canonical_identity(env.get("RSRS_DATA_DIR") or Path(env["HOME"]) / ".rsrs"))
+        failed = (output.returncode != 0 and not locked_status) or not isinstance(value, dict) \
             or value.get("errors") or value.get("status") in ("error", "failed")
         if failed:
             text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
@@ -731,11 +742,12 @@ class Smoke(support.Smoke):
                     require(health.get("v") == 1 and health.get("pid") == child.pid
                         and health.get("runtime_version") == metadata["runtime_version"]
                         and health.get("image_sha256") == metadata["binary_sha256"]
-                        and (keyring_backend.canonical_identity(health.get("image_path", ""))
-                            == keyring_backend.canonical_identity(runtime) if sys.platform == "win32"
-                            else Path(health.get("image_path", "")).resolve() == runtime.resolve())
-                        and Path(health.get("installation_root", "")).resolve() == profile
-                        and Path(health.get("data_dir", "")).resolve() == profile,
+                        and keyring_backend.canonical_identity(health.get("image_path", ""))
+                            == keyring_backend.canonical_identity(runtime)
+                        and keyring_backend.canonical_identity(health.get("installation_root", ""))
+                            == keyring_backend.canonical_identity(profile)
+                        and keyring_backend.canonical_identity(health.get("data_dir", ""))
+                            == keyring_backend.canonical_identity(profile),
                         "keyless_runtime_identity_mismatch")
                     require(health.get("store_ready") is False, "runtime_read_native_credentials_without_host")
                     if health.get("startup_complete"):
