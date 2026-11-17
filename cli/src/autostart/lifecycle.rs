@@ -629,6 +629,12 @@ impl Maintenance {
         if self.completed {
             return Ok(());
         }
+        // Offline maintenance must not inspect an unrelated listener on the default port.
+        if crate::rpc::endpoint_path().try_exists()? {
+            let owner = crate::rpc::probe_runtime()?.context("owned Runtime exited before core configuration")?;
+            self.mark(Phase::Paused)?;
+            super::supervise::apply_startup_core_config(&owner, Some(self))?;
+        }
         self.mark(Phase::Verified)?;
         if let Some(config) = self.config.as_mut() {
             config.maintenance = false;
@@ -1153,6 +1159,9 @@ fn wait_ready_with_expectation(config: &Registration,
             if health.credential_state == "required" || health.store_ready
                 || respire_client_host::settings::off_mode()? {
                 expectation.confirm_credentials(&health)?;
+                if current_boot_token().is_none() {
+                    super::supervise::apply_startup_core_config(&health, None)?;
+                }
                 return Ok(());
             }
         }
@@ -1300,6 +1309,7 @@ fn start_explicit_locked(takeover: &respire_client_host::lock::LibraryLock) -> R
             if health.managed_id.as_deref() == Some(config.id.as_str())
                 && crate::rpc::runtime_acceptable(&health)?
             {
+                super::supervise::apply_startup_core_config(&health, None)?;
                 respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup.confirm_credentials(&health)?;
                 reset_attempts(&config)?;
                 return Ok(());
@@ -1971,6 +1981,7 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
     let mut drain: Option<std::thread::JoinHandle<Result<()>>> = None;
     let mut drain_requested = false;
     let mut credentials_checked = false;
+    let mut configuration_checked = false;
     let result = (|| -> Result<()> {
         loop {
             if let Some(status) = child.try_wait().context("cannot reap foreground Runtime")? {
@@ -1980,12 +1991,17 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
                 crate::set_exit_code(status.code().unwrap_or(1));
                 return Ok(());
             }
-            if !credentials_checked && !stopped.load(Ordering::Acquire) {
+            if (!credentials_checked || !configuration_checked) && !stopped.load(Ordering::Acquire) {
                 if let Ok(Some(health)) = crate::rpc::probe_runtime() {
                     if health.pid == pid && health.instance_id == instance_id {
-                        credentials_checked = true;
-                        if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
-                            eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                        if !configuration_checked {
+                            configuration_checked = super::supervise::configure_background_owner(&health)?;
+                        }
+                        if !credentials_checked {
+                            credentials_checked = true;
+                            if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
+                                eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                            }
                         }
                     }
                 }
@@ -2034,6 +2050,10 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
             std::thread::sleep(Duration::from_millis(50));
         }
     })();
+    if result.is_err() && child.try_wait()?.is_none() {
+        child.kill().context("stop owned foreground Runtime after configuration failure")?;
+        child.wait().context("reap owned foreground Runtime after configuration failure")?;
+    }
     if managed_id().is_some() {
         let config = read_registration(&respire_client_host::paths::main_data_dir())?
             .context("managed runtime registration disappeared")?;

@@ -841,10 +841,13 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         crate::net_rpc::health()?;
         return Ok(());
     }
-    // Normal requests only inspect the resident owner. Lifecycle serialization
-    // begins when startup, replacement or recovery is actually required.
+    // Serialize startup configuration with setters even when reusing a resident owner.
     if let Some(health) = probe_runtime()? {
         if runtime_acceptable(&health)? {
+            let _takeover = crate::runtime_policy::takeover_lock()?;
+            let health = probe_runtime()?.context("Runtime owner exited before core configuration")?;
+            anyhow::ensure!(runtime_acceptable(&health)?, "Runtime owner changed before core configuration");
+            crate::autostart::apply_startup_core_config(&health, None)?;
             respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
             return Ok(());
         }
@@ -893,6 +896,18 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
 }
 
 pub(crate) fn ensure_daemon_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
+) -> Result<()> {
+    ensure_daemon_locked_inner(expectation)?;
+    // An active controller applies under Paused in Maintenance::finish instead.
+    if crate::autostart::lifecycle_boot_token().is_none() {
+        let owner = probe_runtime()?.context("started Runtime owner disappeared before core configuration")?;
+        crate::autostart::apply_startup_core_config(&owner, None)?;
+    }
+    Ok(())
+}
+
+fn ensure_daemon_locked_inner(
     expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
 ) -> Result<()> {
     crate::runtime_fetch::require_automatic_migration_safe()?;
