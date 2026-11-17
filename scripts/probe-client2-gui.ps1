@@ -703,6 +703,8 @@ public static class RespireGuiNative {
                     if (-not (Confirm-TrackedAbsent $item)) { throw 'Original desktop tree survived before restart' }
                 }
                 if (Get-CimInstance Win32_Process -Filter "ProcessId=$($native.offline.runtime_process.ProcessId)") { throw 'Original Runtime survived before desktop restart' }
+                # Every recorded actor is now confirmed absent; do not carry its PID into a later phase.
+                $tracked = @()
                 $report.restart = @{exit_method='guarded-process-termination'; original_tree_absent=$true; completed=$false}
             } elseif ($phase -ceq 'restart') {
                 if (-not $native.offline.automatic_start -or -not $native.offline.automatic_key_handoff) { throw 'Published desktop automatic start/key handoff was not verified' }
@@ -737,6 +739,8 @@ public static class RespireGuiNative {
                 foreach ($item in $tracked) {
                     if (-not (Confirm-TrackedAbsent $item)) { throw 'Desktop tree survived before account recovery restart' }
                 }
+                # The absence barrier above retires only this completed phase's actor records.
+                $tracked = @()
                 if ($phase -ceq 'recovery-issue') { $report.recovery.unacknowledged_tree_absent = $true }
             }
         }

@@ -1511,7 +1511,8 @@ function Invoke-ExistingKeysAcceptance {
 }
 function Read-RecoveryRecord {
     # requests.json is the public desktop journal, never a CLI material/custody record.
-    $records = @(Get-Content -Raw -LiteralPath (Join-Path $binding.data_directory 'client2/requests.json') | ConvertFrom-Json)
+    # PS5 emits a JSON array as one object; assign it directly so the next pipeline enumerates records.
+    $records = Get-Content -Raw -LiteralPath (Join-Path $binding.data_directory 'client2/requests.json') | ConvertFrom-Json
     $matches = @($records | Where-Object { $_.name -ceq 'auth_reset' })
     if ($matches.Count -ne 1) { throw 'Require exactly one real desktop reset request' }
     $record = $matches[0]
@@ -1523,6 +1524,18 @@ function Read-RecoveryRecord {
         $record.transaction.source_profile -isnot [string] -or -not $record.transaction.source_profile -or
         ($null -ne $record.materialSaved -and $record.materialSaved -isnot [bool]) -or
         $record.transaction.operation_id -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z') {
+        # Export only fixed predicates, never journal values or unexpected field names.
+        $report.recovery.journal_validation = [ordered]@{
+            record_fields_public = @($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -eq 0
+            transaction_fields_public = @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin @('operation_id','source_profile','kind') }).Count -eq 0
+            request_id_valid = $record.id -cmatch '\Adesktop-[0-9a-f-]{36}\z'
+            state_done = $record.state -ceq 'done'
+            host_true = $record.host -is [bool] -and $record.host -eq $true
+            transaction_kind_key = $record.transaction.kind -ceq 'key'
+            source_profile_valid = $record.transaction.source_profile -is [string] -and [bool]$record.transaction.source_profile
+            material_saved_type_valid = $null -eq $record.materialSaved -or $record.materialSaved -is [bool]
+            operation_id_valid = $record.transaction.operation_id -cmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'
+        }
         throw 'Reset journal must contain only a completed public transaction identity and materialSaved'
     }
     return $record
