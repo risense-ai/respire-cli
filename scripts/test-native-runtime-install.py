@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from native_fixture_process import install_official_runtime, same_existing_path, canonical_scope_path, runtime_scope_ids
 
@@ -189,6 +189,49 @@ class FixtureInstallationTests(unittest.TestCase):
                     {('rsrs', 'super:' + alias)})
                 if not fault:
                     self.assertEqual(calls, [['keygen'], ['runtime', 'start'], ['runtime', 'status'], ['runtime', 'stop']])
+
+        seed_secondary = source.index('                seed_local_credentials(binary, secondary_env, keys)')
+        self.assertLess(seed_secondary, source.index('                enabled = run("runtime", "autostart", "enable")'))
+        for proof in ('RSRS_DATA_DIR=str(secondary), RSRS_BIN_DIR=str(secondary / "bin")',
+                      'copy_managed_installation(managed_fixture / "bin", secondary)',
+                      '(secondary / "rsrs.db").is_file()',
+                      'secondary_session["keyring_account"] != primary_session["keyring_account"]'):
+            self.assertIn(proof, source)
+        # Run the actual switch block offline: config must stay idle before explicit start.
+        from contextlib import nullcontext
+        switch = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.For)
+                      and ast.unparse(node.target) == 'target' and ast.unparse(node.iter) == '(secondary, root)')
+        code = compile(ast.Module(body=[switch], type_ignores=[]), '<profile-switch-contract>', 'exec')
+        for fault in ('', 'running', 'locked', 'pending'):
+            with self.subTest(switch=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                secondary = root / 'accounts/secondary profile'
+                secondary.mkdir(parents=True)
+                if fault == 'pending':
+                    marker = root / 'runtime/autostart/maintenance.json'
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text('{"phase":"Paused"}', encoding='utf-8')
+                results = []
+                for pid, target in enumerate((secondary, root), start=2):
+                    results.extend([{}, {'runtime': {'running': fault == 'running'}}, {},
+                                    {'runtime': {'data_dir': str(target), 'pid': pid, 'store_ready': fault != 'locked'}}])
+                run = Mock(side_effect=results)
+                pairs = [object(), object()]
+                owned = Mock(side_effect=[nullcontext(pair) for pair in pairs])
+                replaced = Mock()
+                scope = dict(root=root, secondary=secondary, previous_pid=1, Path=Path,
+                             os=types.SimpleNamespace(name='nt'), run=run,
+                             owned_windows_pair=owned, require_replacement_pair=replaced)
+                if fault:
+                    with self.assertRaises(AssertionError):
+                        exec(code, scope)
+                else:
+                    exec(code, scope)
+                    self.assertEqual(run.call_args_list, [item for target in (secondary, root) for item in
+                        (call('config', '--data-dir', str(target)), call('runtime', 'status'),
+                         call('runtime', 'start'), call('runtime', 'status'))])
+                    self.assertEqual(replaced.call_args_list, [call(pairs[0], secondary), call(pairs[1], root)])
+                    self.assertEqual(scope['previous_pid'], 3)
 
     def test_scope_ids_use_os_canonical_paths_and_preserve_bound_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:

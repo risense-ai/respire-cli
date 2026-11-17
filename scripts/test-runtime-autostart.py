@@ -841,6 +841,15 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 if sys.platform.startswith("linux"):
                     env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", root))
                     seed_local_credentials(binary, env, keys)
+                # Seed an independent unbound profile while the shared port is idle.
+                secondary = root / "accounts/secondary profile"
+                secondary_env = dict(env, RSRS_DATA_DIR=str(secondary), RSRS_BIN_DIR=str(secondary / "bin"))
+                secondary_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", secondary))
+                seed_local_credentials(binary, secondary_env, keys)
+                assert (secondary / "rsrs.db").is_file(), "secondary fixture has no initialized store"
+                primary_session = json.loads((root / "session.json").read_text(encoding="utf-8"))
+                secondary_session = json.loads((secondary / "session.json").read_text(encoding="utf-8"))
+                assert secondary_session["keyring_account"] != primary_session["keyring_account"], "profile fixtures share credentials"
                 enabled = run("runtime", "autostart", "enable")
                 assert enabled["enabled"] is True and enabled["registered"] is True, enabled
                 assert enabled["runtime"]["running"] is False, "enable without --now unexpectedly starts runtime"
@@ -948,27 +957,24 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         with owned_windows_pair(root) as replacement:
                             assert replacement["child_pid"]==restarted["runtime"]["pid"]
                             assert replacement["child_birth"]!=pair["child_birth"] and replacement["parent_birth"]!=pair["parent_birth"], "restart reused the old process instances"
-                secondary = root / "accounts/secondary profile"
-                secondary.mkdir(parents=True)
-                if os.name == "nt":
-                    with owned_windows_pair(root) as pair:
-                        run("config", "--data-dir", str(secondary))
-                        require_replacement_pair(pair,secondary)
-                else:
-                    run("config", "--data-dir", str(secondary))
-                switched = run("runtime", "status")
-                assert Path(switched["runtime"]["data_dir"]).resolve() == secondary.resolve(), switched
-                assert switched["runtime"]["pid"] != restarted["runtime"]["pid"]
-                if os.name=="nt":
-                    with owned_windows_pair(root) as pair:
-                        run("config", "--data-dir", str(root))
-                        require_replacement_pair(pair,root)
-                else:
-                    run("config", "--data-dir", str(root))
-                restored = run("runtime", "status")
-                assert Path(restored["runtime"]["data_dir"]).resolve() == root.resolve(), restored
-                assert restored["runtime"]["pid"] != switched["runtime"]["pid"]
-                print("PASS: supervised synthetic profile switch and return, with verified new owner processes")
+                previous_pid = restarted["runtime"]["pid"]
+                for target in (secondary, root):
+                    switching_owner = owned_windows_pair(root) if os.name == "nt" else nullcontext(None)
+                    with switching_owner as pair:
+                        run("config", "--data-dir", str(target))
+                        # Unbound config selection stays idle; only explicit start unlocks its store.
+                        selected = run("runtime", "status")
+                        assert selected["runtime"]["running"] is False, "unbound config switch unexpectedly started Runtime"
+                        assert not (root / "runtime/autostart/maintenance.json").exists(), "config switch left pending maintenance"
+                        run("runtime", "start")
+                        if pair is not None:
+                            require_replacement_pair(pair, target)
+                    switched = run("runtime", "status")
+                    assert Path(switched["runtime"]["data_dir"]).resolve() == target.resolve(), switched
+                    assert switched["runtime"]["store_ready"] is True, "selected profile did not unlock its store"
+                    assert switched["runtime"]["pid"] != previous_pid
+                    previous_pid = switched["runtime"]["pid"]
+                print("PASS: independent unbound profile switch and return stay idle until explicit start; verified new store-ready owners")
 
                 # Persisted interrupted-controller fixtures are exercised by the
                 # actual CLI and OS supervisor. This is process recovery from
