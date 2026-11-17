@@ -67,6 +67,7 @@ for body_failure, cleanup_mode in [(False, 'ok'), (False, 'failed'), (False, 're
         LEGACY_CACHE=output, binary=pathlib.Path('fixture-cli'), stop_failure=None, reports=[],
         args=types.SimpleNamespace(runtime_binary=None, expect_supervised_worker=True),
         inspector=None, old_runtime=old_runtime, worker_identities=[], json=json,
+        network_smoke=None, network_evidence=None,
         captured_run=stop, confirm_workers_exited=lambda ids: events.append('workers-reaped'),
         runtime_report=lambda *a: {}, exercise=body)
     body_nodes = [mac_setup, ast.parse('components_started=True').body[0], seed_copy,

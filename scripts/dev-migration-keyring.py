@@ -6,6 +6,7 @@ does not prove that a real legacy Keychain ACL will avoid an authorization promp
 import ctypes
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -67,6 +68,7 @@ class TrackedKeys:
     def __init__(self, root):
         self.root = root
         self.entries = set()
+        self.recovery_controls = {}
 
     def configure_env(self, env):
         owned_path(env["HOME"])
@@ -91,11 +93,18 @@ class TrackedKeys:
         require(value is not None, "fixture_credential_missing")
         return value
 
-    def track_created_login(self, session, user, super_password, login_password):
+    def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None):
         # Claim only the exact alias returned by this owned fixture's successful
         # login transaction, never enumerate credentials on the host.
-        require(re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
-                and session.get("user") == user, "login_credential_fixture_identity_mismatch")
+        recovery = (isinstance(recovery_operation, str)
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", recovery_operation)
+            and session.get("auth_operation_id") == recovery_operation
+            and session.get("keyring_account") == "login-" + recovery_operation.replace("-", "")
+            and session.get("vault_version") == 4)
+        require((re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+                or recovery and user == "" and session.get("addr") == "")
+                and session.get("user") == user
+                and (recovery_operation is None or recovery), "login_credential_fixture_identity_mismatch")
         alias = session.get("keyring_account")
         require(isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "login_credential_fixture_alias_invalid")
@@ -110,7 +119,8 @@ class TrackedKeys:
         found = []
         for prefix, expected in slots:
             entry = ("rsrs", prefix + alias)
-            require(entry not in self.entries, "login_credential_fixture_alias_not_created")
+            require(entry not in self.entries or recovery and prefix == "super:",
+                    "login_credential_fixture_alias_not_created")
             present = self._read(*entry) is not None
             found.append(present)
             if present:
@@ -124,6 +134,30 @@ class TrackedKeys:
                 value = self.read("rsrs", prefix + alias)
                 require(value == expected if expected is not None else bool(value),
                         "login_credential_fixture_value_changed")
+        if recovery and user == "":
+            require(isinstance(super_password, str) and bool(super_password)
+                and login_password is None, "recovery_control_factor_mismatch")
+            control = ("rsrs", "key-control:" + alias)
+            require(control not in self.entries, "recovery_control_already_owned")
+            # The returned operation/alias authorizes this exact read. Only matching
+            # private material grants cleanup ownership; foreign material stays untouched.
+            self.entries.add(control)
+            try:
+                payload = self.read(*control)
+                expected = {"password": "", "super_password": super_password,
+                    "account_secret": "", "totp": None, "material": {
+                        "keyring_account": alias, "keyring_backend": session.get("keyring_backend"),
+                        "reset": None, "challenge": None}}
+                try:
+                    material = json.loads(payload)
+                except (ValueError, TypeError):
+                    raise RuntimeError("recovery_control_material_invalid") from None
+                require(session.get("keyring_backend") == self.credential_backend
+                    and material == expected, "recovery_control_material_mismatch")
+                self.recovery_controls[control] = payload
+            except Exception:
+                self.entries.discard(control)
+                raise
 
     def put(self, service, slot, value):
         self.reserve(service, slot)
@@ -132,8 +166,14 @@ class TrackedKeys:
 
     def remove(self, service, slot):
         require((service, slot) in self.entries, "credential_not_owned_by_fixture")
+        self.verify_cleanup_material(service, slot)
         self._remove(service, slot)
         require(self._read(service, slot) is None, "fixture_credential_delete_readback_failed")
+
+    def verify_cleanup_material(self, service, slot):
+        expected = self.recovery_controls.get((service, slot))
+        if expected is not None:
+            require(self.read(service, slot) == expected, "recovery_control_changed_before_cleanup")
 
     def cleanup(self):
         events, remaining = [], []

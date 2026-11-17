@@ -317,6 +317,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         events, remaining = [], []
         for index, (service, slot) in enumerate(sorted(self.entries)):
             try:
+                self.verify_cleanup_material(service, slot)
                 item = self._find(service, slot, check_snapshot=False)
                 if item is not None:
                     item.delete()

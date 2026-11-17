@@ -17,9 +17,14 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const callInput="      business_only:\n        type: boolean\n        default: false\n";
   const dispatchRuntime="      runtime_sha:\n        description: Exact published Runtime source SHA, required for business diagnostics\n        required: false\n        type: string\n";
   const callRuntime="      runtime_sha:\n        required: false\n        type: string\n";
+  const dispatchHistory="      history_sources:\n        description: Diagnostic historical DB tags separated by commas (latest resolves the latest formal); requires database_sync_only\n        type: string\n        default: ''\n";
+  const callHistory="      history_sources:\n        type: string\n        default: ''\n";
   const header=workflow.split('jobs:\n')[0];
-  for(const input of [dispatchInput,callInput,dispatchRuntime,callRuntime])assert(header.includes(input));
-  assert.equal(hash(header.replace(dispatchInput,'').replace(callInput,'').replace(dispatchRuntime,'').replace(callRuntime,'')),'e22044c490d5efe81a4fdddd47d146b565302d1cecd112ee09aeb6115e65037b');
+  for(const input of [dispatchInput,callInput,dispatchRuntime,callRuntime,dispatchHistory,callHistory])assert(header.includes(input));
+  assert.equal(hash(header.replace(dispatchInput,'').replace(callInput,'').replace(dispatchRuntime,'').replace(callRuntime,'').replace(dispatchHistory,'').replace(callHistory,'')),'e22044c490d5efe81a4fdddd47d146b565302d1cecd112ee09aeb6115e65037b');
+  const historyGuard=workflow.split('\n').find(line=>line.includes("throw new Error(\"Historical sources require database_sync_only\")")).trim().slice("node -e '".length,-1);
+  assert.throws(()=>runInNewContext(historyGuard,{process:{env:{HISTORY_SOURCES:'latest',DATABASE_SYNC_ONLY:'false'}}}),/Historical sources require/);
+  assert.doesNotThrow(()=>runInNewContext(historyGuard,{process:{env:{HISTORY_SOURCES:'latest',DATABASE_SYNC_ONLY:'true'}}}));
   assert.equal(hash(step('Verify the original release build')),'c07d866f172e6c28e49889fc0f3d8d5fa1ad6bf9ecb26724e4db35d2e2bbabfe');
   assert.equal(hash(step('Verify and extract the original binary')),'2cf493f2afd7eae32aa0f49ec56815a50dffafb00d64015d38b0b8a2c10ecc8b');
   const api=workflow.split('\n  api-smoke:\n')[1];
@@ -52,7 +57,7 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
     if(Object.values(env).filter(v=>v==='true').length>1)assert.throws(run,/Choose one diagnostic scope/);
     else assert.doesNotThrow(run);
   }
-  const runtimeGuard=[...step('Require the approved development server').matchAll(/node -e '([^']+)'/g)][3][1];
+  const runtimeGuard=[...step('Require the approved development server').matchAll(/node -e '([^']+)'/g)].find(match=>match[1].includes('Pass the exact published Runtime source SHA'))[1];
   for(const expected of ['', 'd'.repeat(39), 'D'.repeat(40)])assert.throws(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'true',EXPECTED_RUNTIME_SHA:expected}}}),/Runtime source SHA/);
   assert.doesNotThrow(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'true',EXPECTED_RUNTIME_SHA:'d'.repeat(40)}}}));
   assert.doesNotThrow(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'false',EXPECTED_RUNTIME_SHA:''}}}));

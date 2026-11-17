@@ -437,6 +437,10 @@ jobs:
         env:
           UPGRADE_PROFILE: ${{ inputs.validation_profile }}
           GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ inputs.ref }}
+          CLI_VERSION: ${{ inputs.version }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
           MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
           NATIVE_RUNTIME_BIN: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_RUNTIME_BIN || steps.pinned-runtime.outputs.path }}
