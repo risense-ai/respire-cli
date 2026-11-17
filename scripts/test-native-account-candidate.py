@@ -305,6 +305,22 @@ class CandidateFixtureTests(unittest.TestCase):
         self.assertTrue(all(set(item) == {"file", "line"} and item["line"] > 0 for item in locations))
         self.assertNotIn("private-canary", json.dumps(result))
         self.assertEqual(candidate.safe_failure_diagnostics(captured, [])["host_error_sources"], {})
+        for marker, code in (
+                ("host control response channel failure", "control_response_channel_failed"),
+                ("host control deadline exceeded", "control_launch_deadline_exceeded"),
+                ("cannot wait for host control Runtime exit", "control_exit_wait_failed"),
+                ("parent authorization ended or control channel was interrupted", "account_control_parent_revoked_or_channel_interrupted"),
+                ("auth_diagnostic=auth_parent_revoked_or_channel_interrupted", "auth_parent_revoked_or_channel_interrupted"),
+                ("host control response deadline or channel failure", "control_response_channel_failed"),
+                ("host control response deadline exceeded", "control_response_deadline_exceeded"),
+                ("host control exit deadline exceeded", "control_exit_deadline_exceeded"),
+                ("account deadline or parent authorization ended", "account_control_deadline_or_parent_ended")):
+            with self.subTest(marker=marker):
+                captured = (b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
+                            + marker.encode() + b" private-canary\n")
+                result = candidate.safe_failure_diagnostics(captured, [candidate.CASE])
+                self.assertEqual(result["failure_codes"][candidate.CASE], [code])
+                self.assertNotIn("private-canary", json.dumps(result))
 
     def save_core(self):
         candidate.write_json(self.staged / "core-runtime.json", self.core)

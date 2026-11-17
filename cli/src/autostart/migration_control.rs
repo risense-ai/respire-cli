@@ -297,14 +297,15 @@ fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintena
             *failure = error.chain().find_map(|cause| match cause.to_string().as_str() {
                 "cannot start owned host control Runtime" => Some("spawn"),
                 "missing host control input pipe" | "missing host control output pipe"
-                | "host control input owner was released" | "host control request write failed" => Some("channel"),
+                | "host control input owner was released" | "host control request write failed"
+                | "host control response channel failure" => Some("channel"),
                 "host control request frame exceeds the protocol limit" | "missing host control response frame"
                 | "invalid host control response frame size" | "incomplete host control response frame"
                 | "extra host control response bytes" => Some("frame"),
                 "invalid host control response JSON" | "invalid private migration result" => Some("encoding"),
-                "host control deadline exceeded" | "host control response deadline or channel failure"
-                | "host control response deadline exceeded" | "host control exit deadline exceeded" => Some("deadline"),
-                "host control Runtime exit does not match its response" => Some("child_exit"),
+                "host control deadline exceeded" => Some("deadline"),
+                "cannot wait for host control Runtime exit"
+                | "host control Runtime exit does not match its response" => Some("child_exit"),
                 "migration response binding mismatch" => Some("response_binding"),
                 "migration response profile mismatch" => Some("response_profile"),
                 "private migration envelope missing" | "invalid private migration envelope" => Some("response_envelope"),

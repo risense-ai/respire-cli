@@ -232,15 +232,19 @@ function Get-SafeFailureReason($Envelope) {
             }
             # Fixed classes only; preserve the original unknown outcome and never replay it.
             foreach ($entry in @(
-                @('Runtime rejected account control \(control_outcome_unknown\)|control deadline or parent revocation; query the same operation ID before retrying', 'account_runtime_deadline_or_parent_revoked'),
+                @('parent authorization ended or control channel was interrupted', 'account_parent_revoked_or_channel_interrupted'),
+                # Explicit versions can still select historical CLI artifacts.
+                @('account deadline or parent authorization ended|control deadline or parent revocation; query the same operation ID before retrying', 'account_runtime_deadline_or_parent_revoked'),
                 @('Runtime rejected account control \(unauthorized\)', 'account_launch_or_parent_authorization_failed'),
                 @('Runtime rejected account control \(scope_mismatch\)', 'account_control_binding_mismatch'),
                 @('Runtime rejected account control \(auth_ownership_unavailable\)', 'account_library_ownership_unavailable'),
                 @('Runtime rejected account control \(control_unavailable\)', 'account_controller_unavailable'),
                 @('cannot start owned host control Runtime', 'account_helper_start_failed'),
-                @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed', 'account_helper_channel_failed'),
+                @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed|host control response channel failure', 'account_helper_channel_failed'),
+                @('cannot wait for host control Runtime exit', 'account_helper_exit_wait_failed'),
                 @('host control Runtime exit does not match its response', 'account_helper_exit_mismatch'),
-                @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'account_helper_deadline_or_channel'),
+                @('host control deadline exceeded', 'account_helper_launch_deadline'),
+                @('host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'account_helper_deadline_or_channel'),
                 @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'account_helper_frame_invalid'),
                 @('account control response identity mismatch', 'account_rpc_identity_mismatch'),
                 @('account response launch profile mismatch|account receipt operation or profile mismatch', 'account_profile_binding_mismatch'),
@@ -277,7 +281,8 @@ function Get-SafeFailureReason($Envelope) {
         @('space readiness mismatch', 'space_response_readiness_invalid'),
         @('join target receipt mismatch|join account receipt mismatch|join session digest mismatch|join readonly_team gate mismatch|join unexpectedly changed the agent gate|pending join claims completion', 'space_join_receipt_invalid'),
         @('cannot start owned host control Runtime', 'auth_helper_start_failed'),
-        @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed', 'auth_helper_channel_failed'),
+        @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed|host control response channel failure', 'auth_helper_channel_failed'),
+        @('cannot wait for host control Runtime exit', 'auth_helper_exit_wait_failed'),
         @('host control Runtime exit does not match its response', 'auth_helper_exit_mismatch'),
         @('control deadline or parent revocation; query the same operation ID before retrying', 'auth_runtime_deadline_or_parent_revoked')
     )) {
@@ -287,11 +292,14 @@ function Get-SafeFailureReason($Envelope) {
     foreach ($entry in @(
         @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
         @('auth control Runtime version or image does not match the managed manifest', 'auth_runtime_image_mismatch'),
+        @('auth_diagnostic=auth_parent_revoked_or_channel_interrupted\b', 'auth_parent_revoked_or_channel_interrupted'),
+        # Retain fixed diagnostics from explicitly selected historical CLI versions.
         @('auth_diagnostic=auth_runtime_deadline_or_parent_revoked\b', 'auth_runtime_deadline_or_parent_revoked'),
         @('auth_diagnostic=auth_credential_backend_unavailable\b', 'auth_credential_backend_unavailable'),
         @('auth_diagnostic=auth_credential_backend_not_persistent\b', 'auth_credential_backend_not_persistent'),
         @('auth_diagnostic=auth_credential_write_readback_failed\b', 'auth_credential_write_readback_failed'),
-        @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'auth_helper_deadline_or_channel'),
+        @('host control deadline exceeded', 'auth_helper_launch_deadline'),
+        @('host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'auth_helper_deadline_or_channel'),
         @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'auth_helper_frame_invalid'),
         @('auth control response identity mismatch|host control response identity mismatch', 'auth_response_identity_mismatch'),
         @('auth control response profile mismatch', 'auth_response_profile_mismatch'),

@@ -617,6 +617,11 @@ class ReportContract(unittest.TestCase):
         marker = ('runtime maintenance is incomplete; use the host runtime restart or the indicated '
                   'snapshot/login recovery before accessing the library')
         for error, category in ((marker + '; private-account-material', 'host_maintenance_pending'),
+                                ('host control response channel failure; private-account-material', 'control_response_channel'),
+                                ('host control deadline exceeded; private-account-material', 'control_deadline'),
+                                ('cannot wait for host control Runtime exit; private-account-material', 'control_exit_wait'),
+                                ('parent authorization ended or control channel was interrupted; private-account-material', 'control_parent_or_channel'),
+                                ('auth_diagnostic=auth_parent_revoked_or_channel_interrupted; private-account-material', 'control_parent_or_channel'),
                                 ('private-account-material', 'unclassified')):
             with self.subTest(category=category):
                 observation = {}
