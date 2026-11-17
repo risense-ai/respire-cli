@@ -1,72 +1,200 @@
-name: Published performance comparison
-on:
+# Temporary branch-only consumer. Never merge or use as publication evidence.
+name: Temporary Mac Intel Runtime24 registration diagnostic
+'on':
   workflow_dispatch:
     inputs:
-      comparison_mode:
-        description: Candidate-only cold/warm consistency with normal heat updates
-        type: choice
-        default: candidate-only
-        options:
-          - candidate-only
-      release_inventory:
-        description: Official published-assets schema 2 JSON (schema/cli/runtime), seven CLI and seven Runtime targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
-        type: string
+      producer_run:
+        description: Exact Darwin custody build run
         required: true
-      release_inventory_sha256:
-        description: SHA256 of the exact reviewed release_inventory UTF-8 bytes
         type: string
+      producer_attempt:
+        description: Exact producing attempt
         required: true
+        type: string
+      producer_sha:
+        description: Reviewed Darwin producer workflow commit
+        required: true
+        type: string
+      artifact_id:
+        description: Finalized cli-custody-x86_64-apple-darwin artifact ID
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read
 jobs:
-  compare:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+  mac-registration:
+    name: Intel cloud base with new synthetic accounts (diagnostic only)
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    env:
+      CLI_SHA: 7e625e0073afcd207b2d9aec3e93e3d3aea65972
+      CLI_VERSION: 2.0.0-dev.19
+      RSRS_RUNTIME_TRIPLE: x86_64-apple-darwin
+      RSRS_ENGINE: cpu
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+      PRODUCER_RUN: ${{ inputs.producer_run }}
+      PRODUCER_ATTEMPT: ${{ inputs.producer_attempt }}
+      PRODUCER_SHA: ${{ inputs.producer_sha }}
+      PRODUCER_ARTIFACT: ${{ inputs.artifact_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/performance-model
-          key: performance-m3-quantized-0826f8c1-${{ runner.os }}
-      - name: Install benchmark dependencies
-        run: python -m pip install cryptography==46.0.3 psutil==7.1.0
-      - name: Compare immutable published binaries on the same runner
+      - name: Verify exact producer and download its immutable CLI bytes
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PERF_COMPARISON_MODE: ${{ inputs.comparison_mode }}
-          PERF_RELEASE_INVENTORY: ${{ inputs.release_inventory }}
-          PERF_RELEASE_INVENTORY_SHA256: ${{ inputs.release_inventory_sha256 }}
-          PERF_TARGET: ${{ matrix.target }}
-          PERF_ROOT: ${{ runner.temp }}/comparison
-          PERF_MODEL: ${{ runner.temp }}/performance-model
-        run: python scripts/compare-published-performance.py
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          git merge-base --is-ancestor 28ab14b85f0c46a6e3f78ad497cd8c8d6950bcbc "$CLI_SHA"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          const e=process.env,repo='risense-ai/respire-cli';
+          for(const key of ['PRODUCER_RUN','PRODUCER_ATTEMPT','PRODUCER_ARTIFACT'])assert.match(e[key],/^[1-9]\d*$/);
+          assert.match(e.PRODUCER_SHA,/^[a-f0-9]{40}$/);
+          const api=path=>JSON.parse(execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
+          const run=api(`actions/runs/${e.PRODUCER_RUN}/attempts/${e.PRODUCER_ATTEMPT}`);
+          assert.equal(String(run.id),e.PRODUCER_RUN);assert.equal(String(run.run_attempt),e.PRODUCER_ATTEMPT);
+          assert.equal(run.head_sha,e.PRODUCER_SHA);assert.equal(run.repository.full_name,repo);
+          assert.equal(run.head_repository.full_name,repo);assert.equal(run.event,'workflow_dispatch');
+          assert.equal(run.path,'.github/workflows/performance-comparison.yml');
+          assert.equal(run.head_branch,'codex/mac-runtime24-custody-native-20261118');
+          const jobs=JSON.parse(execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`],{encoding:'utf8'})).flatMap(p=>p.jobs);
+          const producers=jobs.filter(j=>j.name==='Mac Intel v1.0.20 custody (diagnostic only)');
+          assert.equal(producers.length,1);const job=producers[0];
+          assert.equal(job.head_sha,e.PRODUCER_SHA);assert.equal(job.run_attempt,Number(e.PRODUCER_ATTEMPT));
+          for(const name of ['Build release binary','Stage reusable exact CLI bytes and producer identity']){
+            const steps=job.steps.filter(s=>s.name===name);assert.equal(steps.length,1);assert.equal(steps[0].conclusion,'success');
+          }
+          const uploads=job.steps.filter(s=>s.name.includes('actions/upload-artifact@v4'));
+          assert.ok(uploads.length>0);assert.equal(uploads[0].conclusion,'success');
+          const artifact=api(`actions/artifacts/${e.PRODUCER_ARTIFACT}`);
+          assert.equal(artifact.name,'cli-custody-x86_64-apple-darwin');assert.equal(artifact.expired,false);
+          assert.equal(String(artifact.workflow_run.id),e.PRODUCER_RUN);assert.equal(artifact.workflow_run.head_sha,e.PRODUCER_SHA);
+          assert.match(artifact.digest,/^sha256:[a-f0-9]{64}$/);assert.ok(artifact.size_in_bytes>0);
+          assert.ok(Date.parse(artifact.created_at)>=Date.parse(job.started_at));
+          assert.ok(Date.parse(artifact.updated_at)>=Date.parse(artifact.created_at));
+          if(job.completed_at)assert.ok(Date.parse(artifact.updated_at)<=Date.parse(job.completed_at));
+          const zip=execFileSync('gh',['api',`repos/${repo}/actions/artifacts/${artifact.id}/zip`],{maxBuffer:256*1024*1024});
+          assert.equal(zip.length,artifact.size_in_bytes);
+          assert.equal('sha256:'+createHash('sha256').update(zip).digest('hex'),artifact.digest);
+          writeFileSync('producer-cli.zip',zip);
+          const files=execFileSync('unzip',['-Z1','producer-cli.zip'],{encoding:'utf8'}).trim().split(/\r?\n/).sort();
+          assert.deepEqual(files,['cli-build-x86_64-apple-darwin.json','rsrs']);
+          writeFileSync('registration-producer.json',JSON.stringify({diagnostic_only:true,publication_reusable:false,
+            run_id:run.id,run_attempt:run.run_attempt,workflow_sha:run.head_sha,job_id:job.id,
+            artifact_id:artifact.id,artifact_digest:artifact.digest},null,2)+'\n');
+          NODE
+          unzip -q producer-cli.zip -d producer-cli
+          chmod +x producer-cli/rsrs
+      - name: Verify source target version hash and manifest binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync,lstatSync,writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          const e=process.env,p='producer-cli/rsrs',meta='producer-cli/cli-build-x86_64-apple-darwin.json';
+          for(const file of [p,meta])assert.ok(lstatSync(file).isFile()&&!lstatSync(file).isSymbolicLink());
+          const m=JSON.parse(readFileSync(meta)),bytes=readFileSync(p);
+          assert.equal(m.schema,1);assert.equal(m.diagnostic_only,true);assert.equal(m.publication_reusable,false);
+          assert.equal(m.git_sha,e.CLI_SHA);assert.equal(m.target,e.RSRS_RUNTIME_TRIPLE);assert.equal(m.version,e.CLI_VERSION);
+          assert.equal(m.required_runtime,'2.0.0-dev.24');
+          assert.deepEqual(m.producer,{repository:'risense-ai/respire-cli',workflow:'performance-comparison.yml',
+            workflow_sha:e.PRODUCER_SHA,run_id:e.PRODUCER_RUN,run_attempt:e.PRODUCER_ATTEMPT});
+          assert.match(m.binary_sha256,/^[a-f0-9]{64}$/);
+          assert.equal(createHash('sha256').update(bytes).digest('hex'),m.binary_sha256);
+          assert.equal(bytes.readUInt32LE(0),0xfeedfacf);assert.equal(bytes.readUInt32LE(4),0x01000007);
+          assert.equal(execFileSync(p,['--version'],{encoding:'utf8'}).trim(),'rsrs '+e.CLI_VERSION);
+          const pin=JSON.parse(readFileSync('runtime-pin.json'));assert.equal(pin.required,m.required_runtime);
+          const u=new URL(e.RSRS_DEV_SERVER_ADDR);
+          assert.equal(u.href,'https://api-dev.rsrs.rs/');assert.equal(u.username,'');assert.equal(u.password,'');
+          writeFileSync('registration-cli-identity.json',JSON.stringify(m,null,2)+'\n');
+          NODE
+      - name: Install and verify independent official Runtime24
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/registration-runtime-proof
+        run: |
+          set -euo pipefail
+          node scripts/ci-install-pinned-runtime.mjs producer-cli/rsrs
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          const r=JSON.parse(readFileSync(process.env.RSRS_DATA_DIR+'/bin/runtime.json'));
+          const m=JSON.parse(r.release.metadata_json),hash=b=>createHash('sha256').update(b).digest('hex');
+          assert.equal(r.version,'2.0.0-dev.24');assert.equal(m.runtime_version,r.version);
+          assert.equal(m.source_commit,'7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b');
+          assert.equal(m.target_triple??m.triple,process.env.RSRS_RUNTIME_TRIPLE);
+          assert.equal(hash(r.release.metadata_json),r.release.metadata_sha256);
+          assert.equal(m.binary_sha256,r.sha256);assert.equal(hash(readFileSync(process.env.NATIVE_RUNTIME_BIN)),r.sha256);
+          writeFileSync('registration-runtime-identity.json',JSON.stringify({version:r.version,source_sha:m.source_commit,
+            target:m.target_triple??m.triple,binary_sha256:r.sha256,metadata_sha256:r.release.metadata_sha256},null,2)+'\n');
+          NODE
+      - name: Key existing verified public model cache
+        id: model-key
+        shell: bash
+        run: echo "key=$(python scripts/native-model-cache.py key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: model-cache
+        with:
+          path: .native-model-cache
+          key: ${{ steps.model-key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Restore exact model cache into this new fixture only
+        if: steps.model-cache.outputs.cache-matched-key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.model-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.model-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test "$MATCHED_KEY" = "$EXPECTED_KEY"
+          test ! -e "$RUNNER_TEMP/registration-sweep"
+          python scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/registration-sweep/models/bge-m3" --legacy-dir "$RUNNER_TEMP/registration-cache-legacy"
+      - name: Require PowerShell
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v pwsh >/dev/null 2>&1; then brew install powershell; fi
+      - name: Run existing complete base sweep with independent HOME keychain and account
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'registration-sweep'
+          if (Test-Path -LiteralPath (Join-Path $root 'home')) { throw 'Registration HOME must be fresh' }
+          $exe = Join-Path (Resolve-Path producer-cli) 'rsrs'
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          retention-days: 1
-          name: performance-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/comparison/report.json
-            ${{ runner.temp }}/comparison/published-assets-receipt.json
+          name: mac-intel-runtime24-registration-diagnostic
+          retention-days: 3
           if-no-files-found: error
+          path: |
+            registration-producer.json
+            registration-cli-identity.json
+            registration-runtime-identity.json
+            ${{ runner.temp }}/registration-sweep/report.md
+            ${{ runner.temp }}/registration-sweep/coverage.json
