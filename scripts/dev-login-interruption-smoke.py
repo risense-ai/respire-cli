@@ -43,6 +43,8 @@ FAILURE_CODES = FAILURE_CODES | frozenset({
     "login_continuation_transport_mismatch", "login_continuation_envelope_mismatch",
     "login_continuation_query_failed", "login_continuation_admission_effects_mismatch",
     "login_continuation_maintenance_not_finished",
+    "original_operation_binding_changed_idempotency_key", "original_operation_binding_changed_profile",
+    "original_operation_binding_changed_root", "original_operation_binding_changed_alias",
     "login_continuation_target_escaped", "unowned_fixture_login_custody",
     "key_continuation_identity_mismatch", "key_continuation_inputs_mismatch",
     "key_continuation_effects_mismatch", "key_continuation_material_changed",
@@ -297,9 +299,10 @@ def original_operation(journal, root, barrier, addr):
     records = [row for row in journal["operations"] if row["operation_id"] == operation_id]
     require(len(records) == 1, "original_operation_not_unique")
     record = records[0]
-    require(record["idempotency_key"] == operation_id and record["profile"] == str(root.resolve())
-            and record["root"] == str(root.resolve()) and active["alias"] == record["alias"],
-            "original_operation_binding_changed")
+    require(record["idempotency_key"] == operation_id, "original_operation_binding_changed_idempotency_key")
+    require(record["profile"] == str(root.resolve()), "original_operation_binding_changed_profile")
+    require(record["root"] == str(root.resolve()), "original_operation_binding_changed_root")
+    require(active["alias"] == record["alias"], "original_operation_binding_changed_alias")
     account = record["account"]
     login = account["login"]
     candidate = json.loads(bytes(record["candidate"]))
