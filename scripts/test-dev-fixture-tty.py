@@ -114,11 +114,14 @@ print("super: ", end="", flush=True)
 with open("/dev/tty") as tty:
     factor = tty.readline().strip()
 assert factor == "synthetic-super"
+print("merge local? [y/N]: ", end="", flush=True)
+assert sys.stdin.readline().strip() == "n"
 assert not any(password in arg or factor in arg for arg in sys.argv)
 print(json.dumps({"status": "ok"}))
 '''
         result = self.run_fixture(source, [("method: ", "2"),
-            ("password: ", "synthetic-password"), ("super: ", "synthetic-super")])
+            ("password: ", "synthetic-password"), ("super: ", "synthetic-super"),
+            ("merge local? [y/N]: ", "n")])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), b'{"status": "ok"}')
         self.assertNotIn(b"synthetic-", result.stdout + result.stderr)
@@ -144,7 +147,8 @@ print(json.dumps({"status": "ok"}))
             pidfile = Path(root) / "pid"
             script = Path(root) / "fixture.py"
             script.write_text('import os,time\nopen("pid","w").write(str(os.getpid()))\nprint("unexpected prompt",flush=True)\ntime.sleep(20)')
-            with self.assertRaisesRegex(RuntimeError, "fixture_tty_timeout"):
+            with self.assertRaisesRegex(RuntimeError,
+                    r"fixture_tty_timeout: prompts=0/1 child_exited=False open_pipes=stderr,stdout"):
                 run_hidden([sys.executable, str(script)], prompts=[("password: ", "synthetic-password")],
                     cwd=root, env=fixture_env(root), timeout=0.3)
             self.assertFalse(Path("/proc", pidfile.read_text()).exists())
