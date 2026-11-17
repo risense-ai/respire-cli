@@ -49,6 +49,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         self.connection = None
         self.attribute_snapshots = {}
         self.current_target_entries = set()
+        self.recovered_super_entries = set()
         self.generic_schema_observed = set()
         self.normalized_current_entries = set()
         self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
@@ -219,6 +220,15 @@ class SecretServiceKeys(_base.TrackedKeys):
         return {"target": "default", "service": service, "username": slot,
                 "application": "rust-keyring"}
 
+    def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None):
+        super().track_created_login(session, user, super_password, login_password,
+            recovery_operation=recovery_operation)
+        if recovery_operation is not None and user == "":
+            alias = session["keyring_account"]
+            require(("rsrs", "key-control:" + alias) in self.recovery_controls,
+                    "fixture_recovery_material_not_verified")
+            self.recovered_super_entries.add(("rsrs", "super:" + alias))
+
     def register_current_target(self, session, user):
         # Registration has already created and verified these exact login slots.
         # Bind normalization to that returned alias, never reserved username slots.
@@ -253,10 +263,11 @@ class SecretServiceKeys(_base.TrackedKeys):
                 snapshot = self.attribute_snapshots.setdefault((service, slot), dict(actual))
                 compared_actual, compared_snapshot = actual, snapshot
                 entry = (service, slot)
-                if entry in self.current_target_entries:
+                if entry in self.current_target_entries or entry in self.recovered_super_entries:
                     # GNOME maps both an omitted schema and exact Generic to
                     # persisted type 0. Preserve the first raw snapshot; this
-                    # baseline applies only to each verified registration's pair.
+                    # baseline covers verified registration pairs and recovered
+                    # serving Super Keys, never old source or key-control slots.
                     generic = "org.freedesktop.Secret.Generic"
                     require(("xdg:schema" not in snapshot or snapshot["xdg:schema"] == generic)
                             and ("xdg:schema" not in actual or actual["xdg:schema"] == generic),
@@ -331,8 +342,9 @@ class SecretServiceKeys(_base.TrackedKeys):
                 remaining.append(event)
         report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
         report["provider_schema_baseline"] = {
-            "scope": "two_new_owned_current_credentials_per_verified_registration_only",
+            "scope": "verified_registration_pairs_and_verified_recovered_super_only",
             "registered_entries": len(self.current_target_entries),
+            "recovered_super_entries": len(self.recovered_super_entries),
             "observed_normalizations": len(self.normalized_current_entries),
             "other_attributes_and_values": "strict",
             "initial_raw_snapshots_overwritten": False,
