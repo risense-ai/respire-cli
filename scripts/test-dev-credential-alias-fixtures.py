@@ -189,7 +189,9 @@ class MemoryKeys(native.TrackedKeys):
         self.values = {}
         self.reads = []
 
-    def _read(self, service, slot):
+    def _read(self, service, slot, *, metadata_only=False):
+        if metadata_only:
+            return '' if (service, slot) in self.values else None
         self.reads.append((service, slot))
         return self.values.get((service, slot))
 
@@ -291,6 +293,71 @@ class AliasTests(unittest.TestCase):
         self.assertEqual(changed.values, {control: 'third-party-private-material'})
         for secret in (SUPER, alias, 'third-party-private-material'):
             self.assertNotIn(secret, json.dumps(report))
+        with patch.object(native.sys, 'platform', 'darwin'):
+            mac = MemoryKeys()
+            mac.values.update({('rsrs', 'super:' + alias): SUPER, control: json.dumps(payload)})
+            verifier = Mock()
+            mac.track_created_login(candidate, '', SUPER, None, recovery_operation=operation,
+                                    recovery_verifier=verifier)
+            verifier.assert_called_once_with(payload)
+            self.assertNotIn(control, mac.reads)
+            verifier.side_effect = RuntimeError('native-material-conflict')
+            rejected = mac.cleanup()
+            self.assertFalse(rejected['passed'])
+            self.assertIn(control, mac.values)
+            verifier.side_effect = None
+            self.assertTrue(mac.cleanup()['passed'])
+            self.assertEqual(verifier.call_count, 3)
+            self.assertFalse(mac.values)
+            unverified = MemoryKeys()
+            unverified.values.update({('rsrs', 'super:' + alias): SUPER, control: json.dumps(payload)})
+            with self.assertRaisesRegex(RuntimeError, 'native_verifier_required'):
+                unverified.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+            self.assertNotIn(control, unverified.entries)
+            self.assertNotIn(control, unverified.reads)
+            self.assertFalse(unverified.cleanup()['passed'])
+            self.assertEqual(unverified.values, {control: json.dumps(payload)})
+            with tempfile.TemporaryDirectory() as directory:
+                manager = object.__new__(native.MacKeys)
+                native.TrackedKeys.__init__(manager, Path(directory))
+                manager.created, manager.homes = True, {}
+                manager.keychain = Path(directory) / 'fixture.keychain-db'
+                manager._security = Mock(side_effect=[SimpleNamespace(returncode=code) for code in (0, 0, 44)])
+                failed = Mock(side_effect=RuntimeError('native-material-conflict'))
+                with self.assertRaisesRegex(RuntimeError, 'native-material-conflict'):
+                    manager.track_created_login(candidate, '', SUPER, None, recovery_operation=operation,
+                                                recovery_verifier=failed)
+                self.assertNotIn(control, manager.entries)
+                self.assertEqual(manager.recovery_conflicts, {control})
+                report = manager.cleanup()  # Real Mac/base cleanup chain, not a mocked failure report.
+                self.assertFalse(report['passed'])
+                self.assertIn({'code': 'recovery_control_verification_failed'}, report['remaining_entries'])
+                self.assertTrue(manager.created)
+                failed.assert_called_once_with(payload)
+                for call in manager._security.call_args_list:
+                    self.assertNotIn('-w', call.args[1])
+                    self.assertNotEqual(call.args[1][0], 'delete-keychain')
+                    self.assertNotIn(control[1], call.args[1])
+                self.assertEqual(manager._security.call_count, 3)
+                for secret in (SUPER, alias, 'native-material-conflict'):
+                    self.assertNotIn(secret, json.dumps(report))
+                manager = object.__new__(native.MacKeys)
+                native.TrackedKeys.__init__(manager, Path(directory))
+                manager.created, manager.homes = True, {}
+                manager.keychain = Path(directory) / 'fixture.keychain-db'
+                manager._security = Mock(side_effect=[SimpleNamespace(returncode=code)
+                    for code in (0, 0, 0, 0, 44, 0, 44, 0, 44, 0)])
+                verifier = Mock()
+                manager.track_created_login(candidate, '', SUPER, None, recovery_operation=operation,
+                                            recovery_verifier=verifier)
+                manager.track_created_login(dict(candidate, user=USER, addr=legacy.UPSTREAM), USER,
+                                            SUPER, PASSWORD, recovery_operation=operation)
+                self.assertTrue(manager.cleanup()['passed'])
+                self.assertFalse(manager.created)
+                self.assertEqual(verifier.call_count, 2)
+                for call in manager._security.call_args_list:
+                    self.assertNotIn('-w', call.args[1])
+                self.assertEqual(manager._security.call_count, 10)
 
     def test_wrong_password_tracked_for_cleanup_without_secret_output(self):
         keys = MemoryKeys()
@@ -1339,6 +1406,22 @@ class OriginalFactorTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
                     smoke.registration_receipt(env, root, USER, set())
             smoke.cli.assert_not_called()
+            smoke.args = SimpleNamespace(binary=Path('synthetic-cli'))
+            smoke.root = root
+            expected = dict(password='', super_password=SUPER, account_secret='', totp=None,
+                material=dict(keyring_account=ALIAS, keyring_backend='native', reset=None, challenge=None))
+            verified = dict(verified=True, operation_id=operation, installation_root=canonical,
+                            source_profile=canonical)
+            output = SimpleNamespace(returncode=0, stdout=json.dumps(dict(status='ok', summary=verified)), stderr=b'')
+            with patch.object(legacy.subprocess, 'run', return_value=output) as run:
+                smoke.verify_recovery_control(env, root, operation, expected)
+                self.assertEqual(json.loads(run.call_args.kwargs['input']), expected)
+                self.assertNotIn(SUPER, str(run.call_args.args) + str(run.call_args.kwargs['env']))
+                for field, foreign in (('verified', False), ('operation_id', 'foreign'),
+                                       ('installation_root', str(other)), ('source_profile', str(other))):
+                    output.stdout = json.dumps(dict(status='ok', summary=dict(verified, **{field: foreign})))
+                    with self.assertRaisesRegex(RuntimeError, 'native_receipt_mismatch'):
+                        smoke.verify_recovery_control(env, root, operation, expected)
             path.write_text(json.dumps(dict(binding, user='foreign')), encoding='utf-8')
             with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
                 smoke.registration_receipt(env, root, USER, set())

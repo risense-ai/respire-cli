@@ -69,6 +69,8 @@ class TrackedKeys:
         self.root = root
         self.entries = set()
         self.recovery_controls = {}
+        self.recovery_verifiers = {}
+        self.recovery_conflicts = set()
 
     def configure_env(self, env):
         owned_path(env["HOME"])
@@ -93,7 +95,8 @@ class TrackedKeys:
         require(value is not None, "fixture_credential_missing")
         return value
 
-    def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None):
+    def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None,
+                            recovery_verifier=None):
         # Claim only the exact alias returned by this owned fixture's successful
         # login transaction, never enumerate credentials on the host.
         recovery = (isinstance(recovery_operation, str)
@@ -121,7 +124,8 @@ class TrackedKeys:
             entry = ("rsrs", prefix + alias)
             require(entry not in self.entries or recovery and prefix == "super:",
                     "login_credential_fixture_alias_not_created")
-            present = self._read(*entry) is not None
+            present = (self._read(*entry, metadata_only=True) if sys.platform == "darwin"
+                       else self._read(*entry)) is not None
             found.append(present)
             if present:
                 self.entries.add(entry)
@@ -143,11 +147,21 @@ class TrackedKeys:
             # private material grants cleanup ownership; foreign material stays untouched.
             self.entries.add(control)
             try:
-                payload = self.read(*control)
                 expected = {"password": "", "super_password": super_password,
                     "account_secret": "", "totp": None, "material": {
                         "keyring_account": alias, "keyring_backend": session.get("keyring_backend"),
                         "reset": None, "challenge": None}}
+                require(session.get("keyring_backend") == self.credential_backend,
+                        "recovery_control_material_mismatch")
+                if sys.platform == "darwin":
+                    # Only the creating CLI may read its native private item. Repeat
+                    # this real verification immediately before deleting the item.
+                    require(callable(recovery_verifier), "recovery_control_native_verifier_required")
+                    recovery_verifier(expected)
+                    self.recovery_verifiers[control] = lambda: recovery_verifier(expected)
+                    self.recovery_controls[control] = None
+                    return
+                payload = self.read(*control)
                 try:
                     material = json.loads(payload)
                 except (ValueError, TypeError):
@@ -157,6 +171,10 @@ class TrackedKeys:
                 self.recovery_controls[control] = payload
             except Exception:
                 self.entries.discard(control)
+                if sys.platform == "darwin":
+                    # Failed verification grants no deletion ownership, including
+                    # deletion of the surrounding dedicated keychain.
+                    self.recovery_conflicts.add(control)
                 raise
 
     def put(self, service, slot, value):
@@ -171,6 +189,10 @@ class TrackedKeys:
         require(self._read(service, slot) is None, "fixture_credential_delete_readback_failed")
 
     def verify_cleanup_material(self, service, slot):
+        verifier = self.recovery_verifiers.get((service, slot))
+        if verifier is not None:
+            verifier()
+            return
         expected = self.recovery_controls.get((service, slot))
         if expected is not None:
             require(self.read(service, slot) == expected, "recovery_control_changed_before_cleanup")
@@ -185,6 +207,8 @@ class TrackedKeys:
                 event = {"entry": index, "passed": False, "code": "credential_cleanup_failed"}
                 events.append(event)
                 remaining.append(event)
+        if self.recovery_conflicts:
+            remaining.append({"code": "recovery_control_verification_failed"})
         return {"passed": not remaining, "remaining_entries": remaining, "events": events}
 
 
@@ -385,13 +409,13 @@ class MacKeys(TrackedKeys):
         self.configured.add(home)
         return env
 
-    def _read(self, service, slot):
+    def _read(self, service, slot, *, metadata_only=False):
         metadata = self._security(self.root, ["find-generic-password", "-s", service,
                                              "-a", slot, str(self.keychain)])
         if metadata.returncode == 44:
             return None
         require(metadata.returncode == 0, "fixture_credential_metadata_failed")
-        if (service, slot) not in self.entries:
+        if metadata_only or (service, slot) not in self.entries:
             return ""
         result = self._security(self.root, ["find-generic-password", "-s", service,
                                            "-a", slot, "-w", str(self.keychain)])
@@ -413,7 +437,8 @@ class MacKeys(TrackedKeys):
 
     def cleanup(self):
         report = super().cleanup()
-        if self.created:
+        # A failed native material comparison must also prevent whole-keychain deletion.
+        if self.created and report["passed"]:
             try:
                 require(self._security(self.root, ["delete-keychain", str(self.keychain)]).returncode == 0
                         and not self.keychain.exists(), "fixture_keychain_delete_failed")
