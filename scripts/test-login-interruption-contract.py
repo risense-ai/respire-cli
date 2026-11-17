@@ -198,6 +198,25 @@ class JournalContract(unittest.TestCase):
         self.assertIn('"failed_login_explicit_rollback"', SOURCE)
         self.assertNotIn('"synthetic_legacy_schema"', SOURCE)
         self.assertNotIn('"original": list(initial_session)', SOURCE)
+        seed = next(node for node in ast.walk(TREE)
+                    if isinstance(node, ast.FunctionDef) and node.name == 'write_session')
+        with tempfile.TemporaryDirectory() as temporary:
+            keys = Mock(credential_backend='secret_service')
+            aliases = set()
+            scope = dict(json=json, addr=self.addr, secrets=__import__('secrets'), legacy=Mock(PREFIX='rsrs:'),
+                         session=Path(temporary) / 'session.json', keys=keys, code='synthetic-current-super',
+                         old_super='synthetic-original-super', native_aliases=aliases)
+            exec(compile(ast.Module(body=[seed], type_ignores=[]), '<actual-source-session>', 'exec'), scope)
+            for version in (2, 4):
+                value = json.loads(scope['write_session']({'version': version, 'wrapped_urk': 'rsrs:fixture'}))
+                alias = value['keyring_account']
+                self.assertIn(alias, aliases)
+                self.assertEqual(value['keyring_backend'], 'secret_service')
+                keys.put.assert_any_call('rsrs', 'super:' + alias,
+                    'synthetic-current-super' if version == 4 else 'synthetic-original-super')
+                keys.put.assert_any_call('rsrs', 'pass:' + alias, 'synthetic-password')
+                self.assertFalse(any(field in value for field in ('super', 'pass', 'secret', 'secret_key')))
+            self.assertEqual(len(aliases), 2)
         self.assertIn('start_new_session=True', SOURCE)
         self.assertLess(SOURCE.index('= interrupt_owned_control(child)'),
                         SOURCE.index('release.set()', SOURCE.index('= interrupt_owned_control(child)')))

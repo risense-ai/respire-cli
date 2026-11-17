@@ -845,6 +845,12 @@ def main():
                      **{k: v for k, v in vault.items() if k != "version"}}
             if vault["wrapped_urk"].startswith(legacy.PREFIX):
                 value["crypto_namespace"] = legacy.PREFIX
+            if keys:
+                alias = "login-" + secrets.token_hex(16)
+                keys.put("rsrs", "super:" + alias, code if vault["version"] == 4 else old_super)
+                keys.put("rsrs", "pass:" + alias, "synthetic-password")
+                value.update(keyring_account=alias, keyring_backend=keys.credential_backend)
+                native_aliases.add(alias)
             session.write_text(json.dumps(value))
             session.chmod(0o600)
             return session.read_bytes()
