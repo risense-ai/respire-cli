@@ -1253,6 +1253,62 @@ class OriginalFactorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '^headless_v1_persistent_password_commit_invalid$'):
                 eval(code, {'require': legacy.require, 'headless': session,
                     'headless_env': env, 'password': PASSWORD})
+        historical = next(node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == 'historical_database_sync')
+        start = next(index for index, node in enumerate(historical.body)
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+            and any(isinstance(arg, ast.Constant) and arg.value == 'historical_registration_terminal_identity_mismatch'
+                    for arg in node.value.args))
+        end = next(index for index, node in enumerate(historical.body[start:], start)
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+            and any(isinstance(arg, ast.Constant) and arg.value == 'config' for arg in node.value.args))
+        checks = compile(ast.Module(body=historical.body[start:end], type_ignores=[]), '<registration-contract>', 'exec')
+        receipt = dict(outcome='committed', source_profile='source', target_profile='source')
+        vault = dict(wrapped_urk=SUPER, kdf_salt='synthetic-salt', urk_nonce='synthetic-nonce',
+            keyring_account=ALIAS, keyring_backend='native')
+        before = (['original-encrypted-row'], ['original-pending-work'])
+        scope = dict(require=legacy.require, env={}, source='source', user=USER, UPSTREAM=legacy.UPSTREAM,
+            previous_operations=set(), registered=dict(ok=True, user=USER, addr=legacy.UPSTREAM),
+            self=SimpleNamespace(registration_receipt=Mock(return_value=receipt)),
+            account=dict(confirmed=True), session=vault, candidate=vault, rows=lambda: before, before=before)
+        exec(checks, dict(scope))  # Terminal summary has no transaction receipt fields.
+        for changed, error in ((dict(registered={}), 'terminal_identity_mismatch'),
+                (dict(self=SimpleNamespace(registration_receipt=Mock(return_value=dict(receipt, outcome='unknown')))),
+                    'receipt_not_committed'),
+                (dict(self=SimpleNamespace(registration_receipt=Mock(return_value=dict(receipt, source_profile='other')))),
+                    'source_changed'),
+                (dict(self=SimpleNamespace(registration_receipt=Mock(return_value=dict(receipt, target_profile='other')))),
+                    'target_changed'),
+                (dict(account=dict(confirmed=False)), 'account_unconfirmed'),
+                (dict(session=dict(vault, wrapped_urk='foreign')), 'wrap_changed'),
+                (dict(rows=lambda: ([], before[1])), 'rows_changed'),
+                (dict(rows=lambda: (before[0], [])), 'outbox_changed')):
+            with self.assertRaisesRegex(RuntimeError, '^historical_registration_' + error + '$') as failure:
+                exec(checks, dict(scope, **changed))
+            for secret in (SUPER, ALIAS, USER):
+                self.assertNotIn(secret, str(failure.exception))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            folder = root / 'runtime/autostart/account-results'
+            folder.mkdir(parents=True)
+            operation = '55555555-5555-4555-8555-555555555555'
+            binding = dict(schema=1, operation_id=operation, root=str(root), source=str(root),
+                user=USER, addr=legacy.UPSTREAM, register=True, sent=True)
+            path = folder / (operation + '.json')
+            path.write_text(json.dumps(binding), encoding='utf-8')
+            smoke = object.__new__(legacy.Smoke)
+            smoke.cli = Mock(return_value={'summary': dict(receipt, operation_id=operation)})
+            env = dict(RSRS_DATA_DIR=str(root))
+            self.assertEqual(smoke.registration_receipt(env, root, USER, set())['operation_id'], operation)
+            smoke.cli.assert_called_once_with(env, 'runtime', 'account-result', '--operation-id', operation,
+                '--source-profile', str(root), '--register')
+            smoke.cli.reset_mock()
+            path.write_text(json.dumps(dict(binding, user='foreign')), encoding='utf-8')
+            with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
+                smoke.registration_receipt(env, root, USER, set())
+            with self.assertRaisesRegex(RuntimeError, 'operation_not_unique'):
+                smoke.registration_receipt(env, root, USER, {path.name})
+            smoke.cli.assert_not_called()
 
     def test_native_only_proofs_and_independent_tracking_remain_in_suite(self):
         legacy_text = (HERE / 'dev-legacy-vault-smoke.py').read_text()

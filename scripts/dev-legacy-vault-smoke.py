@@ -481,6 +481,25 @@ class Smoke:
             remote_tombstone_propagated=True, remote_tombstone_content="canonical_empty",
             historical_authentication_tested=False)
 
+    def registration_receipt(self, env, source, user, previous_operations):
+        root = Path(env["RSRS_DATA_DIR"]).resolve()
+        folder = root / "runtime/autostart/account-results"
+        created = [path for path in folder.glob("*.json") if path.name not in previous_operations
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", path.stem)]
+        require(len(created) == 1 and not created[0].is_symlink(), "historical_registration_operation_not_unique")
+        path, = created
+        binding = json.loads(path.read_text(encoding="utf-8"))
+        require(binding.get("schema") == 1 and binding.get("operation_id") == path.stem
+            and binding.get("root") == str(root) and binding.get("source") == str(source)
+            and binding.get("user") == user and binding.get("addr") == UPSTREAM
+            and binding.get("register") is True and binding.get("sent") is True,
+            "historical_registration_operation_binding_mismatch")
+        # Query the original successful registration; never admit another auth operation.
+        receipt = self.cli(env, "runtime", "account-result", "--operation-id", path.stem,
+            "--source-profile", str(source), "--register")["summary"]
+        require(receipt.get("operation_id") == path.stem, "historical_registration_receipt_operation_mismatch")
+        return receipt
+
     def historical_database_sync(self, env, expected_urk, code, expected_records):
         """Continue a real upgraded historical DB; never replace its file or data key."""
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -539,6 +558,8 @@ class Smoke:
         self.save()
         register = {"v": 1, "id": "historical-register-" + uuid.uuid4().hex, "method": "auth.register",
             "params": {"addr": UPSTREAM, "user": user, "password": password}}
+        previous_operations = {path.name for path in
+            (Path(env["RSRS_DATA_DIR"]) / "runtime/autostart/account-results").glob("*.json")}
         try:
             registered = self.cli(env, "register", host_request=register)["summary"]
         finally:
@@ -547,11 +568,19 @@ class Smoke:
                 account.update(token=session["token"], confirmed=True)
                 self.diagnostic_secrets.add(session["token"])
                 self.keys.track_created_login(session, user, code, password, recovery_operation=operation)
-        require(registered.get("outcome") == "committed" and registered.get("source_profile") == str(source)
-            and registered.get("target_profile") == str(source) and account["confirmed"]
-            and all(session.get(field) == candidate.get(field) for field in
-                ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend"))
-            and rows() == before, "historical_registration_changed_vault_or_database")
+        require(registered.get("ok") is True and registered.get("user") == user
+            and registered.get("addr") == UPSTREAM, "historical_registration_terminal_identity_mismatch")
+        receipt = self.registration_receipt(env, source, user, previous_operations)
+        require(receipt.get("outcome") == "committed", "historical_registration_receipt_not_committed")
+        require(receipt.get("source_profile") == str(source), "historical_registration_source_changed")
+        require(receipt.get("target_profile") == str(source), "historical_registration_target_changed")
+        require(account["confirmed"], "historical_registration_account_unconfirmed")
+        require(all(session.get(field) == candidate.get(field) for field in
+            ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend")),
+            "historical_registration_wrap_changed")
+        after_registration = rows()
+        require(after_registration[0] == before[0], "historical_registration_rows_changed")
+        require(after_registration[1] == before[1], "historical_registration_outbox_changed")
         self.cli(env, "config", "--addr", UPSTREAM, "--autosync", "false")
         require(rows() == before, "historical_endpoint_configuration_changed_database")
         vault = self.api(account, "GET", "/api/self/vault")
