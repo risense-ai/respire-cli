@@ -1606,12 +1606,27 @@ fn emit(command: &str, summary: Value) -> Result<()> {
     ))
 }
 
+fn verify_key_custody(operation_id: &str, source: &Path) -> Result<crate::output::ResultEnvelope> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin().take(65537).read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("private custody input unreadable"))?;
+    anyhow::ensure!(bytes.len() <= 65536, "private custody input exceeds the control limit");
+    let expected: respire_protocol::key_control::HostKeyInput = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid private custody input"))?;
+    respire_host_control::KeyCoordinator::verify_custody(operation_id, source, &expected)
+}
+
 pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
     match command {
         RuntimeCommand::CoreConfigResult { context, source_profile } => {
             return crate::emit_result(super::supervise::control_core_config_result(context, source_profile)?);
         }
-        RuntimeCommand::KeyResult { operation_id, source_profile } => {
+        RuntimeCommand::KeyResult { operation_id, source_profile, verify_custody } => {
+            if *verify_custody {
+                let source = source_profile.as_deref().context("custody verification requires its original source")?;
+                return crate::emit_result(verify_key_custody(operation_id, source)?);
+            }
             return crate::emit_result(super::control_key_result(operation_id, source_profile.as_deref())?);
         }
         RuntimeCommand::KeyRollback { operation_id, confirm } => {
