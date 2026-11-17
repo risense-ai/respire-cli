@@ -86,6 +86,8 @@ def safe_cli_diagnostic(stdout, stderr):
     text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
     text += "\n" + stderr.decode("utf-8", errors="replace")
     categories = (
+        ("key_source_inline_with_journal", "source factors and an existing login journal require explicit recovery"),
+        ("key_source_inline", "this inline source format has no host canonicalization path"),
         ("runtime_unlock_rejected", "Runtime V2 unlock rejected"),
         ("runtime_unlock_transport", "Runtime V2 unlock transport failed"),
         ("runtime_startup_timeout", "host runtime did not become ready"),
@@ -1268,7 +1270,10 @@ def main():
             cli("--runtime-internal", "--stop")
             source_value = json.loads(source_session.read_bytes())
             source_value["addr"] = "https://previous.invalid"
-            source_value["super"] = old_super  # Synthetic source factor differs from the target env key.
+            # Keep the current source's native custody; inline factors plus the
+            # existing login journal are rejected before a transfer is admitted.
+            require(all(field not in source_value for field in ("super", "pass", "secret", "secret_key")),
+                    "server_transfer_changed_source")
             source_session.write_text(json.dumps(source_value), encoding="utf-8")
             with sqlite3.connect((source_path / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
                 source_before = source_session.read_bytes(), db.execute("SELECT id,ciphertext,nonce FROM memories ORDER BY id").fetchall()
@@ -1283,6 +1288,9 @@ def main():
                         "--pass=synthetic-password", "--super", code, "--migrate-local")
             report["stage"] = "server_transfer_initial_login"
             first_result = cli(*transfer, success=False)
+            report["transfer_initial_response"] = {"exit_code": first_result.returncode,
+                "diagnostic": safe_cli_diagnostic(first_result.stdout, first_result.stderr),
+                "sync_pulls": state["sync_pulls"], "synced_records": len(state["sync_blobs"])}
             require(first_result.returncode == 2, "server_transfer_sync_warning_missing")
             first = json.loads(first_result.stdout)["summary"]
             require(first["import"]["imported"] == 1 and first["import"]["duplicates"] == 0,
