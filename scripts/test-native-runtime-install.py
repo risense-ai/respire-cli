@@ -21,9 +21,10 @@ class FixtureInstallationTests(unittest.TestCase):
         scripts = Path(__file__).resolve().parent
         workflow = (scripts.parent / '.github/workflows/release-native-validation.yml').read_text(encoding='utf-8')
         self.assertIn('os: macos-15\n            target: aarch64-apple-darwin', workflow)
-        name = 'Verify OS autostart registration from published release bytes'
+        name = 'Verify OS autostart registration from verified release bytes'
         step = workflow.split('      - name: ' + name + '\n')[1].split('\n      - ')[0]
-        self.assertIn("if: inputs.artifact_source == 'published-assets' && inputs.validation_profile == 'full'", step)
+        self.assertIn("if: inputs.validation_profile == 'full'\n", step)
+        self.assertNotIn('inputs.artifact_source', step)  # Candidate and published full use the same verified archive.
         self.assertIn('set -euo pipefail', step)
         self.assertIn('unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN', step)
         for variable in ('RSRS_PUBLISHED_RUNTIME_ARCHIVE', 'RSRS_PUBLISHED_RUNTIME_VERSION'):
@@ -37,6 +38,19 @@ class FixtureInstallationTests(unittest.TestCase):
         self.assertLess(workflow.index('run: node npm/scripts/extract-artifact.mjs validated-cli'), workflow.index(name))
         preparation = 'Prepare isolated upgrade Python and the fixed Windows wheel key'
         self.assertLess(workflow.index(preparation), workflow.index(name))
+        runtime_install = 'Install and verify the official pinned standalone Runtime'
+        systemd = 'Prepare hosted Linux user systemd for OS autostart'
+        self.assertLess(workflow.index(runtime_install), workflow.index(systemd))
+        self.assertLess(workflow.index(systemd), workflow.index(name))
+        systemd_step = workflow.split('      - name: ' + systemd + '\n')[1].split('\n      - ')[0]
+        for guard in ("if: runner.os == 'Linux' && inputs.validation_profile == 'full'",
+                      'test "$RUNNER_ENVIRONMENT" = github-hosted',
+                      'sudo loginctl enable-linger "$(id -un)"',
+                      'sudo systemctl start "user@$uid.service"',
+                      'export XDG_RUNTIME_DIR="/run/user/$uid"',
+                      'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"',
+                      'busctl --user status org.freedesktop.systemd1'):
+            self.assertIn(guard, systemd_step)
         self.assertEqual(workflow.count('python -m venv "$RUNNER_TEMP/upgrade-python"'), 1)
         for dependency in ('dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0'):
             self.assertEqual(workflow.count(dependency), 1)

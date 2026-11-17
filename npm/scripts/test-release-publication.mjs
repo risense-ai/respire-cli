@@ -38,7 +38,7 @@ test('complete release inventory has one current-run publisher and no historical
   const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const definitions = [...workflow.split('\njobs:\n')[1].matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:\n|$(?![\s\S]))/gm)];
   assert(definitions.length > 5, 'Use the complete release job inventory');
-  assert.doesNotMatch(workflow, /resume_dev6|repair_dev12|repair_dev14|reuse_dev12|prepared_run|dev6-publication-resume|prepared-import|preparation-receipt/);
+  assert.doesNotMatch(workflow, /resume_dev6|repair_dev12|repair_dev14|reuse_dev12|dev6-publication-resume/);
   assert.doesNotMatch(workflow, /37716872717|37728949557|38251121403|63c3da9e64a4ce182bfd802518030b102dd362a3|d8314480e10a27767544f781083e35c8e85657f0|fd0e5463f8c59f304ff17d622efb1f6221f9b04c/);
   const inventory = definitions.map(([, id, body]) => ({id, name: body.match(/^    name: (.+)$/m)?.[1] || id, status: 'completed', conclusion: 'success'}));
   const active = inventory.find(j => j.id === 'publish');
@@ -179,11 +179,13 @@ test('source CI cancels duplicates only within the same ref and SHA',()=>{
   assert.notEqual(key('refs/heads/main',sha),key('refs/heads/main','c'.repeat(40)));
   assert.notEqual(key('refs/heads/main',sha),key('refs/pull/1/merge',sha));
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  const gate=release.split('- name: Require successful CLI CI for this exact source')[1].split('\n      - ')[0];
-  assert.match(gate,/runs\?head_sha=\$\{sha\}&per_page=100/);
-  assert(gate.includes("run.head_sha===sha&&run.event==='push'"));
-  assert(gate.includes("run?.status==='completed'"));
-  assert(gate.includes("if(run.conclusion!=='success') throw"));
+  assert.match(release,/prepared-import.mjs readiness/);
+  const helper=readFileSync(new URL('./release-preparation.mjs',import.meta.url),'utf8');
+  assert.match(helper,/workflows\/ci.yml\/runs\?head_sha=\$\{source.sha\}/);
+  assert(helper.includes("r.head_sha===source.sha&&r.event==='push'&&r.head_branch==='main'"));
+  assert(helper.includes('candidates.sort')||helper.includes('.sort((a,b)=>b.id-a.id)'));
+  assert.match(helper,/const ci=api\(`repos\/\$\{REPO\}\/actions\/runs\/\$\{candidates\[0\].id\}`\)/);
+  assert.match(helper,/completed\(\{...ci,/);
 });
 
 test('empty DEV draft resumption permits only a rerun to bypass its own active owner',()=>{
@@ -239,26 +241,16 @@ test('empty DEV draft resumption permits only a rerun to bypass its own active o
   }
 });
 
-test('same-run scoped tarball reuse requires the first exact-current-main attempt',()=>{
+test('promotion reuses only exact imported scoped tarballs and never repacks publication bytes',()=>{
   const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const publisher=workflow.split('\n  publish:')[1];
-  const expression=publisher.match(/^      REUSE_VALIDATED_PACKS: \$\{\{ (.+) \}\}$/m)?.[1];
-  assert(expression,'reuse must be selected from the workflow trust context');
-  const repository=expression.match(/github.repository == '([^']+)'/)?.[1];assert(repository);
-  const selected=new Function('github','needs','inputs',`return (${expression});`);
-  for(const owner of [repository,'fork/repo']) for(const event of ['workflow_dispatch','push']) for(const ref of ['refs/heads/main','refs/heads/feature'])
-    for(const exact of [true,false]) for(const attempt of ['1','2']) {
-      const github={repository:owner,event_name:event,ref,sha:'a'.repeat(40),run_attempt:attempt},needs={plan:{outputs:{sha:(exact?'a':'b').repeat(40)}}};
-      assert.equal(selected(github,needs,{}),owner===repository&&event==='workflow_dispatch'&&ref==='refs/heads/main'&&exact&&attempt==='1');
-    }
-  const verify=publisher.split('- name: Verify release artifacts and prepare every scoped npm package')[1].split('\n      - ')[0];
-  assert.match(verify,/CLI_SHA: \$\{\{ needs.plan.outputs.sha \}\}/);
-  assert.match(verify,/if \[ "\$REUSE_VALIDATED_PACKS" = true \]; then\n\s+node npm\/scripts\/verify-packages.mjs release-assets --reuse-packs "\$RUNNER_TEMP\/validated-npm" --download --export-packs npm\/publication-packages\n\s+else\n\s+node npm\/scripts\/verify-packages.mjs release-assets --pack npm\/publication-packages\n\s+fi/);
-  const publish=publisher.split('- name: Publish npm using Trusted Publishing')[1].split('\n      - ')[0];
-  assert.doesNotMatch(publish,/npm\/scripts\/pack.mjs.*\$RUNNER_TEMP\/validated-npm/);
-  assert.match(publish,/--publish --accepted-only --verified-packs npm\/publication-packages --tag/);
-  assert.match(publisher,/name: npm-publication-packages/);
-  assert.doesNotMatch(publisher,/prepared_run|npm\/release-packages/);
+  assert.match(publisher,/needs.prepared-import.result == 'success'/);
+  assert.match(publisher,/name: imported-npm-packages/);
+  assert.match(publisher,/--reuse-packs npm\/release-packages --export-packs npm\/publication-packages/);
+  assert.doesNotMatch(publisher,/--pack npm\/publication-packages|REUSE_VALIDATED_PACKS/);
+  assert.match(publisher,/--publish --accepted-only --verified-packs npm\/publication-packages --tag/);
+  const verifier=readFileSync(new URL('./verify-packages.mjs',import.meta.url),'utf8');
+  for(const guard of ['readImportedPreparation','assertImportSelection','assertImportPin','readValidatedPacks','verifyPackFile'])assert(verifier.includes(guard));
 });
 test('two overlapping Releases progress without waiting while holding the opposite alias lock', () => {
   // Model the actual lock graph asserted above. B's early ready wait has no lock.
@@ -326,7 +318,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   assert.match(candidate, /targeted-native-migration\/migration-platform-gate\.json/);
   assert.match(candidate, /native-migration-keyring\/keyring-selftest\.json/);
   const release = readFileSync(new URL('release.yml', root), 'utf8');
-  assert.doesNotMatch(release, /prepared-import|preparation-receipt/);
+  assert.match(release, /prepared-import:/); assert.match(release, /preparation-receipt:/);
   for(const name of ['published-assets-verification-', 'published-full-result', 'npm-publication-packages-', 'scoped-accepted-', 'publication-accepted-'])assert(release.includes('name: '+name));
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
@@ -773,91 +765,22 @@ test('published compatibility checks exact product pin and numeric DEV minCLI wi
   validatePublishedCompatibility({...spec,cli:{version:'1.0.21-dev.10'}},runtime,pin);
 });
 
-function publishedFullFixture(root) {
-  const targets=m.targets.map(t=>t.triple), manifestHash='d'.repeat(64), context={sha:'e'.repeat(40),run_id:901,run_attempt:2};
-  const runtimeTargets=targets;
-  let id=1;
-  const spec={schema:2,...Object.fromEntries(['cli','runtime'].map(kind=>[kind,{repository:`risense-ai/respire-${kind}`,version:kind==='cli'?'1.0.21-dev.5':'1.0.21-dev.4',source_sha:(kind==='cli'?'a':'b').repeat(40),release_id:kind==='cli'?21:22,producer:{run_id:91,run_attempt:2},assets:(kind==='cli'?targets:runtimeTargets).flatMap(target=>publishedAssetNames(kind,target).map(name=>({id:id++,name,size:64,sha256:(kind==='cli'?'a':'b').repeat(64)})))}]))};
-  const jobs=[];
-  const job=name=>jobs.push({name,status:'completed',conclusion:'success',run_id:context.run_id,run_attempt:context.run_attempt,head_sha:context.sha});
-  function put(artifact,file,value) {const location=path.join(root,artifact,file);mkdirSync(path.dirname(location),{recursive:true});writeFileSync(location,JSON.stringify(value));}
-  const identity={source_sha:spec.cli.source_sha,version:spec.cli.version,binary_sha256:'a'.repeat(64)};
-  const processReceipt={manifest_sha256:manifestHash,bundle_sha256:'b'.repeat(64),image_sha256:'b'.repeat(64),exe:'/isolated/runtime',pid:42,process_start_id:'synthetic-birth',installation_root:'/isolated',data_dir:'/isolated/profile',account_id:'account',instance_id:'instance',generation:1,protocol_v:1};
-  const runtime={...identity,passed:true,runtime_mode:'standalone_runtime',standalone_runtime_evidence:true,runtime_binary_sha256:'b'.repeat(64),runtime_version:spec.runtime.version,runtime_identity_receipts:[processReceipt]};
-  const upgradedRuntime={...runtime,upgrade_contract:'standalone-v1',runtime_installed_after_legacy_data:true,legacy_handoff_actor:'fixture'};
-  const policy=JSON.parse(execFileSync(process.platform==='win32'?'py':'python3',
-    [...(process.platform==='win32'?['-3']:[]),'-I','-B','-c',`import json,sys
-sys.path.insert(0, '.')
-from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability
-gaps = {}
-for target in json.load(sys.stdin):
-    gaps[target] = {}
-    for tag in ['v1.0.19', 'v1.0.20', *DATABASE_DEV_CHECKPOINTS]:
-        try:
-            gaps[target][tag] = platform_applicability(tag, target, [])
-        except ValueError:
-            pass
-print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps}))`],
-    {cwd:new URL('../../scripts/',import.meta.url),input:JSON.stringify(targets),encoding:'utf8',windowsHide:true}));
-  const upgradeReports={};
-  for(const target of targets) {
-    job(`validate / Release (${target})`);job(`native-regression / Native (${target})`);
-    const runtime_producer={...spec.runtime.producer,source_sha:spec.runtime.source_sha,target,metadata_sha256:'b'.repeat(64),
-      binary_sha256:'b'.repeat(64),archive_sha256:'b'.repeat(64),artifacts:['runtime-release-','runtime-smoke-'].map((prefix,i)=>({id:31+i,job_id:11+i,name:prefix+target,zip_sha256:'c'.repeat(64)}))};
-    put('published-assets-verification-'+target,'published-assets-receipt.json',{assets_verified:true,payloads_verified:true,target,manifest_sha256:manifestHash,harness_sha:context.sha,run_id:String(context.run_id),run_attempt:String(context.run_attempt),product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},releases:Object.fromEntries(['cli','runtime'].map(kind=>[kind,{...spec[kind],assets:undefined}])),runtime_producer,assets:['cli','runtime'].flatMap(kind=>spec[kind].assets.filter(a=>a.name.includes(target)).map(a=>({repository:spec[kind].repository,...a})))});
-    put('resident-concurrency-'+target,'real-account-return-verification.json',[runtime]);
-    put('resident-concurrency-'+target,'resident-stress-metrics.json',{passed:true});
-    put('resident-concurrency-'+target,'fixture-dependencies.json',{synthetic:true});
-    put('resident-concurrency-'+target,'fixture-process-verification.json',[{passed:true}]);
-    const formal=['v1.0.19','v1.0.20'], selected=[...formal,...Object.keys(policy.checkpoints)].sort();
-    upgradeReports[target]={passed:true,profile:'full',full_coverage:true,all_published_sources_covered:true,
-      upgrade_contract:'standalone-v1',target,candidate_sha256:identity.binary_sha256,published_formal_sources:formal,
-      additional_draft_baselines:[],database_dev_checkpoints:policy.checkpoints,selected_sources:selected,
-      first_platform_release:false,sources:selected.map(tag=>({version:tag.slice(1),formal:formal.includes(tag),
-        ...(policy.gaps[target][tag]?{status:'not-applicable',reason:policy.gaps[target][tag]}:{passed:true,upgrade_contract:'standalone-v1'})}))};
-    put('published-upgrades-'+target,'published-upgrades.json',upgradeReports[target]);
-    for(const row of upgradeReports[target].sources.filter(row=>row.passed))put('published-upgrades-'+target,'v'+row.version+'/results/real-account-return-verification.json',[upgradedRuntime]);
-    if(target==='x86_64-unknown-linux-gnu')continue;
-    job(`cloud-sweep (runner, ${target})`);
-    put('base-release-sweep-'+target,'coverage.json',{...identity,observed_version:spec.cli.version,expected_version:spec.cli.version,base_complete:true,failed:0,required_missing:[]});
-    if(target.includes('linux')) {
-      put('release-sweep-'+target,'combined-coverage.json',{...identity,complete:true});
-      put('release-sweep-'+target,'suite-results.json',['outbox','ai_inject','runtime','legacy_vault','profile_migration','login_interruption'].map(suite=>({suite,passed:true,exit:0})));
-      for(const name of ['ai-inject-coverage.json','legacy-vault-coverage.json','migration-coverage.json','interruption-coverage.json'])put('release-sweep-'+target,name,{...identity,passed:true});
-      for(const name of ['outbox-coverage.json','runtime-coverage.json'])put('release-sweep-'+target,name,runtime);
-      put('secret-service-profile-migration-'+target,'migration-platform-gate.json',{...identity,passed:true});
-      put('secret-service-profile-migration-'+target,'interruption-coverage.json',{...identity,passed:true});
-    } else {
-      job(`Native migration (${target})`);job(`Migration gate (${target})`);
-      put('native-profile-migration-'+target,'migration-platform-gate.json',{...identity,complete:true});
-    }
-  }
-  put('gnu-login-interruption','interruption-coverage.json',{...identity,passed:true});
-  job('validate / npm-dry-run');job('api-smoke');
-  const packageManifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
-  const packages=[...packageManifest.targets.map(t=>t.pkg),packageManifest.npmScope].map((name,i)=>{
-    const file=`synthetic-${i}.tgz`,bytes=Buffer.from(`synthetic package ${i}`);
-    mkdirSync(path.join(root,'npm-release-packages'),{recursive:true});writeFileSync(path.join(root,'npm-release-packages',file),bytes);
-    return {name,version:spec.cli.version,file,sha256:createHash('sha256').update(bytes).digest('hex')};
-  });
-  put('npm-release-packages','published-package-validation.json',{artifact_source:'published-assets',harness_sha:context.sha,manifest_sha256:manifestHash,product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},run_id:context.run_id,run_attempt:context.run_attempt,packages});
-
-  const apiReports={};
-  for(const name of ['dev-api-coverage.json','dev-github-api-coverage.json']) {
-    put('dev-api-coverage',name,{complete:true,...(name==='dev-api-coverage.json'?{cli_workflow_sha:context.sha}:{} )});
-    apiReports[name]=createHash('sha256').update(readFileSync(path.join(root,'dev-api-coverage',name))).digest('hex');
-  }
-  put('dev-api-coverage','published-api-identity.json',{harness_sha:context.sha,manifest_sha256:manifestHash,run_id:context.run_id,run_attempt:context.run_attempt,reports:apiReports});
-  return {spec,targets,manifestHash,context,jobs,put,runtime,upgradedRuntime,upgradeReports};
-}
+import {publishedFullFixture} from './full-report-fixture.mjs';
 test('published full joins every existing report and live image identity; copied summaries and partial jobs cannot pass',()=>{
   const root=mkdtempSync(path.join(tmpdir(),'published-full-join-'));
   try {
-    const f=publishedFullFixture(root),run=()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context);
+    const f=publishedFullFixture(root),run=()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context,{client2:{release:'v2.0.0-dev.6',source_sha:'f'.repeat(40)}});
     const complete=run();assert.equal(complete.full_passed,true);assert.equal(complete.harness_sha,f.context.sha);
     assert.notEqual(complete.harness_sha,complete.product_sources.cli);
     assert.equal(complete.actual_processes.length,f.targets.length+Object.values(f.upgradeReports).reduce((count,r)=>count+r.sources.filter(row=>row.passed).length,0)+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
     assert.equal(complete.historical_upgrades.length,f.targets.length);
+    const guiFile=path.join(root,'client2-published-online-x86_64-pc-windows-msvc','report.json'),guiBytes=readFileSync(guiFile);
+    for(const mutate of [g=>delete g.cli_processes,g=>g.cli_processes.pop(),g=>g.cli_processes[0].sha256='0'.repeat(64),
+      g=>g.cli_processes[0].parent_verified=false,g=>g.cli_processes[0].lifetime_verified=false,g=>g.source_sha='0'.repeat(40),
+      g=>g.release='v2.0.0-dev.5',g=>g.restart_native_gui.offline.automatic_key_handoff=false,g=>g.cleanup_error='observer failed']){
+      const gui=JSON.parse(guiBytes);mutate(gui);writeFileSync(guiFile,JSON.stringify(gui));assert.throws(run);
+    }
+    writeFileSync(guiFile,guiBytes);
     assert(complete.historical_upgrades.every(r=>r.profile==='full'&&r.all_published_sources_covered));
     for(const target of f.targets) {
       const critical=copy(f.upgradeReports[target]);

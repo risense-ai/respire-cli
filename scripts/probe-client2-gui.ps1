@@ -18,6 +18,8 @@ $ErrorActionPreference = 'Stop'
 $publishedAssets = $env:ARTIFACT_SOURCE -ceq 'published-assets'
 $client2Candidate = $SourceCandidate -or $PSCmdlet.ParameterSetName -ceq 'DesktopCandidate'
 $publishedOnline = $publishedAssets -and -not $client2Candidate
+$candidateAssets = $env:ARTIFACT_SOURCE -ceq 'build' -and -not [string]::IsNullOrEmpty($env:CANDIDATE_ASSETS)
+$fullFixture = $publishedOnline -or $candidateAssets
 if ($PSCmdlet.ParameterSetName -ne 'SourceCandidate' -and $Client2Commit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Require the exact protocol-compatible Client2 source commit' }
 if ($PSCmdlet.ParameterSetName -eq 'Official' -and $Client2Release -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?\z') { throw 'Require an explicit new protocol-compatible Client2 release' }
 if ($publishedAssets -and (-not $OfflineAcceptance -or
@@ -312,6 +314,26 @@ public static class RespireGuiNative {
             $candidateProof.g1_passed -ne $false) { throw 'Candidate archive/provenance binding differs' }
         $report.runtime_candidate = $candidateProof
     }
+    if ($candidateAssets) {
+        $candidate = $env:CANDIDATE_ASSETS | ConvertFrom-Json
+        $manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($env:CANDIDATE_ASSETS))).ToLowerInvariant()
+        $consumer = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $cliPath) 'candidate-consumer-identity.json') | ConvertFrom-Json
+        $metadataPath = (Resolve-Path -LiteralPath $env:RSRS_PUBLISHED_RUNTIME_METADATA).Path
+        $runtimeMetadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
+        if ($candidate.kind -cne 'unpublished-cli-candidate' -or $candidate.source.sha -cne $env:GITHUB_SHA -or
+            $candidate.source.run_id -ne [long]$env:GITHUB_RUN_ID -or $candidate.source.run_attempt -ne [int]$env:GITHUB_RUN_ATTEMPT -or
+            $consumer.manifest_sha256 -cne $manifestHash -or $consumer.target -cne 'x86_64-pc-windows-msvc' -or
+            $consumer.harness_sha -cne $env:GITHUB_SHA -or $consumer.product_sources.cli -cne $candidate.source.sha -or
+            $consumer.product_sources.runtime -cne $candidate.runtime.source_sha -or $consumer.cli_binary_sha256 -cne $report.cli_sha256 -or
+            $consumer.runtime_bundle_sha256 -cne $report.runtime_archive_sha256 -or $candidate.runtime.version -cne $RuntimeVersion -or
+            $runtimeMetadata.runtime_version -cne $RuntimeVersion -or $runtimeMetadata.target_triple -cne 'x86_64-pc-windows-msvc' -or $runtimeMetadata.source_commit -cne $candidate.runtime.source_sha -or
+            $runtimeMetadata.binary_sha256 -cne $consumer.runtime_binary_sha256 -or $runtimeMetadata.archive_sha256 -cne $report.runtime_archive_sha256 -or
+            (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RSRS_PUBLISHED_RUNTIME_METADATA_SHA256) {
+            throw 'Candidate CLI/Runtime reference identity differs from verified consumer receipt'
+        }
+        $report.candidate_inputs = @{manifest_sha256=$manifestHash; cli_source=$candidate.source.sha; runtime_source=$candidate.runtime.source_sha}
+        $report.online_install = @{mode='not-evaluated'; completed=$false; reason='unpublished CLI candidate; exact local asset installation'}
+    }
     if ($RuntimeVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') { throw 'Invalid pinned Runtime version' }
     $taskHome = Join-Path $root 'profile/home'
     $taskProfile = if ($publishedOnline) { Join-Path $taskHome '.rsrs' } else { Join-Path $root 'profile' }
@@ -445,6 +467,16 @@ public static class RespireGuiNative {
         if (-not $install.WaitForExit(60000)) { $install.Kill($true); throw 'Staged Runtime installation timed out' }
         if ($install.ExitCode -ne 0) { throw 'Staged Runtime installation failed' }
         $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
+        if ($candidateAssets) {
+            if ($selection.version -cne $RuntimeVersion -or $selection.sha256 -cne $consumer.runtime_binary_sha256 -or
+                (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256) { throw 'Installed candidate Runtime image differs' }
+            foreach ($file in $runtimeMetadata.files) {
+                $name = if ($file.path -ceq $runtimeMetadata.binary_file) { 'rsrs-runtime.exe' } else { $file.path }
+                $installedFile = Join-Path $managed $name
+                if ((Get-Item -LiteralPath $installedFile).Length -ne $file.size -or
+                    (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) { throw 'Installed candidate Runtime payload differs' }
+            }
+        }
         Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
     }
     Write-Output 'GUI probe: Runtime installed'
@@ -469,7 +501,7 @@ public static class RespireGuiNative {
         $report.offline_model_hashes = $modelHashes
         $childEnv['RSRS_M3_DIR'] = $modelRoot; $childEnv['RSRS_ENGINE'] = 'cpu'
     }
-    $phases = if ($publishedOnline -and $OfflineAcceptance) { @('initial','restart','recovery-issue','recovery-resume','recovery-verified') } else { @('initial') }
+    $phases = if ($fullFixture -and $OfflineAcceptance) { @('initial','restart','recovery-issue','recovery-resume','recovery-verified') } else { @('initial') }
     foreach ($phase in $phases) {
         $recoveryPhase = $phase.StartsWith('recovery-', [StringComparison]::Ordinal)
         if ($phase -ceq 'recovery-issue') {
@@ -526,9 +558,40 @@ public static class RespireGuiNative {
                 $registration.Dispose()
             }
         }
+        $cliObservation = [hashtable]::Synchronized(@{stop=$false; desktop_pid=0; desktop_started=0L; phase=$phase})
+        $cliObserver = Start-ThreadJob -ArgumentList $cliObservation,(Join-Path $taskProfile 'bin/rsrs.exe'),$report.cli_sha256,$report.environment.session_id -ScriptBlock {
+            param($state,$expectedPath,$expectedHash,$session)
+            $ErrorActionPreference = 'Stop'
+            $seen = [Collections.Generic.HashSet[string]]::new()
+            while (-not $state.stop) {
+                foreach ($process in [Diagnostics.Process]::GetProcessesByName('rsrs')) {
+                    try {
+                        if ($state.desktop_pid -eq 0 -or $process.HasExited) { continue }
+                        $birth = $process.StartTime.ToUniversalTime().Ticks
+                        if ($birth -lt $state.desktop_started -or $process.SessionId -ne $session) { continue }
+                        $image = $process.Path
+                        if (-not [string]::Equals($image,$expectedPath,[StringComparison]::OrdinalIgnoreCase)) { continue }
+                        $record = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)"
+                        if (-not $record -or $record.ParentProcessId -ne $state.desktop_pid) { continue }
+                        $digest = (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash.ToLowerInvariant()
+                        if ($process.HasExited -or $process.StartTime.ToUniversalTime().Ticks -ne $birth) { throw 'CLI exited during image sampling' }
+                        if ($digest -cne $expectedHash -or $record.SessionId -ne $session -or
+                            -not [string]::Equals($record.ExecutablePath,$image,[StringComparison]::OrdinalIgnoreCase)) { throw 'Running GUI CLI image differs' }
+                        if ($seen.Add("$($process.Id):$birth")) {
+                            @{phase=$state.phase;pid=$process.Id;parent_pid=$record.ParentProcessId;started_ticks=$birth.ToString();image=$image;sha256=$digest
+                                parent_verified=$true;session_verified=$true;lifetime_verified=$true}
+                        }
+                    } catch { @{phase=$state.phase;observation_error=$_.Exception.Message} }
+                    finally { $process.Dispose() }
+                }
+                Start-Sleep -Milliseconds 20
+            }
+        }
         Write-Output ('GUI probe: starting desktop ' + $phase)
         $desktopProcess = Child-Start $exe @()
         $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
+        $cliObservation.desktop_started = $desktopStarted
+        $cliObservation.desktop_pid = $desktopProcess.Id
         Write-Output 'GUI probe: desktop started'
         $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
         if (-not $nativeRoot -or -not [string]::Equals($nativeRoot.ExecutablePath, $exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native process does not name the verified original EXE' }
@@ -561,6 +624,7 @@ public static class RespireGuiNative {
             webview_profile=$expectedProfile; full_gui_acceptance='not-evaluated'; g1_passed=$false
             rpc_port=$rpcPort; data_directory=$taskProfile; preferences_path=$preferencesPath
             final_public_assets=$publishedOnline
+            verified_candidate_assets=$candidateAssets
             runtime_exe=(Join-Path $managed 'rsrs-runtime.exe')
             runtime_sha256=(Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
         }
@@ -609,12 +673,23 @@ public static class RespireGuiNative {
         if ($driver.ExitCode -ne 0 -or $native.status -ne 'native-connectivity-passed' -or -not $native.identity_verified -or
             -not $report.native_accessibility_read -or -not $report.foreground_verified -or -not $report.gui_input_observed -or
             -not $report.target_desktop_screenshot_saved -or $native.full_gui_acceptance -ne 'not-evaluated' -or $native.g1_passed -ne $false) { throw 'Original native GUI connectivity probe failed; see native-gui.json' }
+        $cliObservation.stop = $true
+        $null = Wait-Job -Job $cliObserver -Timeout 10
+        if ($cliObserver.State -cne 'Completed') { throw 'CLI image observer did not finish' }
+        $observations = @(Receive-Job -Job $cliObserver -ErrorAction Stop)
+        Remove-Job -Job $cliObserver
+        $cliObserver = $null
+        $report.cli_observation_diagnostics = @($report.cli_observation_diagnostics) + @($observations | Where-Object { $_.observation_error })
+        if (@($observations | Where-Object { $_.observation_error -ceq 'Running GUI CLI image differs' }).Count) { throw 'Observed GUI CLI image identity mismatch' }
+        $verifiedProcesses = @($observations | Where-Object { $_.lifetime_verified -eq $true })
+        $report.cli_processes = @($report.cli_processes) + $verifiedProcesses
+        if ($fullFixture -and $verifiedProcesses.Count -eq 0) { throw 'No live GUI-owned CLI image was verified; see observer diagnostics' }
         if ($publishedOnline) {
             $persistedPreferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
             $report.online_install.runtime_channel = $persistedPreferences.runtimeChannel
             if ($persistedPreferences.runtimeChannel -cne 'dev') { throw 'Fresh product preferences did not retain the default dev discovery channel' }
         }
-        if ($publishedOnline -and $OfflineAcceptance) {
+        if ($fullFixture -and $OfflineAcceptance) {
             if (-not $recoveryPhase -and -not $native.offline.recall_hit) { throw 'Published Client2 recall was not verified' }
             if ($phase -eq 'initial') {
                 $report.initial_native_gui = $native
@@ -668,6 +743,19 @@ public static class RespireGuiNative {
 } catch {
     $report.error = $_.Exception.Message
 } finally {
+    if ($cliObserver) {
+        try {
+            $cliObservation.stop = $true
+            $null = Wait-Job -Job $cliObserver -Timeout 10
+            if ($cliObserver.State -ne 'Completed') { Stop-Job -Job $cliObserver }
+            $report.cli_observation_diagnostics = @($report.cli_observation_diagnostics) + @(Receive-Job -Job $cliObserver -ErrorAction Stop)
+            Remove-Job -Job $cliObserver
+        } catch {
+            $report.cli_observer_cleanup_error = $_.Exception.Message
+            $report.cleanup_error = 'CLI image observer cleanup failed'
+            $report.status = 'failed'
+        }
+    }
     # Stop only the original process tree observed in this fresh hosted VM, with creation-time guards.
     try {
         Write-Output 'GUI probe: cleaning up tracked processes'

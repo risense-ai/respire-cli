@@ -1490,7 +1490,7 @@ function Assert-OfflineRecall([string]$Id, [string]$Title, [string]$Query) {
 function Invoke-ExistingKeysAcceptance {
     $report.offline = [ordered]@{status='failed'; runtime_bound=$false; runtime_normal_stop_confirmed=$false
         automatic_start=$false; automatic_key_handoff=$false; full_gui_acceptance='not-evaluated'; g1_passed=$false}
-    if (-not $binding.final_public_assets -or -not $binding.restart_memory) { throw 'Existing-key restart requires final public assets and the original synthetic memory' }
+    if ((-not $binding.final_public_assets -and -not $binding.verified_candidate_assets) -or -not $binding.restart_memory) { throw 'Existing-key restart requires final public assets and the original synthetic memory' }
     Wait-OfflinePreferences 'autoRuntime' $true
     Press-OfflineButton ([regex]::Unescape('^\u6982\u89c8$'))
     # Observe the automatic start; never press Start or call a CLI start/keygen command.
@@ -1565,7 +1565,7 @@ function Confirm-RecoveryMaterial {
 function Invoke-RecoveryMaterialAcceptance {
     $report.offline = @{} # Reuse guarded UI input diagnostics, not offline acceptance claims.
     $report.recovery = @{status='failed'; phase=$RecoveryPhase; unchecked_blocked=$false}
-    if (-not $binding.final_public_assets) { throw 'Recovery acceptance requires the final public products' }
+    if (-not $binding.final_public_assets -and -not $binding.verified_candidate_assets) { throw 'Recovery acceptance requires verified product bytes' }
     if ($RecoveryPhase -ceq 'verified') {
         $record = Read-RecoveryRecord
         if ($record.materialSaved -ne $true) { throw 'Saved recovery acknowledgement did not survive another restart' }
@@ -1709,7 +1709,7 @@ function Invoke-OfflineGuiAcceptance {
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bbe\u7f6e\u0024'))
     $report.offline.settings_inputs = @{}
     Set-OfflineAutoRuntime $true
-    if (-not $binding.final_public_assets) { Set-OfflineAutoRuntime $false }
+    if (-not $binding.final_public_assets -and -not $binding.verified_candidate_assets) { Set-OfflineAutoRuntime $false }
     $report.offline.settings_persisted = $true
     $report.offline.action_stage = 'runtime_pre_stop_check'
     $null = Assert-OfflineRuntime

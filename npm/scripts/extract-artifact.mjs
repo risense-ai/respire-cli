@@ -250,11 +250,11 @@ export async function consumePublishedTarget(spec, target, source, destination, 
   }
   const cli = JSON.parse(readFileSync(join(source,'cli',`cli-build-${target}.json`))), runtime = JSON.parse(readFileSync(join(source,'runtime',`runtime-build-${target}.json`)));
   validatePublishedMetadata(spec, target, cli, runtime);
-  const pin = await publishedSourceJSON(spec.cli, 'runtime-pin.json', options);
+  const pin = options.candidate ? JSON.parse(readFileSync('runtime-pin.json')) : await publishedSourceJSON(spec.cli, 'runtime-pin.json', options);
   validatePublishedCompatibility(spec, runtime, pin);
   const runtimeLock = (await publishedSourceJSON(spec.runtime, 'crates/core-sdk/core-sdk.lock.json', options)).targets?.[target];
   requireValue(runtimeLock, 'Published Runtime Core SDK lock missing');
-  const cliManifest = await publishedSourceJSON(spec.cli, 'npm/artifact-manifest.json', options);
+  const cliManifest = options.candidate ? JSON.parse(readFileSync('npm/artifact-manifest.json')) : await publishedSourceJSON(spec.cli, 'npm/artifact-manifest.json', options);
   requireValue(frontendLayout(cliManifest)
     && cliManifest.targets?.some(item => item.triple === target), 'Published CLI frontend manifest mismatch');
   mkdirSync(dirname(destination), {recursive: true});
@@ -280,7 +280,7 @@ export async function consumePublishedTarget(spec, target, source, destination, 
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},cli_artifact_layout:cli.artifact_layout,runtime_core:runtimeCore,
     producers:{cli:spec.cli.producer,runtime:spec.runtime.producer},
     cli_binary_sha256:cli.binary_sha256,runtime_binary_sha256:runtime.binary_sha256,runtime_bundle_sha256:runtime.archive_sha256};
-  writeFileSync(join(destination,'published-consumer-identity.json'),JSON.stringify(identity,null,2)+'\n');
+  writeFileSync(join(destination,options.candidate ? 'candidate-consumer-identity.json' : 'published-consumer-identity.json'),JSON.stringify(identity,null,2)+'\n');
   return {identity, env:{RSRS_ARTIFACT_SOURCE:'published-assets',RSRS_RUNTIME_BIN:resolve(runtimeBinary),
     RSRS_PUBLISHED_RUNTIME_SHA256:runtime.binary_sha256,RSRS_PUBLISHED_RUNTIME_VERSION:spec.runtime.version,
     RSRS_PUBLISHED_ASSETS_SHA256:manifestHash,RSRS_PUBLISHED_BUNDLE_SHA256:runtime.archive_sha256,
@@ -549,7 +549,7 @@ print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps,
                  'selected': sorted(select_upgrade_sources(sources, target, report['profile']))}))
 `], {cwd:new URL('../../scripts/',import.meta.url), input:JSON.stringify(report), encoding:'utf8', windowsHide:true}));
 }
-export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context) {
+export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2} = {}) {
   requireValue(sourcePattern.test(context.sha || '') && positiveID(context.run_id) && positiveID(context.run_attempt), 'Invalid full run identity');
   const processes = [], reports = [], historicalUpgrades = [];
   function job(predicate, label) {
@@ -572,7 +572,15 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   for (const target of targets) {
     job(j => j.name === `validate / Release (${target})`,target+' asset validation');
     job(j => j.name === `native-regression / Native (${target})`,target+' native');
-    const verified = read('published-assets-verification-'+target,'published-assets-receipt.json');
+    const verified = candidate ? read('candidate-assets-'+target,'candidate-assets-receipt.json') : read('published-assets-verification-'+target,'published-assets-receipt.json');
+    if(candidate) {
+      requireValue(verified.kind==='candidate-assets-verification' && JSON.stringify(verified.candidate)===JSON.stringify(candidate)
+        && verified.target===target && verified.manifest_sha256===manifestHash && verified.assets_verified===true && verified.payloads_verified===true
+        && JSON.stringify(verified.cli_assets)===JSON.stringify(publishedAssetNames('cli',target).map(name=>spec.cli.assets.find(a=>a.name===name)))
+        && verified.payload_identity?.cli_binary_sha256===spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256
+        && hashPattern.test(verified.payload_identity?.runtime_core?.sdk_manifest_expected_sha256||'')
+        && hashPattern.test(verified.payload_identity?.runtime_core?.sdk_archive_expected_sha256||''), 'Candidate asset/Core identity differs');
+    } else {
     requireValue(verified.assets_verified === true && verified.payloads_verified === true && !verified.error
       && verified.target === target && verified.manifest_sha256 === manifestHash && verified.harness_sha === context.sha
       && Number(verified.run_id) === context.run_id && Number(verified.run_attempt) === context.run_attempt
@@ -595,6 +603,14 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     'Full Runtime producer byte binding differs');
     const expectedAssets=['cli','runtime'].flatMap(kind=>publishedAssetNames(kind,target).map(name=>({repository:spec[kind].repository,...spec[kind].assets.find(a=>a.name===name)})));
     requireValue(Array.isArray(verified.assets) && verified.assets.length===expectedAssets.length && expectedAssets.every(a=>verified.assets.filter(b=>['repository','id','name','size','sha256'].every(k=>a[k]===b[k])).length===1), 'Full asset identities differ');
+    }
+    if(candidate) {
+      const binding=verified.runtime_producer,names=publishedAssetNames('runtime',target);
+      requireValue(binding?.run_id===spec.runtime.producer.run_id && binding.run_attempt===spec.runtime.producer.run_attempt
+        && binding.source_sha===spec.runtime.source_sha && binding.target===target
+        && ['metadata_sha256','binary_sha256','archive_sha256'].every((key,i)=>binding[key]===spec.runtime.assets.find(a=>a.name===names[i]).sha256)
+        && binding.artifacts?.length===2 && [`runtime-release-${target}`,`runtime-smoke-${target}`].every(name=>binding.artifacts.filter(a=>a.name===name&&positiveID(a.id)&&positiveID(a.job_id)&&hashPattern.test(a.zip_sha256)).length===1), 'Candidate Runtime producer byte binding differs');
+    }
     const native = read('resident-concurrency-'+target,'real-account-return-verification.json');
     requireValue(Array.isArray(native) && native.length === 1 && native[0].binary_sha256 === spec.cli.assets.find(a => a.name === publishedAssetNames('cli',target)[1]).sha256, 'Native report binary differs');
     processes.push(...validatePublishedProcessEvidence(native[0],spec,target,manifestHash));
@@ -604,7 +620,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     requireValue(Array.isArray(bounded) && bounded.length > 0 && bounded.every(r => r.passed === true), 'Fixture process bounds incomplete');
     const upgrades = read('published-upgrades-'+target,'published-upgrades.json');
     const full = upgrades.profile === 'full';
-    requireValue(upgrades.passed === true && ['critical','full'].includes(upgrades.profile)
+    requireValue(upgrades.passed === true && ['critical','full'].includes(upgrades.profile) && (!candidate || full)
       && upgrades.full_coverage === full && upgrades.all_published_sources_covered === full
       && upgrades.upgrade_contract === 'standalone-v1'
       && upgrades.target === target && upgrades.candidate_sha256 === native[0].binary_sha256
@@ -675,15 +691,18 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   const login = read('gnu-login-interruption','interruption-coverage.json'); identity(login,'x86_64-unknown-linux-gnu');
   requireValue(login.passed === true, 'GNU login interruption incomplete');
   job(j => j.name === 'validate / npm-dry-run','npm packaging');
-  const packages=read('npm-release-packages','published-package-validation.json');
+  const packages=read('npm-release-packages',candidate?'source-version.json':'published-package-validation.json');
   const expectedPackages=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
   const packageNames=[...expectedPackages.targets.map(t=>t.pkg),expectedPackages.npmScope];
-  requireValue(packageNames.length===targets.length+1 && packageNames.every(name=>packages.packages?.filter(p=>p.name===name).length===1) && packages.artifact_source==='published-assets' && packages.harness_sha===context.sha && packages.manifest_sha256===manifestHash
+  requireValue(packageNames.length===targets.length+1 && packageNames.every(name=>packages.packages?.filter(p=>p.name===name).length===1) && (candidate ? packages.git_sha===spec.cli.source_sha && packages.version===spec.cli.version
+    && packages.producer?.repository===spec.cli.repository && Number(packages.producer.run_id)===context.run_id && Number(packages.producer.run_attempt)===context.run_attempt && packages.producer.sha===context.sha && packages.producer.job==='npm-dry-run' : packages.artifact_source==='published-assets' && packages.harness_sha===context.sha && packages.manifest_sha256===manifestHash
     && packages.product_sources?.cli===spec.cli.source_sha && packages.product_sources?.runtime===spec.runtime.source_sha
-    && packages.run_id===context.run_id && packages.run_attempt===context.run_attempt
+    && packages.run_id===context.run_id && packages.run_attempt===context.run_attempt)
     && packages.packages?.length===targets.length+1 && new Set(packages.packages.map(p=>p.name)).size===targets.length+1
     && packages.packages.every(p=>p.version===spec.cli.version && hashPattern.test(p.sha256)), 'Published package validation differs');
   for(const packed of packages.packages) verifyFile(join(directory,'npm-release-packages'),{path:packed.file,sha256:packed.sha256});
+  const gui=read('client2-published-online-x86_64-pc-windows-msvc','report.json');
+  validateFullGUI(gui,spec,manifestHash,{candidate:Boolean(candidate),client2});
   job(j => j.name === 'api-smoke','API');
   const apiIdentity=read('dev-api-coverage','published-api-identity.json');
   requireValue(apiIdentity.harness_sha===context.sha && apiIdentity.manifest_sha256===manifestHash
@@ -694,11 +713,36 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
       && (name!=='dev-api-coverage.json' || api.cli_workflow_sha===context.sha)
       && apiIdentity.reports?.[name]===reports.at(-1).sha256, 'API coverage incomplete or stale');
   }
-  return {schema:1,kind:'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
+  return {schema:1,kind:candidate?'candidate-full':'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
     reports,actual_processes:processes,historical_upgrades:historicalUpgrades,
-    full_passed:historicalUpgrades.every(report => report.profile === 'full'),g1Passed:false,
-    limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms only; Client2 and real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against published metadata and exact-source SDK locks, not an independent private SDK archive download','npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
+    full_passed:historicalUpgrades.every(report => report.profile === 'full'),gui_passed:true,g1Passed:false,
+    limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms and the existing Windows Client2 GUI subset; real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against official metadata and exact-source SDK locks, not an independent private SDK archive download',candidate?'Candidate installation uses frozen local CLI and Runtime bytes; public-channel discovery remains postpublication evidence':'npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
+}
+export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2}={}) {
+  const target='x86_64-pc-windows-msvc';
+  requireValue(gui.status==='connectivity-passed' && gui.environment_ready===true && gui.cleanup_exit_confirmed===true && !gui.cleanup_error && !gui.error
+    && gui.cli_sha256===spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256
+    && gui.runtime_archive_sha256===spec.runtime.assets.find(a=>a.name===publishedAssetNames('runtime',target)[2]).sha256
+    && (gui.official_exe_verified===true || gui.source_candidate_verified===true)
+    && hashPattern.test(gui.exe_sha256||'') && sourcePattern.test(gui.source_sha||gui.source_candidate?.source_commit||'')
+    && gui.native_window_visible===true && gui.isolated_webview_bound===true && gui.native_accessibility_read===true
+    && gui.foreground_verified===true && gui.gui_input_observed===true && gui.target_desktop_screenshot_saved===true
+    && gui.restart?.completed===true && gui.restart.original_tree_absent===true
+    && gui.recovery?.status==='recovery-subset-passed' && gui.recovery.original_operation_not_repeated===true
+    && gui.recovery.saved_restart?.saved_restart_no_prompt===true, 'Missing successful real GUI/restart/recovery/cleanup evidence');
+  for(const r of [gui.initial_native_gui,gui.restart_native_gui])requireValue(r?.status==='native-connectivity-passed' && r.identity_verified===true
+    && r.offline?.status==='offline-subset-passed' && r.offline.recall_hit===true && r.offline.runtime_normal_stop_confirmed===true, 'GUI DB/recall acceptance incomplete');
+  requireValue(gui.restart_native_gui.offline.automatic_start===true && gui.restart_native_gui.offline.automatic_key_handoff===true, 'GUI restart key handoff incomplete');
+  if(client2)requireValue(sourcePattern.test(client2.source_sha||'') && gui.source_sha===client2.source_sha
+    && gui.release===client2.release && gui.official_exe_verified===true, 'GUI Client2 source/release differs from the selected product');
+  const cliHash=spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256;
+  for(const phase of ['initial','restart'])requireValue(gui.cli_processes?.some(p=>p.phase===phase && p.sha256===cliHash
+    && positiveID(p.pid) && positiveID(p.parent_pid) && typeof p.started_ticks==='string' && /^\d+$/.test(p.started_ticks)
+    && p.parent_verified===true && p.session_verified===true && p.lifetime_verified===true), 'GUI did not observe the actual CLI image');
+  const inputs=candidate?gui.candidate_inputs:gui.published_inputs;
+  requireValue(inputs?.manifest_sha256===manifestHash && inputs.cli_source===spec.cli.source_sha && inputs.runtime_source===spec.runtime.source_sha,'GUI input identity differs');
+  return gui;
 }
 async function completePublished(spec,targets,directory) {
   const context = {sha:process.env.GITHUB_SHA,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT)};
@@ -714,7 +758,7 @@ async function completePublished(spec,targets,directory) {
     if (jobs.length===batch.total_count) break;
     requireValue(batch.jobs.length>0 && jobs.length<batch.total_count,'Incomplete full job inventory');
   }
-  const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context);
+  const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context,{client2:{release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT}});
   requireValue(result.full_passed, 'Full acceptance requires full historical upgrade coverage');
   writeFileSync(join(directory,'published-full-result.json'),JSON.stringify(result,null,2)+'\n');
 }
@@ -779,6 +823,10 @@ async function main() {
     process.argv.splice(2,0,'--consume-published'); return main();
   }
   extractBuildArtifact();
+  if(process.env.ARTIFACT_SOURCE==='build' && process.env.VALIDATION_PROFILE==='full' && process.env.CANDIDATE_ASSETS) {
+    const {consumeCandidate}=await import('./candidate-artifact.mjs');
+    await consumeCandidate(resolve(process.argv[2]),resolve(process.argv[3]),process.env.CLI_TARGET);
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   await main();

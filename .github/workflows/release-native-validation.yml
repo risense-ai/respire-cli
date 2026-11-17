@@ -12,6 +12,9 @@ on:
       published_assets_sha256:
         default: ''
         type: string
+      candidate_assets:
+        default: ''
+        type: string
       ref:
         required: true
         type: string
@@ -42,6 +45,7 @@ permissions:
   contents: read
 
 env:
+  CANDIDATE_ASSETS: ${{ inputs.candidate_assets }}
   ARTIFACT_SOURCE: ${{ inputs.artifact_source || 'build' }}
   PUBLISHED_ASSETS: ${{ inputs.published_assets }}
   PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
@@ -208,22 +212,6 @@ jobs:
             key="$("$py" scripts/native-psutil-wheel-cache.py key)"
             echo "key=$key" >> "$GITHUB_OUTPUT"
           fi
-      - name: Verify OS autostart registration from published release bytes
-        if: inputs.artifact_source == 'published-assets' && inputs.validation_profile == 'full'
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
-          : "${RSRS_PUBLISHED_RUNTIME_ARCHIVE:?Verified published Runtime archive required}"
-          : "${RSRS_PUBLISHED_RUNTIME_VERSION:?Verified published Runtime version required}"
-          exe="target/ci/${{ matrix.target }}/release/rsrs"
-          py="$RUNNER_TEMP/upgrade-python/bin/python"
-          if [ "$RUNNER_OS" = Windows ]; then
-            exe="$exe.exe"
-            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
-          fi
-          "$py" scripts/test-runtime-autostart.py --binary "$exe" --register \
-            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"
       - name: Install and verify the official pinned standalone Runtime
         if: inputs.artifact_source != 'published-assets'
         id: pinned-runtime
@@ -268,11 +256,52 @@ jobs:
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync(cli), 'CLI cannot substitute for standalone Runtime');
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+          if (process.env.CANDIDATE_ASSETS) {
+            assert.equal(selected.sha256, process.env.RSRS_PUBLISHED_RUNTIME_SHA256);
+            assert.equal(selected.release.metadata_sha256, process.env.RSRS_PUBLISHED_RUNTIME_METADATA_SHA256);
+          }
           for (const [key, value] of Object.entries({path: runtime, sha256: selected.sha256, version: selected.version})) {
             assert.ok(!/[\r\n]/.test(value));
             appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
           }
           NODE
+      - name: Prepare hosted Linux user systemd for OS autostart
+        if: runner.os == 'Linux' && inputs.validation_profile == 'full'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$uid.service"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          busctl --user status org.freedesktop.systemd1
+          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+      - name: Verify OS autostart registration from verified release bytes
+        if: inputs.validation_profile == 'full'
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
+          : "${RSRS_PUBLISHED_RUNTIME_ARCHIVE:?Verified published Runtime archive required}"
+          : "${RSRS_PUBLISHED_RUNTIME_VERSION:?Verified published Runtime version required}"
+          exe="target/ci/${{ matrix.target }}/release/rsrs"
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          if [ "$RUNNER_OS" = Windows ]; then
+            exe="$exe.exe"
+            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+          fi
+          "$py" scripts/test-runtime-autostart.py --binary "$exe" --register \
+            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"
+      - uses: actions/upload-artifact@v4
+        if: inputs.artifact_source != 'published-assets' && inputs.validation_profile == 'full'
+        with:
+          name: candidate-assets-${{ matrix.target }}
+          path: target/ci/${{ matrix.target }}/release/candidate-assets-receipt.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Key the four fixed public model inputs
         id: model-key
         shell: bash
@@ -335,7 +364,7 @@ jobs:
           bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" "$NATIVE_RUNTIME_SHA256" "$NATIVE_RUNTIME_VERSION"
           "$exe" --runtime-internal --stop --json
       - name: Verify selected Client2 installation and the existing GUI subset
-        if: inputs.artifact_source == 'published-assets' && matrix.target == 'x86_64-pc-windows-msvc'
+        if: inputs.validation_profile == 'full' && matrix.target == 'x86_64-pc-windows-msvc'
         timeout-minutes: 35
         shell: pwsh
         env:
@@ -360,7 +389,7 @@ jobs:
             -OutputDirectory "$env:RUNNER_TEMP/published-client2-gui" `
             -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/release-probe/models/bge-m3"
       - uses: actions/upload-artifact@v4
-        if: always() && inputs.artifact_source == 'published-assets' && matrix.target == 'x86_64-pc-windows-msvc'
+        if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-pc-windows-msvc'
         with:
           retention-days: 1
           name: client2-published-online-${{ matrix.target }}
