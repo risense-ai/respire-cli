@@ -6,13 +6,16 @@ param(
     [Parameter(Mandatory)][string]$OutputDirectory,
     [switch]$OfflineAcceptance,
     [string]$OfflineModelDirectory,
+    [Parameter(Mandatory,ParameterSetName='CoreQuery')][switch]$CoreConfigQuery,
+    [Parameter(Mandatory,ParameterSetName='CoreQuery')][string]$CoreQueryInputs,
+    [Parameter(Mandatory,ParameterSetName='CoreQuery')][string]$SealedClient2Directory,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][switch]$SourceCandidate,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Exe,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Manifest,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Commit,
     [Parameter(Mandatory,ParameterSetName='Official')][string]$Client2Release,
     [Parameter(Mandatory,ParameterSetName='DesktopCandidate')][string]$Client2CandidateRunId,
-    [Parameter(Mandatory,ParameterSetName='Official')][Parameter(Mandatory,ParameterSetName='DesktopCandidate')][string]$Client2Commit
+    [Parameter(Mandatory,ParameterSetName='Official')][Parameter(Mandatory,ParameterSetName='DesktopCandidate')][Parameter(Mandatory,ParameterSetName='CoreQuery')][string]$Client2Commit
 )
 $ErrorActionPreference = 'Stop'
 $publishedAssets = $env:ARTIFACT_SOURCE -ceq 'published-assets'
@@ -54,6 +57,8 @@ if (-not $root.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or 
 New-Item -ItemType Directory -Path $root | Out-Null
 $desktopProcess = $null
 $accountFixture = $null
+$coreProxy = $null
+$coreRuntimeRecord = $null
 $tracked = @()
 function Assert-SourceClient2Manifest($Manifest, [string]$ExpectedCommit, [string]$RunId, [string]$RunAttempt, [string]$Job) {
     $keys=@('schema_version','mode','repository','source_commit','platform','exe_file','exe_sha256','build_version','build_command','run_id','run_attempt','job')
@@ -286,7 +291,25 @@ public static class RespireGuiNative {
     }
     $report.environment_ready = $true
     $exe = Join-Path $root 'respire-windows-amd64.exe'
-    if ($SourceCandidate) {
+    if ($CoreConfigQuery) {
+        if ($OfflineAcceptance -or $publishedAssets -or $candidateAssets -or $RuntimeVersion -cne '2.0.0-dev.24') { throw 'Core query is a separate real Runtime24 diagnostic' }
+        $queryInputs = Get-Content -Raw -LiteralPath $CoreQueryInputs | ConvertFrom-Json
+        $sealedManifestPath = Join-Path $SealedClient2Directory 'candidate.json'
+        $sealed = Get-Content -Raw -LiteralPath $sealedManifestPath | ConvertFrom-Json
+        $sourceExe = Join-Path $SealedClient2Directory 'respire-windows-amd64.exe'
+        if ($queryInputs.schema -ne 1 -or $queryInputs.mode -cne 'core-query-diagnostic-inputs' -or
+            $queryInputs.harness_sha -cne $env:GITHUB_SHA -or $queryInputs.client2_source -cne $Client2Commit -or
+            $sealed.source -cne $Client2Commit -or $sealed.version -cne '2.0.0-dev.17' -or
+            (Get-FileHash -LiteralPath $sealedManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $queryInputs.client2_manifest_sha256 -or
+            (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sealed.files.'respire-windows-amd64.exe'.sha256) { throw 'Sealed desktop/input binding differs' }
+        Copy-Item -LiteralPath $sourceExe -Destination $exe
+        if ((Get-Item -LiteralPath $exe).Length -ne $sealed.files.'respire-windows-amd64.exe'.size -or
+            (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sealed.files.'respire-windows-amd64.exe'.sha256) { throw 'Copied sealed executable differs' }
+        $report.scope = 'real WebView core-config original-query diagnostic only'
+        $report.diagnostic_only = $true; $report.core_test_mode = $false
+        $report.exe_sha256 = $sealed.files.'respire-windows-amd64.exe'.sha256
+        $report.core_query_inputs = $queryInputs
+    } elseif ($SourceCandidate) {
         if (-not $OfflineAcceptance) { throw 'Source candidate requires the complete offline GUI subset' }
         $manifest=Copy-SourceClient2Candidate $SourceClient2Exe $SourceClient2Manifest $SourceClient2Commit $exe
         $report.scope='source Client2 Windows GUI subset; not official asset or release acceptance'
@@ -304,6 +327,8 @@ public static class RespireGuiNative {
     $archivePath = (Resolve-Path -LiteralPath $RuntimeArchive).Path
     $report.cli_sha256 = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.runtime_archive_sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($CoreConfigQuery -and ($report.cli_sha256 -cne $queryInputs.cli_sha256 -or
+        $report.runtime_archive_sha256 -cne $queryInputs.runtime_archive_sha256)) { throw 'Verified CLI/Runtime input bytes differ' }
     $candidateProofPath = Join-Path (Split-Path $archivePath) 'candidate-source.json'
     if (Test-Path -LiteralPath $candidateProofPath) {
         if ((Get-Item -LiteralPath $candidateProofPath).Length -gt 65536) { throw 'Candidate provenance exceeds its bound' }
@@ -391,6 +416,12 @@ public static class RespireGuiNative {
 '@
     $preferencesPath = Join-Path $taskProfile 'client2/preferences.json'
     $preferencesJson | Set-Content -LiteralPath $preferencesPath -Encoding utf8NoBOM
+    if ($CoreConfigQuery) {
+        $queryPreferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
+        $queryPreferences.onboardingCompleted = $true
+        $queryPreferences | Add-Member -NotePropertyName language -NotePropertyValue 'zh'
+        $queryPreferences | ConvertTo-Json | Set-Content -LiteralPath $preferencesPath -Encoding utf8NoBOM
+    }
     $report.original_client_preferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
     function Free-Port {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -409,6 +440,7 @@ public static class RespireGuiNative {
     $childEnv['RSRS_DATA_DIR'] = $taskProfile; $childEnv['RSRS_BIN_DIR'] = Join-Path $taskProfile 'bin'
     $childEnv['RSRS_RPC_PORT'] = "$rpcPort"; $childEnv['RSRS_INSTANCE_ID'] = [Guid]::NewGuid().ToString('N')
     $childEnv['RSRS_CORE_TEST_MODE'] = '1'; $childEnv['RSRS_NO_AUTOSYNC'] = '1'; $childEnv['RSRS_UPDATE_CHECK'] = '0'
+    if ($CoreConfigQuery) { $childEnv.Remove('RSRS_CORE_TEST_MODE') }
     function Child-Start([string]$file, [string[]]$argv, [switch]$CaptureOutput, [switch]$CaptureInput) {
         $start = [Diagnostics.ProcessStartInfo]::new($file)
         $start.UseShellExecute = $false; $start.WorkingDirectory = $root
@@ -482,6 +514,30 @@ public static class RespireGuiNative {
         Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
     }
     Write-Output 'GUI probe: Runtime installed'
+    if ($CoreConfigQuery) {
+        if ($selection.sha256 -cne $queryInputs.runtime_binary_sha256 -or
+            (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $queryInputs.runtime_binary_sha256) { throw 'Real installed Runtime image differs' }
+        # Fresh profile: no preparation setter. The native helper verifies the
+        # initial selection before issuing the single live GUI save.
+        $startRuntime = Child-Start (Join-Path $taskProfile 'bin/rsrs.exe') @('--json','runtime','start') -CaptureOutput
+        $startOut = $startRuntime.StandardOutput.ReadToEndAsync(); $startErr = $startRuntime.StandardError.ReadToEndAsync()
+        if (-not $startRuntime.WaitForExit(60000)) { $startRuntime.Kill(); $startRuntime.WaitForExit(); throw 'Real Runtime startup timed out' }
+        $startOut.GetAwaiter().GetResult() | Out-Null; $startErr.GetAwaiter().GetResult() | Out-Null
+        if ($startRuntime.ExitCode -ne 0) { throw 'Real Runtime startup failed' }
+        $directHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$rpcPort/api/health" -Headers @{'X-Respire-Health'='runtime-v1'} -TimeoutSec 10
+        $coreRuntimeRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$($directHealth.pid)"
+        if (-not $coreRuntimeRecord -or -not [string]::Equals($coreRuntimeRecord.ExecutablePath,(Join-Path $managed 'rsrs-runtime.exe'),[StringComparison]::OrdinalIgnoreCase)) { throw 'Cannot bind real Runtime cleanup actor' }
+        $directPort = $rpcPort
+        $readyPath = Join-Path $root 'core-query-proxy-ready.json'
+        $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+        $coreProxy = Child-Start $python @((Join-Path $PSScriptRoot 'dev-core-config-query-fixture.py'),'serve','--port',"$rpcPort",'--profile',$taskProfile,
+            '--image',(Join-Path $managed 'rsrs-runtime.exe'),'--image-sha256',$queryInputs.runtime_binary_sha256,'--ready',$readyPath)
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $readyPath) -and $clock.Elapsed.TotalSeconds -lt 15 -and -not $coreProxy.HasExited) { Start-Sleep -Milliseconds 100 }
+        $queryProxy = Get-Content -Raw -LiteralPath $readyPath | ConvertFrom-Json
+        $rpcPort = ([uri]$queryProxy.address).Port
+        $childEnv['RSRS_RPC_PORT'] = "$rpcPort"
+    }
     if ($candidateProof -and (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $candidateProof.binary_sha256) {
         throw 'Installed candidate binary differs from the frozen original archive'
     }
@@ -504,6 +560,7 @@ public static class RespireGuiNative {
         $childEnv['RSRS_M3_DIR'] = $modelRoot; $childEnv['RSRS_ENGINE'] = 'cpu'
     }
     $phases = if ($fullFixture -and $OfflineAcceptance) { @('initial','restart','recovery-issue','recovery-resume','recovery-verified') } else { @('initial') }
+    if ($CoreConfigQuery) { $phases = @('core-issue','core-resume') }
     foreach ($phase in $phases) {
         $recoveryPhase = $phase.StartsWith('recovery-', [StringComparison]::Ordinal)
         if ($phase -ceq 'recovery-issue') {
@@ -642,7 +699,19 @@ public static class RespireGuiNative {
             if ($phase -in @('recovery-resume','recovery-verified')) { $report.native_binding.recovery_request = $report.recovery.request }
         }
         $bindingPath = Join-Path $root 'native-binding.json'
-        $report.native_binding | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
+        if ($CoreConfigQuery) {
+            $report.native_binding.core_query = @{phase=$phase; address=$queryProxy.address}
+            $report.native_binding.cli_exe = Join-Path $taskProfile 'bin/rsrs.exe'
+            $report.native_binding.cli_sha256 = $report.cli_sha256
+        }
+        $driverBinding = @{}
+        foreach ($key in $report.native_binding.Keys) { $driverBinding[$key] = $report.native_binding[$key] }
+        if ($CoreConfigQuery) {
+            # Private binding/control files are never selected by the upload.
+            # Keep control credentials out of the report's native_binding.
+            $driverBinding.core_query = @{phase=$phase; address=$queryProxy.address; control_file=$readyPath}
+        }
+        $driverBinding | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
         Write-Output 'GUI probe: window and WebView bound'
         $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
         $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
@@ -651,10 +720,11 @@ public static class RespireGuiNative {
         if ($phase -eq 'restart') { $helperArgs += '-ExistingKeys' }
         if ($recoveryPhase) { $helperArgs += @('-RecoveryPhase', $phase.Substring('recovery-'.Length)) }
         if ($client2Candidate) { $helperArgs += '-SourceCandidateStability' }
+        if ($CoreConfigQuery) { $helperArgs += '-CoreConfigQuery' }
         Write-Output 'GUI probe: starting UI Automation helper'
         $driver = Child-Start $systemPowerShell $helperArgs
         Write-Output 'GUI probe: UI Automation helper started'
-        $helperDeadline = if ($OfflineAcceptance) { 360000 } else { 45000 }
+        $helperDeadline = if ($OfflineAcceptance -or $CoreConfigQuery) { 360000 } else { 45000 }
         if (-not $driver.WaitForExit($helperDeadline)) {
             Write-Output 'GUI probe: UI Automation helper timed out; stopping helper'
             $driver.Kill($true); throw 'System UI Automation helper timed out'
@@ -675,6 +745,14 @@ public static class RespireGuiNative {
         if ($driver.ExitCode -ne 0 -or $native.status -ne 'native-connectivity-passed' -or -not $native.identity_verified -or
             -not $report.native_accessibility_read -or -not $report.foreground_verified -or -not $report.gui_input_observed -or
             -not $report.target_desktop_screenshot_saved -or $native.full_gui_acceptance -ne 'not-evaluated' -or $native.g1_passed -ne $false) { throw 'Original native GUI connectivity probe failed; see native-gui.json' }
+        if ($CoreConfigQuery) {
+            if ($native.core_query.status -cne ($phase + '-passed')) { throw 'Core query phase failed' }
+            Copy-Item -LiteralPath (Join-Path $root 'native-gui.json') -Destination (Join-Path $root "$phase.json")
+            if ($phase -ceq 'core-issue') {
+                $report.core_query_original = $native.core_query.transaction
+            } elseif (($native.core_query.transaction | ConvertTo-Json -Compress -Depth 6) -cne
+                ($report.core_query_original | ConvertTo-Json -Compress -Depth 6)) { throw 'Restart changed RequestBound identity' }
+        }
         $cliObservation.stop = $true
         $null = Wait-Job -Job $cliObserver -Timeout 10
         if ($cliObserver.State -cne 'Completed') { throw 'CLI image observer did not finish' }
@@ -686,6 +764,12 @@ public static class RespireGuiNative {
         $verifiedProcesses = @($observations | Where-Object { $_.lifetime_verified -eq $true })
         $report.cli_processes = @($report.cli_processes) + $verifiedProcesses
         if ($fullFixture -and $verifiedProcesses.Count -eq 0) { throw 'No live GUI-owned CLI image was verified; see observer diagnostics' }
+        if ($CoreConfigQuery -and $phase -ceq 'core-issue') {
+            $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
+            foreach ($item in $tracked) { Stop-TrackedOwned $item }
+            foreach ($item in $tracked) { if (-not (Confirm-TrackedAbsent $item)) { throw 'Original desktop survived core query restart' } }
+            $tracked = @()
+        }
         if ($publishedOnline) {
             $persistedPreferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
             $report.online_install.runtime_channel = $persistedPreferences.runtimeChannel
@@ -813,6 +897,50 @@ public static class RespireGuiNative {
             if (-not $accountFixture.HasExited) { $accountFixture.Kill($true); $accountFixture.WaitForExit() }
         } catch { $report.cleanup_error = 'Loopback account fixture cleanup failed'; $report.cleanup_exit_confirmed = $false }
         $accountFixture.Dispose()
+    }
+    if ($CoreConfigQuery) {
+        if ($report.status -ceq 'connectivity-passed') {
+            try {
+                $finalQuery = Invoke-RestMethod -Uri ($queryProxy.address + '/__fixture') -Headers @{'X-Fixture-Control'=$queryProxy.nonce} -TimeoutSec 10
+                $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope')
+                $actualKeys = @($finalQuery.PSObject.Properties.Name)
+                if ($actualKeys.Count -ne $publicKeys.Count -or @($actualKeys | Where-Object { $_ -cnotin $publicKeys }).Count) { throw 'Forwarding proof has non-public fields' }
+                if (@($finalQuery.errors).Count -or @($finalQuery.apply_ids).Count -ne 1 -or $finalQuery.dropped_apply_replies -ne 1 -or
+                    $finalQuery.result_issued -ne @($finalQuery.result_ids).Count -or $finalQuery.result_forwarded -ne $finalQuery.result_issued -or
+                    $finalQuery.result_response_lost -lt 1 -or $finalQuery.result_response_lost -ge $finalQuery.result_forwarded -or
+                    @($finalQuery.result_ids).Count -lt 2 -or @($finalQuery.result_ids | Where-Object { $_ -cne $report.core_query_original.operation_id }).Count) { throw 'Final forwarding evidence is not one original apply with original-only result queries' }
+                $report.core_query_final_counts = $finalQuery
+            } catch { $report.core_query_evidence_error = $_.Exception.Message; $report.status = 'failed' }
+        }
+        try {
+            if (-not $coreRuntimeRecord) { throw 'Real Runtime cleanup identity was not established' }
+            $currentRuntime = Get-CimInstance Win32_Process -Filter "ProcessId=$($coreRuntimeRecord.ProcessId)"
+            if (-not $currentRuntime -or -not (Test-TrackedCreationIdentity $currentRuntime $coreRuntimeRecord)) { throw 'Real Runtime identity changed before drain' }
+            $live = Invoke-RestMethod -Uri "http://127.0.0.1:$directPort/api/health" -Headers @{'X-Respire-Health'='runtime-v1'} -TimeoutSec 10
+            foreach ($key in @('pid','process_start_id','image_sha256','installation_id','account_id','instance_id','generation')) {
+                if ($live.$key -cne $directHealth.$key) { throw 'Real Runtime owner changed before drain' }
+            }
+            $stopBody = @{installation_id=$live.installation_id;instance_id=$live.instance_id;account_id=$live.account_id;generation=$live.generation}
+            $stopped = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$directPort/api/runtime/stop" -ContentType 'application/json' -Headers @{'X-Respire-Lifecycle'='coordinator-v1'} -Body ($stopBody | ConvertTo-Json -Compress) -TimeoutSec 10
+            if (-not $stopped.ok) { throw 'Real Runtime drain request failed' }
+            $draining = Get-Process -Id $coreRuntimeRecord.ProcessId -ErrorAction SilentlyContinue
+            if ($draining -and -not $draining.WaitForExit(10000)) { throw 'Real Runtime drain did not exit' }
+            if (-not (Confirm-TrackedAbsent $coreRuntimeRecord)) { throw 'Real Runtime survived drain' }
+            $receipt = Get-Content -Raw -LiteralPath (Join-Path $taskProfile "runtime/stop-$($live.instance_id).json") | ConvertFrom-Json
+            if ($receipt.state -cne 'drained' -or @($receipt.unfinished).Count) { throw 'Real Runtime drain has unfinished work' }
+            foreach ($key in @('pid','process_start_id','image_sha256','installation_id','account_id','instance_id','generation')) {
+                if ($receipt.$key -cne $live.$key) { throw 'Real Runtime stop receipt identity differs' }
+            }
+            $report.core_query_drain_verified = $true
+        } catch { $report.cleanup_error = $_.Exception.Message; $report.cleanup_exit_confirmed = $false }
+        finally {
+            if ($coreProxy) {
+                try {
+                    if (-not $coreProxy.HasExited) { $coreProxy.Kill(); $coreProxy.WaitForExit() }
+                    $coreProxy.Dispose()
+                } catch { $report.cleanup_error = 'Real forwarding helper cleanup failed'; $report.cleanup_exit_confirmed = $false }
+            }
+        }
     }
     Save-Report
 }

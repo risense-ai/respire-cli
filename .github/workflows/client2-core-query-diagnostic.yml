@@ -1,0 +1,152 @@
+name: Client2 real WebView core-query diagnostic
+on:
+  workflow_dispatch:
+    inputs:
+      cli_candidate:
+        description: Exact final CLI19 candidate JSON (including official Runtime24 identity)
+        type: string
+        required: true
+      cli_candidate_sha256:
+        description: SHA256 of the exact cli_candidate input bytes
+        type: string
+        required: true
+      cli_artifact_id:
+        description: Original Windows amd64 CLI Actions artifact ID
+        type: string
+        required: true
+      cli_artifact_digest:
+        description: Original artifact ZIP digest, sha256 followed by colon and 64 hex
+        type: string
+        required: true
+      client2_run_id:
+        description: Successful trusted main sealed Desktop candidate producer
+        type: string
+        required: true
+      client2_attempt:
+        type: string
+        required: true
+      client2_source:
+        description: Exact Client217 candidate source SHA
+        type: string
+        required: true
+      client2_artifact_id:
+        type: string
+        required: true
+      client2_artifact_digest:
+        description: External sealed ZIP digest, sha256 followed by colon and 64 hex
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  windows-core-query:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify and consume sealed Client217 without rebuilding
+        shell: pwsh
+        env:
+          SEALED_RUN: ${{ inputs.client2_run_id }}
+          SEALED_ATTEMPT: ${{ inputs.client2_attempt }}
+          SEALED_SOURCE: ${{ inputs.client2_source }}
+          SEALED_ID: ${{ inputs.client2_artifact_id }}
+          SEALED_DIGEST: ${{ inputs.client2_artifact_digest }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($value in @($env:SEALED_RUN,$env:SEALED_ATTEMPT,$env:SEALED_ID)) {
+            if ($value -cnotmatch '^[1-9][0-9]*$') { throw 'Exact positive producer IDs required' }
+          }
+          python scripts/dev-core-config-query-fixture.py sealed --run-id $env:SEALED_RUN --attempt $env:SEALED_ATTEMPT --source $env:SEALED_SOURCE --artifact-id $env:SEALED_ID --artifact-digest $env:SEALED_DIGEST --output "$env:RUNNER_TEMP/sealed-client2"
+          if ($LASTEXITCODE -ne 0) { throw 'Sealed candidate validation failed' }
+      - name: Verify original CLI19 bytes and official Runtime24 using existing consumers
+        shell: bash
+        env:
+          CLI_CANDIDATE: ${{ inputs.cli_candidate }}
+          CLI_CANDIDATE_HASH: ${{ inputs.cli_candidate_sha256 }}
+          CLI_ARTIFACT_ID: ${{ inputs.cli_artifact_id }}
+          CLI_ARTIFACT_DIGEST: ${{ inputs.cli_artifact_digest }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {readFileSync,writeFileSync,mkdirSync,openSync,closeSync} from 'node:fs';
+          import {join} from 'node:path';
+          import {execFileSync} from 'node:child_process';
+          import {validateCandidate,candidateHash} from './npm/scripts/candidate-artifact.mjs';
+          import {publishedAssetNames,inspectPublishedRelease,inspectRuntimeProducer,downloadPublishedAsset,consumePublishedTarget} from './npm/scripts/extract-artifact.mjs';
+          const e=process.env, sha=b=>createHash('sha256').update(b).digest('hex');
+          const api=p=>JSON.parse(execFileSync('gh',['api',p],{encoding:'utf8'}));
+          assert.equal(sha(e.CLI_CANDIDATE),e.CLI_CANDIDATE_HASH);
+          const raw=JSON.parse(e.CLI_CANDIDATE),source=raw.source;
+          const candidate=validateCandidate(raw,{CLI_SHA:source.sha,CLI_VERSION:'2.0.0-dev.19',GITHUB_SHA:source.sha,GITHUB_RUN_ID:String(source.run_id),GITHUB_RUN_ATTEMPT:String(source.run_attempt)});
+          assert.equal(candidate.runtime.version,'2.0.0-dev.24');
+          const run=api(`repos/risense-ai/respire-cli/actions/runs/${source.run_id}`);
+          const wf=api('repos/risense-ai/respire-cli/actions/workflows/release.yml');
+          assert.equal(run.repository.full_name,'risense-ai/respire-cli');assert.equal(run.head_repository.full_name,'risense-ai/respire-cli');
+          assert.equal(run.workflow_id,wf.id);assert.equal(run.path,'.github/workflows/release.yml');
+          assert.equal(run.event,'workflow_dispatch');assert.equal(run.head_branch,'main');assert.equal(run.head_sha,source.sha);
+          assert.equal(run.run_attempt,source.run_attempt);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+          for(const path of ['runtime-pin.json','npm/artifact-manifest.json']) {
+            const body=api(`repos/risense-ai/respire-cli/contents/${path}?ref=${source.sha}`);
+            assert.deepEqual(JSON.parse(Buffer.from(body.content,'base64')),JSON.parse(readFileSync(path)),'Harness consumer contract differs from selected CLI source');
+          }
+          assert.match(e.CLI_ARTIFACT_ID,/^[1-9][0-9]*$/);assert.match(e.CLI_ARTIFACT_DIGEST,/^sha256:[a-f0-9]{64}$/);
+          const target='x86_64-pc-windows-msvc', artifact=api(`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}`);
+          assert.equal(artifact.name,`cli-release-${target}`);assert.equal(artifact.expired,false);
+          assert.equal(artifact.workflow_run.id,source.run_id);assert.equal(artifact.workflow_run.head_sha,source.sha);assert.equal(artifact.digest,e.CLI_ARTIFACT_DIGEST);
+          const root=join(e.RUNNER_TEMP,'core-query-assets');mkdirSync(root);mkdirSync(join(root,'cli'));mkdirSync(join(root,'runtime'));
+          const zip=join(root,'cli.zip'), fd=openSync(zip,'wx');
+          try{execFileSync('gh',['api',`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}/zip`],{stdio:['ignore',fd,'inherit']});}finally{closeSync(fd);}
+          assert.equal('sha256:'+sha(readFileSync(zip)),artifact.digest);assert.equal(readFileSync(zip).length,artifact.size_in_bytes);
+          const names=publishedAssetNames('cli',target);
+          execFileSync('python',['-c',"import json,sys,zipfile,stat; z=zipfile.ZipFile(sys.argv[1]); es=z.infolist(); names=json.loads(sys.argv[3]); assert len(es)==len(names) and {e.filename for e in es}==set(names) and all(not stat.S_ISLNK(e.external_attr>>16) for e in es); z.extractall(sys.argv[2])",zip,join(root,'cli'),JSON.stringify(names)]);
+          const assets=names.map(name=>{const bytes=readFileSync(join(root,'cli',name));return {name,size:bytes.length,sha256:sha(bytes)};});
+          const spec={runtime:candidate.runtime,cli:{repository:source.repository,source_sha:source.sha,version:source.version,producer:{run_id:source.run_id,run_attempt:source.run_attempt},assets}};
+          const options={token:e.GH_TOKEN,candidate:true};
+          await inspectPublishedRelease(spec.runtime,options);await inspectRuntimeProducer(spec.runtime,target,options);
+          for(const name of publishedAssetNames('runtime',target))await downloadPublishedAsset(spec.runtime,spec.runtime.assets.find(a=>a.name===name),join(root,'runtime'),options);
+          const consumed=await consumePublishedTarget(spec,target,root,join(root,'consumed'),candidateHash(candidate),options);
+          const sealed=JSON.parse(readFileSync(join(e.RUNNER_TEMP,'sealed-client2.json')));
+          const proof={schema:1,mode:'core-query-diagnostic-inputs',diagnostic_only:true,full_passed:false,harness_sha:e.GITHUB_SHA,
+            client2_source:sealed.source,client2_manifest_sha256:sealed.manifest_sha256,client2:sealed,cli_candidate:candidate,
+            cli_artifact:{id:artifact.id,digest:artifact.digest},cli_sha256:consumed.identity.cli_binary_sha256,
+            runtime_archive_sha256:consumed.identity.runtime_bundle_sha256,runtime_binary_sha256:consumed.identity.runtime_binary_sha256};
+          writeFileSync(join(root,'input-proof.json'),JSON.stringify(proof,null,2));
+          NODE
+      - name: Run only real WebView original-query issue and restart
+        shell: pwsh
+        env:
+          CLIENT2_SOURCE: ${{ inputs.client2_source }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = Get-Content -Raw "$env:RUNNER_TEMP/core-query-assets/runtime/runtime-build-x86_64-pc-windows-msvc.json" | ConvertFrom-Json
+          ./scripts/probe-client2-gui.ps1 -CoreConfigQuery -CoreQueryInputs "$env:RUNNER_TEMP/core-query-assets/input-proof.json" -SealedClient2Directory "$env:RUNNER_TEMP/sealed-client2" -Client2Commit $env:CLIENT2_SOURCE -Cli "$env:RUNNER_TEMP/core-query-assets/consumed/rsrs.exe" -RuntimeArchive (Join-Path "$env:RUNNER_TEMP/core-query-assets/runtime" $metadata.archive_file) -RuntimeVersion '2.0.0-dev.24' -OutputDirectory "$env:RUNNER_TEMP/core-query-gui"
+          if ($LASTEXITCODE -ne 0) { throw 'Real core-query diagnostic failed; do not replay the unknown operation' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: client2-core-query-diagnostic-${{ github.run_attempt }}
+          retention-days: 1
+          path: |
+            ${{ runner.temp }}/core-query-assets/input-proof.json
+            ${{ runner.temp }}/sealed-client2.json
+            ${{ runner.temp }}/core-query-gui/report.json
+            ${{ runner.temp }}/core-query-gui/core-issue.json
+            ${{ runner.temp }}/core-query-gui/core-resume.json
+            ${{ runner.temp }}/core-query-gui/native-gui.json
+            ${{ runner.temp }}/core-query-gui/core-issue-unknown.png
+            ${{ runner.temp }}/core-query-gui/core-resume-unknown.png
+            ${{ runner.temp }}/core-query-gui/core-applied.png
+          if-no-files-found: warn

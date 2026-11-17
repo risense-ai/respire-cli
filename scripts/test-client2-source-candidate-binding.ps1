@@ -175,3 +175,47 @@ try {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force
 }
 Write-Host 'PASS: explicit release/source/Desktop candidate inputs and authenticated candidate provenance'
+
+# Exercise the actual public/private binding split without launching a product.
+$report = @{native_binding=@{core_query=@{phase='core-issue';address='http://127.0.0.1:1'}}}
+$CoreConfigQuery = $true; $phase='core-issue'; $queryProxy=@{address='http://127.0.0.1:1';nonce='private-control-canary'}
+$readyPath='private-control-file-not-uploaded'
+$publicBinding = @($ast.FindAll({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left.Extent.Text -ceq '$report.native_binding.core_query'},$true))
+if ($publicBinding.Count -ne 1) { throw 'Public query binding is not explicit' }
+. ([scriptblock]::Create($publicBinding[0].Extent.Text))
+$bindingStatements = @($ast.FindAll({param($node)
+    ($node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$driverBinding') -or
+    ($node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Extent.Text.StartsWith('foreach ($key in $report.native_binding.Keys)')) -or
+    ($node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.Contains('$driverBinding.core_query ='))
+},$true))
+if ($bindingStatements.Count -ne 3) { throw 'Private binding split is not explicit' }
+. ([scriptblock]::Create(($bindingStatements.Extent.Text -join "`n")))
+$public = $report | ConvertTo-Json -Depth 8
+if ($public.Contains('nonce') -or $public.Contains('private-control-canary') -or $public.Contains($readyPath) -or
+    $driverBinding.core_query.control_file -cne $readyPath -or $driverBinding.core_query.ContainsKey('nonce')) { throw 'Private control escaped into public binding' }
+
+$forwarder = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'dev-core-config-query-fixture.py')
+$handler = $forwarder.Substring($forwarder.IndexOf('        def handle_request(self):'))
+$ordering = @('connection.request(self.command', 'state["result_forwarded"] += 1', 'response = connection.getresponse()',
+    'data, status = response.read(), response.status', 'if result and drop_result_reply:', "state['result_response_lost'] += 1")
+$last=-1
+foreach ($step in $ordering) {
+    $index=$handler.IndexOf($step)
+    if ($index -le $last) { throw 'Result fault must forward/read the real response before reporting loss' }
+    $last=$index
+}
+if ($handler.Substring(0,$handler.IndexOf('connection.request(self.command')).Contains('self.close_reply()')) { throw 'Result is cut off before real forwarding' }
+$snapshot = [regex]::Match($forwarder,'(?s)    def snapshot\(\):.*?(?=    class Handler)').Value
+foreach ($field in @('result_issued','result_forwarded','result_response_lost','operation_id','scope')) {
+    if (-not $snapshot.Contains("'$field'")) { throw 'Public result proof counter/identity is missing' }
+}
+if ($snapshot.Contains('nonce') -or $snapshot.Contains('owner') -or $snapshot.Contains('json.dumps(state)')) { throw 'Proxy proof serializes private state wholesale' }
+$nativeSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')
+if ($nativeSource.Contains('$binding.core_query.nonce') -or -not $nativeSource.Contains('$script:coreQueryControl.nonce') -or
+    -not $nativeSource.Contains("throw 'Forwarding proof has non-public fields'")) { throw 'Native control/private-proof separation changed' }
+$workflow = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '../.github/workflows/client2-core-query-diagnostic.yml')
+foreach ($private in @('native-binding.json','core-query-proxy-ready.json','core-query-gui/**','core-query-gui/*')) {
+    if ($workflow.Contains($private)) { throw 'Diagnostic upload includes private fixture control files' }
+}
+Write-Host 'PASS: real result forward/read/loss ordering and private control/public proof separation (static fixture checks only)'
