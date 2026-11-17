@@ -167,6 +167,7 @@ class Smoke:
             stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
                 cwd=self.root, env=env, capture_output=True, timeout=60)
             require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
+            self.last_runtime_stop = stopped.returncode
         if output.returncode != 0:
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "stage": self.report.get("stage"), "error": self.redacted_cli_error(env, output)}
@@ -358,6 +359,9 @@ class Smoke:
         active = self.cli(env, "remember", plaintext, "--title", "CI legacy data", "--force", "--importance", "important")["summary"]["id"]
         deleted = self.cli(env, "remember", "Historical encrypted tombstone", "--title", "CI legacy deleted", "--force", "--importance", "important")["summary"]["id"]
         self.cli(env, "forget", deleted)
+        # cli() already drained this exact owner and waited for its final receipt
+        # and library lock release. A warning/exit 2 is not permission to edit a DB.
+        require(self.last_runtime_stop == 0, "database_owner_exit_not_confirmed")
         original = self.profile(env)
         payloads = {}
         with sqlite3.connect(original / "rsrs.db") as db:
@@ -372,11 +376,20 @@ class Smoke:
                 old_ciphertext = AESGCM(hkdf(urk, None, b"onememory:data:v1")).encrypt(bytes.fromhex(old_nonce), payload, None).hex()
                 db.execute("UPDATE memories SET ciphertext=?,nonce=? WHERE id=?", (old_ciphertext, old_nonce, memory_id))
                 db.execute("UPDATE core_artifacts SET source=? WHERE memory_id=?", (old_ciphertext, memory_id))
+                db.execute("UPDATE sync_outbox SET ciphertext=?,nonce=? WHERE id=? AND state='pending'", (old_ciphertext, old_nonce, memory_id))
             verify_fixture_witness(db)
         db.close()
         source = Path(env["HOME"]) / ".onememory"
         original.rename(source)
         (source / "rsrs.db").rename(source / "onememory.db")
+        # Match the existing profile-migration seed: only local crypto is old;
+        # keep the current host alias/endpoint and the server's current vault.
+        session = json.loads((source / "session.json").read_text())
+        wrap_nonce = secrets.token_bytes(12)
+        session["wrapped_urk"] = AESGCM(v4_kek(code, session["kdf_salt"])).encrypt(wrap_nonce, urk, None).hex()
+        session["urk_nonce"] = wrap_nonce.hex()
+        session.pop("crypto_namespace", None)
+        (source / "session.json").write_text(json.dumps(session), encoding="utf-8")
         source_config = source / "client.json"
         config = json.loads(source_config.read_text()) if source_config.exists() else {}
         config["data_dir"] = str(source)
@@ -387,12 +400,20 @@ class Smoke:
         for slot in ("super:", "pass:", "legacy-secret:"):
             self.keys.reserve("rsrs", slot + alias)
         migration_env = dict(env)
-        migration_env.pop("RSRS_DATA_DIR")
+        for key in ("RSRS_DATA_DIR", "RSRS_RUNTIME_BIN", "RSRS_SUPER"):
+            migration_env.pop(key, None)
         install_published_runtime(self.args.binary, migration_env)
-        candidates = self.cli(migration_env, "migrate")["details"]["profiles"]
+        discovery = self.cli(migration_env, "migrate")["details"]
+        self.report["migration_discovery"] = discovery
+        self.save()
+        candidates = discovery["profiles"]
+        require(isinstance(candidates, list) and all(isinstance(row, dict)
+            and isinstance(row.get("source"), str) and Path(row["source"]).is_absolute()
+            and isinstance(row.get("source_id"), str) and re.fullmatch(r"[0-9a-f]{64}", row["source_id"])
+            and isinstance(row.get("account"), str) for row in candidates), "legacy_discovery_schema_invalid")
         candidates = [row for row in candidates if Path(row["source"]).resolve() == source.resolve()]
         require(len(candidates) == 1, "legacy_source_not_unique")
-        result = self.cli(migration_env, "migrate", "--source", candidates[0]["source_id"], "--account", candidates[0]["account"])
+        result = self.cli(dict(migration_env, RSRS_SUPER=code), "migrate", "--source", candidates[0]["source_id"], "--account", candidates[0]["account"])
         require(result["summary"].get("state") == "migrated", "full_migration_not_published")
         destination = Path(result["summary"]["dir"])
         upgraded_env = dict(env, RSRS_DATA_DIR=str(destination))
