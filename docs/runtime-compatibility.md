@@ -15,6 +15,14 @@ with the new compatible stack. Include database-changing DEV checkpoints; omit
 redundant DEV combinations with unchanged persistent formats. Running old clients
 against the new Runtime is not an acceptance requirement.
 
+Historical session and credential-operation journals are outside this upgrade
+contract. In particular, an unfinished offline Super Key recovery created by an
+older host may retain an empty login credential slot that the current host
+rejects explicitly. Do not replay that unknown operation or delete its credential
+slot to make an upgrade test pass; use a fresh isolated operation when verifying
+the new host's recovery and registration flow. Database and original-key recovery
+checks remain required.
+
 ## Wire protocol
 
 `PROTOCOL_V` remains a hard gate. A mismatch fails with
