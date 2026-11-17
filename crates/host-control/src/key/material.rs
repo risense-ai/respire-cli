@@ -130,6 +130,15 @@ fn validate(original: &Original, input: &HostKeyInput) -> Result<()> {
     Ok(())
 }
 
+// Offline Super Key recovery has no cloud login password; keep its input only in key-control.
+pub(super) fn login_password<'a>(original: &Original, input: &'a HostKeyInput) -> Option<&'a str> {
+    match &original.operation {
+        HostKeyOperation::Fivekeys { addr, user, use_super: true, .. }
+            if addr.trim().is_empty() && user.is_empty() => None,
+        _ => input.password.as_deref(),
+    }
+}
+
 pub(super) fn persist(original: &Original, input: &HostKeyInput) -> Result<()> {
     if original.candidate.is_none() { return Ok(()); }
     validate(original, input)?;
@@ -140,7 +149,7 @@ pub(super) fn persist(original: &Original, input: &HostKeyInput) -> Result<()> {
     // The private continuation is durable before any slot consumed by a serving Runtime.
     let super_password = material.reset.as_ref().map(|reset| reset.super_password.as_str()).or(input.super_password.as_deref());
     if let Some(secret) = super_password { slots::persist(&material.keyring_account, &material.keyring_backend, "super", secret)?; }
-    if let Some(password) = input.password.as_deref() { slots::persist(&material.keyring_account, &material.keyring_backend, "pass", password)?; }
+    if let Some(password) = login_password(original, input) { slots::persist(&material.keyring_account, &material.keyring_backend, "pass", password)?; }
     if matches!(original.operation, HostKeyOperation::Fivekeys { use_super:false, .. }) {
         slots::persist(&material.keyring_account, &material.keyring_backend, "legacy-secret",
             input.account_secret.as_deref().context("Account Secret missing")?)?;
@@ -165,7 +174,7 @@ pub(super) fn load(original: &Original, supplied: Option<&HostKeyInput>, verify_
         let material = input.material.as_ref().context("host key material missing")?;
         let secret = material.reset.as_ref().map(|reset| reset.super_password.as_str()).or(input.super_password.as_deref());
         let legacy = if matches!(original.operation, HostKeyOperation::Fivekeys { use_super:false, .. }) { input.account_secret.as_deref() } else { None };
-        for (name, expected) in [("super", secret), ("pass", input.password.as_deref()), ("legacy-secret", legacy)] {
+        for (name, expected) in [("super", secret), ("pass", login_password(original, &input)), ("legacy-secret", legacy)] {
             ensure!(slots::read(&material.keyring_account, &material.keyring_backend, name)?.as_deref() == expected,
                 "host key candidate credential changed; retain the original operation");
         }
@@ -228,7 +237,7 @@ pub(super) fn rollback(original: &Original) -> Result<()> {
     let material = input.material.as_ref().context("host key material missing")?;
     let secret = material.reset.as_ref().map(|reset| reset.super_password.as_str()).or(input.super_password.as_deref());
     let legacy = if matches!(original.operation, HostKeyOperation::Fivekeys { use_super:false, .. }) { input.account_secret.as_deref() } else { None };
-    let owned = [("super", secret), ("pass", input.password.as_deref()), ("legacy-secret", legacy)];
+    let owned = [("super", secret), ("pass", login_password(original, &input)), ("legacy-secret", legacy)];
     for (name, expected) in owned {
         let found = slots::read(&account, backend(), name)?;
         ensure!(found.as_deref().is_none_or(|value| Some(value) == expected),

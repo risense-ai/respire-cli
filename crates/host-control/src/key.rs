@@ -1235,6 +1235,26 @@ mod tests {
         let input = HostKeyInput { password: Some(String::new()), super_password: Some(kit.super_password),
             ..HostKeyInput::default() };
         let (candidate, private) = material::prepare(&custody, &input)?;
+        // Offline recovery factors must not reserve the later registration password slot.
+        assert_eq!(material::login_password(&custody, &private), None);
+        assert_eq!(private.password.as_deref(), Some(""));
+        let mut supplied = serde_json::from_value::<HostKeyInput>(serde_json::to_value(&private)?)?;
+        supplied.password = Some("synthetic-future-login-password".to_owned());
+        assert_eq!(material::login_password(&custody, &supplied), None);
+        if let HostKeyOperation::Fivekeys { use_super, .. } = &mut custody.operation {
+            *use_super = false;
+        }
+        assert_eq!(material::login_password(&custody, &private), Some(""));
+        if let HostKeyOperation::Fivekeys { addr, user, use_super, .. } = &mut custody.operation {
+            *use_super = true;
+            *addr = "https://invalid.test".to_owned();
+            *user = "synthetic-user".to_owned();
+        }
+        assert_eq!(material::login_password(&custody, &supplied), supplied.password.as_deref());
+        if let HostKeyOperation::Fivekeys { addr, user, .. } = &mut custody.operation {
+            addr.clear();
+            user.clear();
+        }
         custody.candidate = candidate;
         material::validate_public(&custody)?;
         let public = custody.candidate.as_mut().context("host fixture candidate missing")?;
