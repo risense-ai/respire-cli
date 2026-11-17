@@ -874,9 +874,10 @@ def main():
 
         def cli(*flags, success=True):
             command_env = dict(env)
-            if keys and ("migrate" in flags or report["stage"] in ("before_publish", "after_publish")
-                         and any(action in flags for action in ("account-result", "account-rollback"))):
-                command_env.pop("RSRS_SUPER")
+            # A profile switch must unlock with that session's native credential,
+            # never the unrelated initial v4 fixture's global super override.
+            if keys:
+                command_env.pop("RSRS_SUPER", None)
             elif "migrate" in flags:
                 command_env["RSRS_SUPER"] = old_super
             result = subprocess.run([str(args.binary), *flags], env=command_env, capture_output=True, timeout=180)
