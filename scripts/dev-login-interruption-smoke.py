@@ -102,6 +102,12 @@ def safe_cli_diagnostic(stdout, stderr):
         ("config_store_not_ready", "configured target Runtime did not confirm store readiness"),
         ("runtime_rpc_transport", "runtime_rpc_transport_failed"),
         ("runtime_account_rejected", "Runtime rejected account control (account_outcome_unknown)"),
+        ("sync_metadata_isolated", "memory_metadata_v1_isolated"),
+        ("sync_snapshot_quarantined", "snapshot restore quarantined sync"),
+        ("sync_session_revision", "runtime_locked: session changed"),
+        ("sync_session_locked", "runtime_locked"),
+        ("sync_database_locked", "database is locked"),
+        ("sync_index_pending", "local retrieval index is being prepared"),
         ("control_spawn", "cannot start owned host control Runtime"),
         ("control_response_channel", "host control response channel failure"),
         ("control_deadline", "host control deadline exceeded"),
@@ -743,6 +749,11 @@ def account_fixture_handler(state, reached, release, v2=None):
             if state.get("barrier_failed"):
                 self.send_error(503)
                 return
+            if self.path == "/sync/capabilities" and "transfer_http" in state:
+                state["transfer_http"].append({"stage": state["transfer_stage"],
+                    "method": "GET", "route": "/sync/capabilities", "status": 404})
+                self.send_error(404)
+                return
             if self.path == "/pull" or self.path.startswith("/pull?"):
                 state["sync_pulls"] += 1
                 state["transfer_http"].append({"stage": state["transfer_stage"],
@@ -1300,6 +1311,24 @@ def main():
             report["transfer_initial_response"] = {"exit_code": first_result.returncode,
                 "diagnostic": safe_cli_diagnostic(first_result.stdout, first_result.stderr),
                 "sync_pulls": state["sync_pulls"], "synced_records": len(state["sync_blobs"])}
+            injected = any(event == {"stage": "initial_login", "method": "POST",
+                        "route": "/push/batch", "status": 503} for event in state["transfer_http"])
+            if not injected:
+                # One public sync exposes a swallowed post-import error without
+                # accepting it as the initial login's injected failure.
+                first_summary = json.loads(first_result.stdout)["summary"]
+                target = Path(first_summary["dir"])
+                require(target.resolve().is_relative_to(args.root.resolve()), "server_transfer_reused_source")
+                with sqlite3.connect((target / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+                    report["transfer_local_sync_state"] = {
+                        "memory_contract_counts": db.execute("SELECT memory_contract,count(*) FROM memories GROUP BY memory_contract").fetchall(),
+                        "outbox_states": db.execute("SELECT state,count(*) FROM sync_outbox GROUP BY state").fetchall(),
+                        "integrity": db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"}
+                state["transfer_stage"] = "diagnostic_sync"
+                probe = subprocess.run([str(args.binary), "--json", "sync"], env=env,
+                                       capture_output=True, timeout=120)
+                report["transfer_sync_probe"] = {"exit_code": probe.returncode,
+                    "diagnostic": safe_cli_diagnostic(probe.stdout, probe.stderr)}
             require(any(event == {"stage": "initial_login", "method": "POST",
                         "route": "/push/batch", "status": 503} for event in state["transfer_http"]),
                     "server_transfer_fault_not_observed")
