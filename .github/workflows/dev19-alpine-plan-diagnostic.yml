@@ -1,0 +1,120 @@
+name: DEV19 ARM Alpine model plan diagnostic
+
+on:
+  push:
+    branches: [codex/dev19-alpine-plan-native-20261117]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  alpine-plan:
+    runs-on: ubuntu-24.04-arm
+    env:
+      CLI_TARGET: aarch64-unknown-linux-musl
+      CLI_VERSION: 2.0.0-dev.19
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-assets-aarch64-unknown-linux-musl
+          run-id: 44023793523
+          github-token: ${{ github.token }}
+          path: candidate-proof
+      - name: Build only the diagnostic musl CLI without Core SDK
+        run: |
+          set -euo pipefail
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          bash scripts/build-linux-musl.sh "$CLI_TARGET" candidate
+      - name: Reuse the candidate's exact public Runtime inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync, mkdirSync, appendFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {createHash} from 'node:crypto';
+          import {inspectPublishedRelease, downloadPublishedAsset, publishedAssetNames} from './npm/scripts/extract-artifact.mjs';
+          const receipt = JSON.parse(readFileSync('candidate-proof/candidate-assets-receipt.json'));
+          assert.equal(receipt.target, process.env.CLI_TARGET);
+          assert.equal(receipt.assets_verified, true);
+          assert.equal(receipt.payloads_verified, true);
+          const candidate = receipt.candidate;
+          assert.equal(candidate.source.sha, '8f7890d6b748925035bdfaf4ec8ee49eb96b0916');
+          assert.equal(candidate.source.version, process.env.CLI_VERSION);
+          assert.equal(candidate.source.run_id, 44023793523);
+          assert.equal(candidate.source.run_attempt, 1);
+          const runtime = candidate.runtime;
+          assert.equal(runtime.version, '2.0.0-dev.23');
+          assert.equal(runtime.producer.run_id, 44014682721);
+          assert.equal(runtime.producer.run_attempt, 1);
+          await inspectPublishedRelease(runtime, {token: process.env.GH_TOKEN});
+          const folder = resolve('runtime-public'); mkdirSync(folder);
+          const [metaName, binaryName, archiveName] = publishedAssetNames('runtime', process.env.CLI_TARGET);
+          const asset = name => {const rows = runtime.assets.filter(a => a.name === name); assert.equal(rows.length, 1); return rows[0];};
+          for (const name of [metaName, archiveName]) await downloadPublishedAsset(runtime, asset(name), folder, {token: process.env.GH_TOKEN});
+          const values = {
+            RSRS_ARTIFACT_SOURCE: 'published-assets', RSRS_RUNTIME_TRIPLE: process.env.CLI_TARGET,
+            RSRS_PUBLISHED_RUNTIME_VERSION: runtime.version,
+            RSRS_PUBLISHED_RUNTIME_SHA256: asset(binaryName).sha256,
+            RSRS_PUBLISHED_RUNTIME_ARCHIVE: resolve(folder, archiveName),
+            RSRS_PUBLISHED_RUNTIME_METADATA: resolve(folder, metaName),
+            RSRS_PUBLISHED_RUNTIME_METADATA_SHA256: asset(metaName).sha256,
+            RSRS_PUBLISHED_BUNDLE_SHA256: asset(archiveName).sha256,
+            RSRS_PUBLISHED_ASSETS_SHA256: createHash('sha256').update(JSON.stringify(candidate)).digest('hex'),
+          };
+          for (const [key, value] of Object.entries(values)) {
+            assert.ok(!/[\r\n]/.test(value)); appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
+          }
+          NODE
+      - name: Install official host models and run only the offline Alpine probe
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/diagnostic-model
+          RSRS_M3_DIR: ${{ runner.temp }}/models/bge-m3
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          export HOME="$RUNNER_TEMP/diagnostic-model-home"
+          mkdir -p "$HOME"
+          binary="$(realpath target/ci/$CLI_TARGET/debug/rsrs)"
+          export RSRS_RUNTIME_BIN="$(python3 scripts/native_fixture_process.py --install-published "$binary")"
+          "$binary" --direct model install-m3 --json > "$RUNNER_TEMP/native-model-inference.json" || {
+            status=$?
+            cat "$RUNNER_TEMP/native-model-inference.json" >&2
+            exit "$status"
+          }
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const result = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/native-model-inference.json`, 'utf8'));
+          assert.equal(result.status, 'ok');
+          const proof = result.details.backend_load.evidence;
+          assert.equal(proof.ready, true);
+          assert.equal(proof.inference_completed, true);
+          assert.equal(proof.fresh_session, true);
+          assert.equal(proof.dimensions, 1024);
+          assert.equal(proof.selected, 'CPU');
+          NODE
+          "$binary" --json runtime stop
+          bash scripts/probe-native-arm64-alpine.sh "$CLI_TARGET" "$binary" "$RSRS_M3_DIR" \
+            "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" \
+            "$RSRS_PUBLISHED_RUNTIME_SHA256" "$RSRS_PUBLISHED_RUNTIME_VERSION"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dev19-arm-alpine-model-plan-diagnostic
+          path: |
+            ${{ runner.temp }}/native-model-inference.json
+            ${{ runner.temp }}/arm-alpine-probe/inference.json
+          if-no-files-found: warn
