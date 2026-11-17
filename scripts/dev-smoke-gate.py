@@ -18,10 +18,10 @@ AI = {"model_cpu_real", "inject_preview_install_remove", "inject_stale_revision_
 LEGACY = {"model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade",
           "cloud_v3_secret_key_recovery_upgrade"}
 MIGRATION = {"model_cpu_real", "onememory_multiaccount_wal_migrated", "respire_compatibility_migrated",
-             "legacy_keys_migrated_without_super_override", "legacy_api_defaults_rewritten",
+             "legacy_db_with_explicit_current_credentials", "explicit_dev_endpoint_preserved",
              "migration_repeated_start_idempotent", "migration_interrupted_restart_recovered",
              "existing_rsrs_preserved_and_legacy_imported", "migrated_outbox_sync_and_independent_decrypt",
-             "migration_incompatible_primary_keys_rejected", "migration_symlink_root_rejected", "migration_client_only_does_not_write",
+             "migration_wrong_key_rejected", "migration_incompatible_primary_keys_rejected", "migration_symlink_root_rejected", "migration_client_only_does_not_write",
              "startup_does_not_migrate", "migration_source_order_and_backup_only_idempotent",
              "restart_locked_with_native_credentials_then_host_unlock"}
 

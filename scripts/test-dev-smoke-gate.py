@@ -136,6 +136,26 @@ class MigrationJoinReportTests(unittest.TestCase):
         self.assertTrue(report["complete"])
         self.assertTrue(report["components"]["cli"]["passed"])
         self.assertTrue(report["components"]["profile_migration"]["passed"])
+        extra = 'secret_service_current_credentials_for_legacy_db'
+        secret_service = copy.deepcopy(self.migration)
+        secret_service.update(platform='linux', keyring_backend='linux-secret-service',
+                              required_cases=sorted(gate.MIGRATION | {extra}))
+        for old_host_proof in (False, True):
+            evidence = dict(passed=True, backend='secret_service')
+            if old_host_proof:
+                evidence.update(original_attributes_and_values_preserved=True,
+                                legacy_services=['1memory', 'memocap', 'respire'])
+            else:
+                evidence.update(current_source_credentials_preserved=True,
+                                database_origins=['1memory', 'memocap', 'respire'])
+            secret_service['cases'][extra] = evidence
+            source, output = self.folder / 'ss-source.json', self.folder / 'ss-result.json'
+            source.write_text(json.dumps(secret_service), encoding='utf-8')
+            result = subprocess.run([sys.executable, str(root / 'dev-secret-service-migration-gate.py'),
+                '--migration-report', str(source), '--report', str(output), '--source-sha', self.source,
+                '--version', self.version, '--binary-sha256', self.digest], capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, int(old_host_proof))
+            self.assertEqual(json.loads(output.read_text())['passed'], not old_host_proof)
 
     def test_actual_cli_rejects_mixed_source_version_binary_and_incomplete_reports(self):
         for component, field, wrong, code in (
@@ -146,6 +166,10 @@ class MigrationJoinReportTests(unittest.TestCase):
                 ("base", "observed_version", "1.2.3-dev.3", "artifact_version_mismatch"),
                 ("migration", "version", "1.2.3-dev.3", "artifact_version_mismatch"),
                 ("migration", "passed", False, "migration_incomplete"),
+                ("migration", "required_cases", sorted((gate.MIGRATION - {'explicit_dev_endpoint_preserved'}) |
+                    {'legacy_api_defaults_rewritten'}), "migration_case_contract_mismatch"),
+                ("migration", "cases", {name: {'passed': True} for name in gate.MIGRATION
+                    if name != 'migration_wrong_key_rejected'}, "migration_required_cases_missing"),
                 ("base", "base_complete", False, "cli_base_incomplete")):
             with self.subTest(component=component, field=field):
                 base, migration = copy.deepcopy(self.base), copy.deepcopy(self.migration)
