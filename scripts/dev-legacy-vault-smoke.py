@@ -451,7 +451,8 @@ class Smoke:
             if row is not None:
                 readback[label].update(ciphertext_matches=row[1] == expected[memory_id][1],
                     nonce_matches=row[2] == expected[memory_id][2], deleted_matches=row[3] == expected[memory_id][3],
-                    plaintext_matches=decrypt_content(urk, row[1], row[2]) == payloads[memory_id][0])
+                    ciphertext_present=bool(row[1]), nonce_present=bool(row[2]),
+                    plaintext_matches=bool(row[1] and row[2]) and decrypt_content(urk, row[1], row[2]) == payloads[memory_id][0])
             if head is not None:
                 readback[label].update(head_ciphertext_matches=head.get("ciphertext") == expected[memory_id][1],
                     head_nonce_matches=head.get("nonce") == expected[memory_id][2],
