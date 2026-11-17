@@ -74,10 +74,11 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
     cp /cpu-model.ort /profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort
     echo "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  /profile/models/bge-m3/onnx/model_quantized.cpu-v1.ort" | sha256sum -c >/dev/null
     trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
-    /rsrs --direct model install-m3 --json > /profile/inference.json || {
+    # inference.json is Runtime configuration, not a command output file.
+    /rsrs --direct model install-m3 --json > /profile/model-probe-result.json || {
       status=$?
-      cat /profile/inference.json >&2
+      cat /profile/model-probe-result.json >&2
       exit "$status"
     }
   '
-python -c 'import json,sys; r=json.load(open(sys.argv[1])); p=r["details"]["backend_load"]["evidence"]; assert r["status"] == "ok" and p["ready"] is True and p["inference_completed"] is True and p["fresh_session"] is True and p["dimensions"] == 1024 and p["selected"] == "CPU", "Alpine CPU inference was not confirmed"' "$profile/inference.json"
+python -c 'import json,sys; r=json.load(open(sys.argv[1])); p=r["details"]["backend_load"]["evidence"]; assert r["status"] == "ok" and p["ready"] is True and p["inference_completed"] is True and p["fresh_session"] is True and p["dimensions"] == 1024 and p["selected"] == "CPU", "Alpine CPU inference was not confirmed"' "$profile/model-probe-result.json"
