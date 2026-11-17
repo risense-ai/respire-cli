@@ -1,5 +1,9 @@
 # Shared host frontend
 
+The ownership rules, fixed Runtime23 baseline and remaining implementation gaps
+are recorded in [component boundaries](component-boundaries.md). That document
+distinguishes the required architecture from work that has not yet shipped.
+
 The `respire` library owns the CLI frontend and the `rsrs` executable is its
 entry point. The pure Runtime does not embed this frontend or preserve historical
 Client2 host commands. Upgrade Client2 and CLI for the new Runtime generation.

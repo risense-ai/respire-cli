@@ -1,5 +1,11 @@
 # Desktop host RPC
 
+See [component boundaries](component-boundaries.md) for configuration, credential
+and process ownership. `agent-config`, including client-only reads, belongs to
+the CLI host. It must not be forwarded through Runtime business `cli.exec`.
+The existing private Runtime configuration helper is a documented migration gap,
+not the target host interface.
+
 Embedding model selection uses resident loopback `/api/rpc`, separately from
 the one-shot account host process. Use the existing `v:1`, unique `id`, `method`
 and `args` envelope. See [embedding profiles](model-profiles.md) for JSON fields.
