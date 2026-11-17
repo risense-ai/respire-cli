@@ -1263,15 +1263,35 @@ class OriginalFactorTests(unittest.TestCase):
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
             and any(isinstance(arg, ast.Constant) and arg.value == 'config' for arg in node.value.args))
         checks = compile(ast.Module(body=historical.body[start:end], type_ignores=[]), '<registration-contract>', 'exec')
-        receipt = dict(outcome='committed', source_profile='source', target_profile='source')
+        source = HERE.resolve()
+        receipt = dict(outcome='committed', source_profile=str(source), target_profile=str(source))
         vault = dict(wrapped_urk=SUPER, kdf_salt='synthetic-salt', urk_nonce='synthetic-nonce',
             keyring_account=ALIAS, keyring_backend='native')
         before = (['original-encrypted-row'], ['original-pending-work'])
-        scope = dict(require=legacy.require, env={}, source='source', user=USER, UPSTREAM=legacy.UPSTREAM,
+        scope = dict(require=legacy.require, same_scope_path=legacy.same_scope_path,
+            env={}, source=source, user=USER, UPSTREAM=legacy.UPSTREAM,
             previous_operations=set(), registered=dict(ok=True, user=USER, addr=legacy.UPSTREAM),
             self=SimpleNamespace(registration_receipt=Mock(return_value=receipt)),
             account=dict(confirmed=True), session=vault, candidate=vault, rows=lambda: before, before=before)
         exec(checks, dict(scope))  # Terminal summary has no transaction receipt fields.
+        canonical = legacy.canonical_scope_path(source)
+        exec(checks, dict(scope, self=SimpleNamespace(registration_receipt=Mock(
+            return_value=dict(receipt, source_profile=canonical, target_profile=canonical)))))
+        recovery = next(node for node in ast.walk(historical) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == 'require'
+            and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == 'historical_recovery_not_committed_in_place')
+        recovery_check = compile(ast.Expression(recovery), '<recovery-scope-contract>', 'eval')
+        recovered_scope = dict(scope, recovered=dict(outcome='committed', source_profile=canonical, operation_id='owned'),
+            operation='owned', candidate=dict(user='', addr=''))
+        eval(recovery_check, recovered_scope)
+        for wrong in (str(source.parent), None, 'source', str(source / 'missing')):
+            for field in ('source_profile', 'target_profile'):
+                with self.assertRaisesRegex(RuntimeError, '^historical_registration_' + field.split('_')[0] + '_changed$'):
+                    exec(checks, dict(scope, self=SimpleNamespace(registration_receipt=Mock(
+                        return_value=dict(receipt, **{field: wrong})))))
+            with self.assertRaisesRegex(RuntimeError, '^historical_recovery_not_committed_in_place$'):
+                eval(recovery_check, dict(recovered_scope, recovered=dict(recovered_scope['recovered'], source_profile=wrong)))
         for changed, error in ((dict(registered={}), 'terminal_identity_mismatch'),
                 (dict(self=SimpleNamespace(registration_receipt=Mock(return_value=dict(receipt, outcome='unknown')))),
                     'receipt_not_committed'),
@@ -1303,6 +1323,22 @@ class OriginalFactorTests(unittest.TestCase):
             smoke.cli.assert_called_once_with(env, 'runtime', 'account-result', '--operation-id', operation,
                 '--source-profile', str(root), '--register')
             smoke.cli.reset_mock()
+            canonical = legacy.canonical_scope_path(root)
+            if sys.platform == 'win32':
+                self.assertTrue(canonical.startswith('\\\\?\\'))
+                self.assertNotEqual(str(root), canonical)
+            path.write_text(json.dumps(dict(binding, root=canonical, source=canonical)), encoding='utf-8')
+            smoke.registration_receipt(env, root, USER, set())
+            smoke.cli.assert_called_once_with(env, 'runtime', 'account-result', '--operation-id', operation,
+                '--source-profile', str(root), '--register')
+            smoke.cli.reset_mock()
+            other = root / 'other'
+            other.mkdir()
+            for field in ('root', 'source'):
+                path.write_text(json.dumps(dict(binding, **{field: legacy.canonical_scope_path(other)})), encoding='utf-8')
+                with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
+                    smoke.registration_receipt(env, root, USER, set())
+            smoke.cli.assert_not_called()
             path.write_text(json.dumps(dict(binding, user='foreign')), encoding='utf-8')
             with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
                 smoke.registration_receipt(env, root, USER, set())

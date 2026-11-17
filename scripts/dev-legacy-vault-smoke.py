@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """CI-only synthetic legacy wraps, real CLI upgrade and new-device decryption."""
-from native_fixture_process import install_published_runtime
+from native_fixture_process import canonical_scope_path, install_published_runtime
 import argparse
 import hashlib
 import hmac
@@ -33,6 +33,11 @@ MODEL_HASHES = {
 def require(value, code):
     if not value:
         raise RuntimeError(code)
+
+
+def same_scope_path(value, expected):
+    return (isinstance(value, str) and Path(value).is_absolute() and Path(value).is_dir()
+        and canonical_scope_path(value) == canonical_scope_path(expected))
 
 
 def digest(path):
@@ -217,7 +222,7 @@ class Smoke:
                 require(isinstance(operation_id, str) and operation_id != request["id"]
                     and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", operation_id)
                     and receipt.get("outcome") == "committed"
-                    and receipt.get("source_profile") == str(Path(env["RSRS_DATA_DIR"]).resolve()),
+                    and same_scope_path(receipt.get("source_profile"), env["RSRS_DATA_DIR"]),
                     "legacy_login_rpc_transaction_mismatch")
                 login = receipt.get("login") or {}
                 require(login.get("user") == user and login.get("addr") == UPSTREAM
@@ -311,7 +316,7 @@ class Smoke:
             require(isinstance(operation_id, str) and operation_id != request["id"]
                 and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", operation_id)
                 and receipt.get("outcome") == "committed"
-                and receipt.get("source_profile") == str(Path(env["RSRS_DATA_DIR"]).resolve()),
+                and same_scope_path(receipt.get("source_profile"), env["RSRS_DATA_DIR"]),
                 "database_login_transaction_mismatch")
             login = receipt.get("login") or {}
             require(login.get("user") == user and login.get("addr") == UPSTREAM
@@ -490,7 +495,7 @@ class Smoke:
         path, = created
         binding = json.loads(path.read_text(encoding="utf-8"))
         require(binding.get("schema") == 1 and binding.get("operation_id") == path.stem
-            and binding.get("root") == str(root) and binding.get("source") == str(source)
+            and same_scope_path(binding.get("root"), root) and same_scope_path(binding.get("source"), source)
             and binding.get("user") == user and binding.get("addr") == UPSTREAM
             and binding.get("register") is True and binding.get("sent") is True,
             "historical_registration_operation_binding_mismatch")
@@ -544,7 +549,7 @@ class Smoke:
                     (("wrapped_urk", wrapped), ("kdf_salt", salt), ("urk_nonce", nonce.hex()))) \
                     and isinstance(operation, str):
                 self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation)
-        require(recovered.get("outcome") == "committed" and recovered.get("source_profile") == str(source)
+        require(recovered.get("outcome") == "committed" and same_scope_path(recovered.get("source_profile"), source)
             and recovered.get("operation_id") == operation and candidate.get("user") == ""
             and candidate.get("addr") == "" and rows() == before, "historical_recovery_not_committed_in_place")
         require(AESGCM(v4_kek(code, salt, wrapped)).decrypt(nonce, encrypted_bytes(candidate["wrapped_urk"]), None)
@@ -572,8 +577,8 @@ class Smoke:
             and registered.get("addr") == UPSTREAM, "historical_registration_terminal_identity_mismatch")
         receipt = self.registration_receipt(env, source, user, previous_operations)
         require(receipt.get("outcome") == "committed", "historical_registration_receipt_not_committed")
-        require(receipt.get("source_profile") == str(source), "historical_registration_source_changed")
-        require(receipt.get("target_profile") == str(source), "historical_registration_target_changed")
+        require(same_scope_path(receipt.get("source_profile"), source), "historical_registration_source_changed")
+        require(same_scope_path(receipt.get("target_profile"), source), "historical_registration_target_changed")
         require(account["confirmed"], "historical_registration_account_unconfirmed")
         require(all(session.get(field) == candidate.get(field) for field in
             ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend")),
