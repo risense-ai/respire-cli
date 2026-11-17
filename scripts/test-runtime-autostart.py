@@ -906,6 +906,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                             os.kill(first_pid,signal.SIGKILL)
                         restart_deadline=time.monotonic()+140
                         recovered_health=None
+                        candidate=None
                         while time.monotonic() < restart_deadline:
                             try:
                                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=1) as response:
@@ -917,6 +918,14 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                                 pass
                             time.sleep(0.25)
                         if recovered_health is None:
+                            if candidate is not None:
+                                print("isolated crash health diagnostic",json.dumps({
+                                    "replacement":candidate.get("pid") != first_pid,
+                                    "managed_owner":candidate.get("managed_id") == owned_health["managed_id"],
+                                    "startup_complete":candidate.get("startup_complete"),
+                                    "store_ready":candidate.get("store_ready"),
+                                    "credentials_required":candidate.get("credential_state") == "required",
+                                }))
                             diagnose_crash_restart()
                         assert recovered_health is not None, "OS supervisor did not restart its failed native owner"
                         assert recovered_health["managed_id"] == owned_health["managed_id"] and recovered_health["bin"] == health["bin"]
