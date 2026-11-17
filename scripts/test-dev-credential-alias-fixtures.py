@@ -291,6 +291,36 @@ class AliasTests(unittest.TestCase):
         self.assertEqual(changed.values, {control: 'third-party-private-material'})
         for secret in (SUPER, alias, 'third-party-private-material'):
             self.assertNotIn(secret, json.dumps(report))
+        with patch.object(native.sys, 'platform', 'darwin'):
+            mac = MemoryKeys()
+            mac.values.update({('rsrs', 'super:' + alias): SUPER, control: json.dumps(payload)})
+            verifier = Mock()
+            mac.track_created_login(candidate, '', SUPER, None, recovery_operation=operation,
+                                    recovery_verifier=verifier)
+            verifier.assert_called_once_with(payload)
+            self.assertNotIn(control, mac.reads)
+            verifier.side_effect = RuntimeError('native-material-conflict')
+            rejected = mac.cleanup()
+            self.assertFalse(rejected['passed'])
+            self.assertIn(control, mac.values)
+            verifier.side_effect = None
+            self.assertTrue(mac.cleanup()['passed'])
+            self.assertEqual(verifier.call_count, 3)
+            self.assertFalse(mac.values)
+            unverified = MemoryKeys()
+            unverified.values.update({('rsrs', 'super:' + alias): SUPER, control: json.dumps(payload)})
+            with self.assertRaisesRegex(RuntimeError, 'native_verifier_required'):
+                unverified.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+            self.assertNotIn(control, unverified.entries)
+            self.assertNotIn(control, unverified.reads)
+            manager = object.__new__(native.MacKeys)
+            manager.created, manager.homes = True, {}
+            manager._security = Mock()
+            conflict = dict(passed=False, events=[], remaining_entries=[{'code': 'credential_cleanup_failed'}])
+            with patch.object(native.TrackedKeys, 'cleanup', return_value=conflict):
+                self.assertFalse(manager.cleanup()['passed'])
+            manager._security.assert_not_called()
+            self.assertTrue(manager.created)
 
     def test_wrong_password_tracked_for_cleanup_without_secret_output(self):
         keys = MemoryKeys()
@@ -1339,6 +1369,22 @@ class OriginalFactorTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
                     smoke.registration_receipt(env, root, USER, set())
             smoke.cli.assert_not_called()
+            smoke.args = SimpleNamespace(binary=Path('synthetic-cli'))
+            smoke.root = root
+            expected = dict(password='', super_password=SUPER, account_secret='', totp=None,
+                material=dict(keyring_account=ALIAS, keyring_backend='native', reset=None, challenge=None))
+            verified = dict(verified=True, operation_id=operation, installation_root=canonical,
+                            source_profile=canonical)
+            output = SimpleNamespace(returncode=0, stdout=json.dumps(dict(status='ok', summary=verified)), stderr=b'')
+            with patch.object(legacy.subprocess, 'run', return_value=output) as run:
+                smoke.verify_recovery_control(env, root, operation, expected)
+                self.assertEqual(json.loads(run.call_args.kwargs['input']), expected)
+                self.assertNotIn(SUPER, str(run.call_args.args) + str(run.call_args.kwargs['env']))
+                for field, foreign in (('verified', False), ('operation_id', 'foreign'),
+                                       ('installation_root', str(other)), ('source_profile', str(other))):
+                    output.stdout = json.dumps(dict(status='ok', summary=dict(verified, **{field: foreign})))
+                    with self.assertRaisesRegex(RuntimeError, 'native_receipt_mismatch'):
+                        smoke.verify_recovery_control(env, root, operation, expected)
             path.write_text(json.dumps(dict(binding, user='foreign')), encoding='utf-8')
             with self.assertRaisesRegex(RuntimeError, 'operation_binding_mismatch'):
                 smoke.registration_receipt(env, root, USER, set())

@@ -121,6 +121,17 @@ impl KeyCoordinator {
         )
     }
 
+    /// Verify archived custody locally, without replaying Runtime or the current account identity.
+    pub fn verify_custody(operation_id: &str, source: &Path, expected: &HostKeyInput) -> Result<ResultEnvelope> {
+        anyhow::ensure!(canonical(operation_id), "invalid custody operation ID");
+        let (root, _) = respire_client_host::config::control_roots()?;
+        let root = root.canonicalize()?;
+        let source = respire_client_host::config::normalize_control_path(source)?.canonicalize()?;
+        let takeover = crate::maintenance::takeover_lock()?;
+        anyhow::ensure!(takeover.protects(&root.join("runtime/takeover"))?, "custody takeover root changed");
+        verify_archived_custody(&root, &source, operation_id, expected)
+    }
+
     /// Query only the original operation. This never admits an unsent operation.
     pub fn result(&self, operation_id: &str) -> Result<ResultEnvelope> {
         control_key(Arc::clone(&self.host), Action::Query(operation_id))
@@ -673,6 +684,25 @@ fn require_unsent_admission(
         "key source identity changed before admission"
     );
     Ok(())
+}
+
+fn verify_archived_custody(root: &Path, source: &Path, operation_id: &str,
+    expected: &HostKeyInput) -> Result<ResultEnvelope> {
+    let (original, _) = read_original(&archive_path(root, operation_id))?
+        .context("completed key custody archive missing")?;
+    anyhow::ensure!(original.schema_version == 1 && original.root == root
+        && original.profile == source && original.operation_id == operation_id
+        && original.key == operation_id && original.sent && !original.rolled_back
+        && original.candidate.is_some()
+        && matches!(&original.operation, HostKeyOperation::Fivekeys { addr, user, use_super: true, .. }
+            if addr.trim().is_empty() && user.is_empty()), "completed recovery custody binding mismatch");
+    // Registration may now own the source identity and pass slot. Neither belongs to this archive.
+    let actual = material::load(&original, None, false)?;
+    anyhow::ensure!(serde_json::to_value(&actual)? == serde_json::to_value(expected)?,
+        "recovery custody material mismatch");
+    Ok(ResultEnvelope::new("key-custody", respire_commands::output::Status::Ok,
+        serde_json::json!({"verified":true,"operation_id":operation_id,
+            "installation_root":root,"source_profile":source}), Vec::new()))
 }
 
 fn archive_path(root: &Path, operation_id: &str) -> PathBuf {
@@ -1229,6 +1259,8 @@ mod tests {
         assert!(!canonical("20000000-0000-1000-8000-000000000001"));
         assert!(!canonical("not-an-operation"));
         let mut custody = original;
+        custody.operation_id = uuid::Uuid::new_v4().to_string();
+        custody.key = custody.operation_id.clone();
         let kit = crate::auth_material::generate()?;
         custody.operation = HostKeyOperation::Fivekeys { addr: String::new(), user: String::new(),
             kdf_salt: kit.kdf_salt, wrapped_urk: kit.wrapped_urk, urk_nonce: kit.urk_nonce, use_super: true };
@@ -1257,6 +1289,47 @@ mod tests {
         }
         custody.candidate = candidate;
         material::validate_public(&custody)?;
+        #[cfg(windows)]
+        {
+            use respire_client_host::host_credentials::key_control as slots;
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            let mut owned: Original = serde_json::from_value(serde_json::to_value(&custody)?)?;
+            owned.root = root.clone();
+            owned.profile = root.clone();
+            owned.sent = true;
+            let archive = archive_path(&root, &owned.operation_id);
+            std::fs::create_dir_all(archive.parent().context("fixture archive parent missing")?)?;
+            std::fs::write(archive, serde_json::to_vec(&owned)?)?;
+            let material = private.material.as_ref().context("fixture material missing")?;
+            let account = &material.keyring_account;
+            let backend = &material.keyring_backend;
+            let payload = serde_json::to_string(&private)?;
+            anyhow::ensure!(slots::read(account, backend, "key-control")?.is_none()
+                && slots::read(account, backend, "pass")?.is_none(), "synthetic native slots must be absent");
+            let checked = (|| -> Result<()> {
+                slots::persist(account, backend, "key-control", &payload)?;
+                let receipt = verify_archived_custody(&root, &root, &owned.operation_id, &private)?;
+                anyhow::ensure!(receipt.summary["verified"] == true, "native custody not verified");
+                // A later registration may legitimately bind the profile and introduce a new password.
+                std::fs::write(root.join("session.json"), br#"{"user":"synthetic-registered-user"}"#)?;
+                slots::persist(account, backend, "pass", "synthetic-new-registration-password")?;
+                verify_archived_custody(&root, &root, &owned.operation_id, &private)?;
+                let changed = serde_json::to_string(&supplied)?;
+                slots::replace(account, backend, &payload, &changed)?;
+                let rejected = verify_archived_custody(&root, &root, &owned.operation_id, &private).is_err();
+                slots::replace(account, backend, &changed, &payload)?;
+                anyhow::ensure!(rejected, "changed native custody accepted");
+                anyhow::ensure!(verify_archived_custody(&root, &root.join("foreign"), &owned.operation_id, &private).is_err(),
+                    "foreign custody source accepted");
+                Ok(())
+            })();
+            let control_cleanup = slots::remove(account, backend, "key-control", &payload);
+            let pass_cleanup = slots::remove(account, backend, "pass", "synthetic-new-registration-password");
+            checked?;
+            control_cleanup?;
+            pass_cleanup?;
+        }
         let public = custody.candidate.as_mut().context("host fixture candidate missing")?;
         assert!(public.get("super_password").is_none() && public.get("password").is_none());
         assert!(private.material.is_some());

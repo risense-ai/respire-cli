@@ -486,6 +486,23 @@ class Smoke:
             remote_tombstone_propagated=True, remote_tombstone_content="canonical_empty",
             historical_authentication_tested=False)
 
+    def verify_recovery_control(self, env, source, operation, expected):
+        output = subprocess.run([str(self.args.binary), "--json", "runtime", "key-result",
+            "--operation-id", operation, "--source-profile", str(source), "--verify-custody"],
+            input=json.dumps(expected).encode("utf-8"), cwd=self.root, env=env,
+            capture_output=True, timeout=180)
+        require(output.returncode == 0, "recovery_control_native_verification_failed")
+        try:
+            envelope = json.loads(output.stdout)
+        except (ValueError, UnicodeError):
+            raise RuntimeError("recovery_control_native_receipt_invalid") from None
+        receipt = envelope.get("summary", {})
+        require(envelope.get("status") == "ok" and not envelope.get("errors")
+            and receipt.get("verified") is True and receipt.get("operation_id") == operation
+            and same_scope_path(receipt.get("installation_root"), Path(env["RSRS_DATA_DIR"]))
+            and same_scope_path(receipt.get("source_profile"), source),
+            "recovery_control_native_receipt_mismatch")
+
     def registration_receipt(self, env, source, user, previous_operations):
         root = Path(env["RSRS_DATA_DIR"]).resolve()
         folder = root / "runtime/autostart/account-results"
@@ -548,7 +565,9 @@ class Smoke:
             if all(candidate.get(field) == value for field, value in
                     (("wrapped_urk", wrapped), ("kdf_salt", salt), ("urk_nonce", nonce.hex()))) \
                     and isinstance(operation, str):
-                self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation)
+                native_verifier = ({"recovery_verifier": lambda expected:
+                    self.verify_recovery_control(env, source, operation, expected)} if sys.platform == "darwin" else {})
+                self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation, **native_verifier)
         require(recovered.get("outcome") == "committed" and same_scope_path(recovered.get("source_profile"), source)
             and recovered.get("operation_id") == operation and candidate.get("user") == ""
             and candidate.get("addr") == "" and rows() == before, "historical_recovery_not_committed_in_place")

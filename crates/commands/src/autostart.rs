@@ -48,6 +48,9 @@ pub enum RuntimeCommand {
         /// Bind the query to the original selected profile without requiring live health.
         #[arg(long, value_name = "DIR")]
         source_profile: Option<PathBuf>,
+        /// Verify completed recovery custody locally against private JSON on stdin; never call Runtime.
+        #[arg(long, requires = "source_profile")]
+        verify_custody: bool,
     },
     /// Explicitly compensate the original key operation when its receipt permits it.
     KeyRollback {
