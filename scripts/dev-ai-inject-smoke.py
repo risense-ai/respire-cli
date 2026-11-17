@@ -328,16 +328,22 @@ class Smoke:
         self.report["cases"][name] = {"status": "passed", "passed": True, **evidence}
         self.save()
 
-    def wait_index_ready(self, timeout=180):
-        deadline = time.monotonic() + timeout
+    def wait_index_ready(self):
         while True:
             doctor = self.cli("doctor")
+            require(doctor["command"] == "doctor" and doctor["status"] in ("ok", "warn")
+                and not doctor["errors"] and all(item["status"] != "fail" for item in doctor["items"]),
+                "cure_doctor_failed")
             rows = [item for item in doctor["items"] if item["name"] in ("embedder", "model index")]
             require(len(rows) == 2 and {item["name"] for item in rows} == {"embedder", "model index"},
                 "cure_index_readiness_missing")
+            index = doctor["details"]["retrieval_index"]
+            require(not index["error"] and index["state"] in ("idle", "scheduled", "running", "ready"),
+                "cure_index_state_invalid")
             if all(item["status"] == "ok" for item in rows):
                 return
-            require(time.monotonic() < deadline, "cure_index_readiness_timeout")
+            require(index["state"] in ("scheduled", "running")
+                and all(item["status"] in ("ok", "warn") for item in rows), "cure_index_not_pending")
             time.sleep(0.25)
 
     def save(self):
