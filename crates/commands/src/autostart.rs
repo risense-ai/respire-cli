@@ -33,6 +33,13 @@ pub enum RuntimeCommand {
         #[arg(long, value_name = "JSON", value_parser = parse_operation_context)]
         context: crate::runtime_error::OperationContext,
     },
+    /// Query and finish the original core configuration operation without applying again.
+    CoreConfigResult {
+        #[arg(long, value_name = "JSON", value_parser = parse_operation_context)]
+        context: crate::runtime_error::OperationContext,
+        #[arg(long, value_name = "DIR")]
+        source_profile: PathBuf,
+    },
     /// Recover the original private keygen operation; never generate another key.
     AuthResult {
         #[arg(long, value_parser = parse_auth_operation_id)]

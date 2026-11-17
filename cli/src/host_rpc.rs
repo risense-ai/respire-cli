@@ -303,6 +303,21 @@ fn continue_request(request: &WireRequest) -> Result<respire_commands::output::R
 fn capture_request(request: &WireRequest) -> crate::Captured {
     let result = (|| -> Result<crate::Captured> {
         validate_header(request.v, &request.id)?;
+        if matches!(request.method.as_str(), "core_config.set" | "core_config.result") {
+            let params = request.params.as_object().context("core config params must be an object")?;
+            let setting = if request.method == "core_config.set" {
+                ensure!(params.len() == 1, "core config set accepts only setting");
+                Some(params.get("setting").and_then(Value::as_str).context("core config setting missing")?)
+            } else {
+                ensure!(params.is_empty(), "core config result accepts no new parameters");
+                None
+            };
+            crate::prepare_command_runtime()?;
+            let envelope = crate::autostart::control_core_config_rpc(&request.id, setting)?;
+            return Ok(crate::Captured {
+                exit: respire_commands::output_state::status_exit_code(envelope.status), envelope,
+            });
+        }
         if matches!(
             request.method.as_str(),
             "auth.login.continue" | "auth.key.continue"
@@ -556,6 +571,18 @@ mod tests {
             .params
         )
         .is_err());
+        for (method, params) in [
+            ("core_config.set", json!({})),
+            ("core_config.set", json!({"setting":42})),
+            ("core_config.set", json!({"setting":"read_heat=true", "scope":{}})),
+            ("core_config.result", json!({"setting":"read_heat=true"})),
+            ("core_config.result", json!({"source_profile":"another-profile"})),
+            ("core_config.result", json!({"scope":{}})),
+        ] {
+            let captured = capture_request(&WireRequest {v:1, id:"desktop-a7e71cb4-0016-4a1d-bc18-8f83816078ec".into(), method:method.into(), params});
+            assert_ne!(captured.exit, 0);
+            assert!(matches!(captured.envelope.status, respire_commands::output::Status::Fail));
+        }
         assert!(arguments(&request("auth.unknown", &[])).is_err());
         assert!(arguments(&request("auth.login", &[("user", "synthetic-user")])).is_err());
         assert!(arguments(&request("auth.reset", &[("unexpected", "value")])).is_err());
