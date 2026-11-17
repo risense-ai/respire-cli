@@ -886,6 +886,8 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                      and node.name in ('recover_fixture_urk', 'library_state', 'snapshot',
+                                       'database_checkpoint_state', 'assert_database_checkpoint_preserved',
+                                       'assert_historical_database_seed',
                                        'legacy_custody_alias', 'migrate_fixture_custody',
                                        'custody_consumer_error', 'verify_fixture_custody')]
         namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing,
@@ -1065,6 +1067,63 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                     db.execute('UPDATE memories SET ciphertext=?', (encrypt(True, key=replacement_urk),))
                 self.assertEqual(state(snapshot(profile), factors)[0], expected[0])
                 self.assertNotEqual(state(snapshot(profile), factors), expected)
+
+        checkpoint = self.helpers['database_checkpoint_state']
+        preserved = self.helpers['assert_database_checkpoint_preserved']
+        key, nonce = bytes(range(32)), bytes.fromhex('cd' * 12)
+        payload = json.dumps({'content': 'legacy association', 'supersedes': 'ancestor',
+                              'superseded_by': 'successor', 'see_also': ['peer']}).encode()
+        old = AESGCM(legacy.hkdf(key, None, b'onememory:data:v1')).encrypt(nonce, payload, None).hex()
+        raw = ([[('entry', old, nonce.hex(), 1, 0)]], [], b'')
+        seeded = ([[('entry', old, nonce.hex(), 1, 0), ('deleted', old, nonce.hex(), 1, 1)],
+                   [('pending operation',)], []], [], b'')
+        require_seed = self.helpers['assert_historical_database_seed']
+        require_seed(seeded)
+        for memories, outbox in ((seeded[0][0][:1], seeded[0][1]),
+                                (seeded[0][0][1:], seeded[0][1]),
+                                ([seeded[0][0][0], ('deleted', '', '', 1, 1)], seeded[0][1]),
+                                ([seeded[0][0][0], ('deleted', old, nonce.hex(), 0, 1)], seeded[0][1]),
+                                (seeded[0][0], [])):
+            with self.assertRaises(AssertionError):
+                require_seed(([memories, outbox, []], [], b''))
+        records = [('entry', legacy.decrypt_content(key, old, nonce.hex()), 1, 0)]
+        before = checkpoint(Path('.'), 'v1.0.11-dev.1', raw, records)
+        self.assertTrue(before['legacy_domain'])
+        after = {**before, 'legacy_domain': False, 'links': before['links'] + [('new', '', '', ())]}
+        preserved(before, after)
+        with self.assertRaisesRegex(AssertionError, 'relation fields changed'):
+            preserved(before, {**after, 'links': [('entry', 'ancestor', '', ('peer',))]})
+        with self.assertRaisesRegex(ValueError, 'unsupported database checkpoint'):
+            checkpoint(Path('.'), 'v1.0.15-dev.10', raw, records)
+
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory)
+            with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                db.executescript('CREATE TABLE witness_log(schema_version,library_id,seq,ts,action,entry_id,'
+                    'previous_entry_id,before_digest,after_digest,prev,hash);'
+                    'CREATE TABLE query_log(id INTEGER PRIMARY KEY,request_id TEXT);'
+                    'CREATE TABLE query_feedback(query_log_id INTEGER,memory_id TEXT,good INTEGER,'
+                    'source TEXT,marked_at INTEGER,revision INTEGER);')
+                event = (1, 'library', 1, 'stamp', 'create', 'entry', '', None, 'digest', 'previous', 'hash')
+                db.execute('INSERT INTO witness_log VALUES(?,?,?,?,?,?,?,?,?,?,?)', event)
+                db.execute("INSERT INTO query_log VALUES(1,'request')")
+                db.execute("INSERT INTO query_feedback VALUES(1,'entry',1,'human',1,1)")
+            before = checkpoint(profile, 'v1.0.17-dev.6', raw, records)
+            self.assertTrue(before['witness'] and before['requests'] and before['feedback'])
+            self.assertFalse(before['recovery_table'])
+            with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                db.execute('INSERT INTO witness_log VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                           (1, 'library', 2, 'later', 'update', 'entry', 'entry', 'digest', 'next', 'hash', 'next-hash'))
+            preserved(before, checkpoint(profile, 'v1.0.17-dev.6', raw, records))
+            with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                db.execute("UPDATE witness_log SET after_digest='changed' WHERE seq=1")
+            with self.assertRaisesRegex(AssertionError, 'witness prefix changed'):
+                preserved(before, checkpoint(profile, 'v1.0.17-dev.6', raw, records))
+            with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                db.execute("UPDATE witness_log SET after_digest='digest' WHERE seq=1")
+                db.execute('DELETE FROM query_feedback')
+            with self.assertRaisesRegex(AssertionError, 'explicit feedback changed'):
+                preserved(before, checkpoint(profile, 'v1.0.17-dev.6', raw, records))
 
 
 class OriginalFactorTests(unittest.TestCase):

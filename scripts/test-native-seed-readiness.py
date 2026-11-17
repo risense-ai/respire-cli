@@ -1,5 +1,6 @@
 """Local control-flow tests, not a substitute for real native M3 evidence."""
 import ast
+import json
 import pathlib
 import tempfile
 import unittest
@@ -57,14 +58,15 @@ class SeedReadinessTests(unittest.TestCase):
                 self.assertTrue(historical)
                 self.assertIn('--direct', command)
                 events.append(('legacy', state['profile'].name))
-            return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+            return SimpleNamespace(returncode=0, stdout=b'{"summary":{"id":"tombstone"}}', stderr=b'')
 
         def sleep(seconds):
             state['clock'] += 60  # Exercise the actual deadline without wall-clock waiting.
 
         namespace = dict(args=SimpleNamespace(seed_binary='old' if historical else None,
-                                             runtime_binary='runtime' if runtime else None),
-                         main=main, alternate=alternate, binary='cli', pathlib=pathlib,
+                                             runtime_binary='runtime' if runtime else None,
+                                             database_dev_checkpoint=None),
+                         main=main, alternate=alternate, binary='cli', pathlib=pathlib, json=json,
                          env={}, seed_env={}, select=select, run=run, captured_run=captured_run,
                          time=SimpleNamespace(monotonic=lambda: state['clock'], sleep=sleep))
         execute([WAIT], namespace)
@@ -103,7 +105,7 @@ class SeedReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(self.exercise(directory, historical=True),
                              [(event, profile) for profile in ('main', 'alternate')
-                              for event in ('select', 'legacy', 'legacy')])
+                              for event in ('select', 'legacy', 'legacy', 'legacy', 'legacy')])
 
     def test_in_process_seeding_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:

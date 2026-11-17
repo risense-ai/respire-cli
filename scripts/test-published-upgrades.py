@@ -116,18 +116,25 @@ def verify_upgrade(source):
     result=folder/'results'
     runtime_args=(['--runtime-binary',str(args.runtime_binary),'--runtime-sha256',args.runtime_sha256,
                    '--runtime-version',args.runtime_version] if args.runtime_binary else [])
+    checkpoint_args=['--database-dev-checkpoint',tag] if tag in DATABASE_DEV_CHECKPOINTS else []
     subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
         '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
-        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args],check=True)
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args],check=True)
     checks=json.loads((result/'real-account-return-verification.json').read_text())
     assert isinstance(checks,list) and len(checks)==1,'expected one candidate upgrade report'
     check=checks[0]
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
         'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
         'original_records_preserved','original_sync_work_preserved','urk_preserved',
-        'old_records_decrypted','post_upgrade_recall_checked',
+        'old_records_decrypted','post_upgrade_recall_checked','encrypted_tombstones_preserved',
     ]),'required real upgrade checks missing or failed'
     assert check.get('seed_vault_versions')==[1,3] and all(type(value) is int for value in check['seed_vault_versions']), 'historical v1/v3 session coverage missing'
+    if checkpoint_args:
+        checkpoint=check.get('database_dev_checkpoint')
+        assert isinstance(checkpoint,dict) and checkpoint.get('tag')==tag \
+            and checkpoint.get('special_state_seeded') is True \
+            and checkpoint.get('special_state_preserved') is True \
+            and checkpoint.get('verified_accounts')==['main','alternate'], 'database checkpoint-specific state was not verified'
     assert check.get('historical_credential_migration_actor')=='fixture', 'explicit fixture credential migration missing'
     custody=check.get('host_credential_custody')
     assert isinstance(custody,dict) and custody.get('required') is True and custody.get('cleanup_passed') is True, 'historical credential custody or cleanup unconfirmed'
@@ -166,6 +173,8 @@ def verify_upgrade(source):
         assert isinstance(rows,dict) and set(rows)=={'embedder','model index'} and all(
             row.get('status')=='ok' for row in rows.values()),'upgrade model readiness checks missing or failed'
     return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'upgrade_contract':upgrade_contract,
+            'database_dev_checkpoint':check.get('database_dev_checkpoint'),
+            'post_upgrade_sync_checked':check.get('post_upgrade_sync_checked') is True,
             'report':str(result/'real-account-return-verification.json')}
 
 if args.download_only:
@@ -188,6 +197,7 @@ try:
     if first_platform_release:
         report['upgrade_status']='not-applicable: first Intel macOS release; fresh inference is validated separately'
     report['passed']=True
+    report['post_upgrade_sync_checked']=False
     report['full_coverage']=report['all_published_sources_covered']=args.profile=='full'
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
