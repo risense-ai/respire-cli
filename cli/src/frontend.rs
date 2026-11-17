@@ -65,7 +65,7 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
                 Err(error) => Some(Err(error)),
             }
         }
-        Some(Command::AgentConfig { set: None }) => Some(
+        Some(Command::AgentConfig { set: None }) if !runtime_policy::client_only() => Some(
             runtime_policy::require_host("agent configuration read")
                 .and_then(|()| {
                     autostart::control_offline_read(
