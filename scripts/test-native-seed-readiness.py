@@ -19,6 +19,35 @@ def execute(nodes, namespace):
 
 
 class SeedReadinessTests(unittest.TestCase):
+    def exercise_ai(self, ready_after=2, missing=False):
+        tree = ast.parse(pathlib.Path(__file__).with_name('dev-ai-inject-smoke.py').read_text(encoding='utf-8'))
+        wait = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'wait_index_ready')
+        state = {'polls': 0, 'clock': 0}
+
+        def cli(*command):
+            self.assertEqual(command, ('doctor',))  # No tree-cure write is replayed.
+            state['polls'] += 1
+            return {'items': [{'name': name, 'status': 'ok' if state['polls'] >= ready_after else 'pending'}
+                              for name in (('embedder',) if missing else ('embedder', 'model index'))]}
+
+        def require(value, code):
+            if not value:
+                raise RuntimeError(code)
+
+        def sleep(seconds):
+            state['clock'] += 60
+
+        namespace = dict(require=require, time=SimpleNamespace(monotonic=lambda: state['clock'], sleep=sleep))
+        execute([wait], namespace)
+        namespace['wait_index_ready'](SimpleNamespace(cli=cli))
+        run = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'run')
+        statements = [ast.unparse(node) for node in run.body]
+        orphan = next(i for i, text in enumerate(statements) if text.startswith('orphan ='))
+        self.assertEqual(statements[orphan + 2], 'self.wait_index_ready()')
+        self.assertEqual(statements[orphan + 3], "result = self.cli('tree-cure', '--auto', '--min', '0.5')")
+        self.assertIn("result['status'] == 'ok'", statements[orphan + 5])
+        return state
+
     def exercise(self, directory, *, historical=False, runtime=True, artifacts='ready', ready_after=2):
         main = pathlib.Path(directory) / 'main'
         alternate = pathlib.Path(directory) / 'alternate'
@@ -79,6 +108,7 @@ class SeedReadinessTests(unittest.TestCase):
             events = self.exercise(directory)
             self.assertEqual(events, [(event, profile) for profile in ('main', 'alternate')
                                      for event in ('select', 'remember', 'doctor', 'doctor', 'stop')])
+        self.assertEqual(self.exercise_ai()['polls'], 2)
 
     def test_timeout_fails_without_stopping_or_selecting_next_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,12 +117,16 @@ class SeedReadinessTests(unittest.TestCase):
             self.assertTrue(self.state['alive'])
             self.assertEqual(sum(event == 'doctor' for event, _ in self.events), 4)
             self.assertFalse(any(event == 'stop' or profile == 'alternate' for event, profile in self.events))
+        with self.assertRaisesRegex(RuntimeError, 'cure_index_readiness_timeout'):
+            self.exercise_ai(ready_after=100)
 
     def test_missing_index_fails_even_with_ok_doctor(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(FileNotFoundError):
                 self.exercise(directory, artifacts='missing')
             self.assertFalse(any(event == 'stop' for event, _ in self.events))
+        with self.assertRaisesRegex(RuntimeError, 'cure_index_readiness_missing'):
+            self.exercise_ai(ready_after=1, missing=True)
 
     def test_empty_actual_artifacts_fail_even_with_ok_doctor(self):
         for artifacts in ('empty-directory', 'empty-file'):
