@@ -23,6 +23,7 @@ from dev_fixture_tty import run_hidden
 
 UPSTREAM = "https://api-dev.rsrs.rs"
 REQUIRED = ("model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade", "cloud_v3_secret_key_recovery_upgrade")
+DATABASE_REQUIRED = ("model_cpu_real", "legacy_ciphertext_sync")
 MODEL_HASHES = {
     "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
     "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
@@ -102,7 +103,7 @@ class Smoke:
         self.report = {"status": "running", "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"), "version": args.version,
             "binary_sha256": args.binary_sha256, "target": UPSTREAM, "cases": {},
-            "passed": False, "required_cases": list(("model_cpu_real", REQUIRED[2]) if getattr(args, "auth_salt_only", False) else REQUIRED),
+            "passed": False, "required_cases": list(("model_cpu_real", REQUIRED[2]) if getattr(args, "auth_salt_only", False) else DATABASE_REQUIRED),
             "dependency": "cryptography==46.0.3", "cloud_cleanup": {"passed": False, "events": [], "remaining_users": []}}
 
     def env(self, name, user=None):
@@ -295,6 +296,135 @@ class Smoke:
             and self.keys.credential_backend in ("native", "secret_service")
             and not {"pass", "super", "secret", "secret_key"}.intersection(session), code)
         require(self.keys.read("rsrs", "legacy-secret:" + alias) == secret, code)
+
+    def current_login(self, env, user, password, code):
+        """One current host login; an unknown outcome is never replayed."""
+        previous_alias = self.session(env).get("keyring_account")
+        completed = False
+        try:
+            request = {"v": 1, "id": "database-login-" + uuid.uuid4().hex, "method": "auth.login",
+                "params": {"addr": UPSTREAM, "user": user, "password": password, "super": code}}
+            result = self.cli(env, "login", host_request=request)
+            receipt = result.get("summary") or {}
+            operation_id = receipt.get("operation_id")
+            require(isinstance(operation_id, str) and operation_id != request["id"]
+                and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", operation_id)
+                and receipt.get("outcome") == "committed"
+                and receipt.get("source_profile") == str(Path(env["RSRS_DATA_DIR"]).resolve()),
+                "database_login_transaction_mismatch")
+            login = receipt.get("login") or {}
+            require(login.get("user") == user and login.get("addr") == UPSTREAM
+                and login.get("required_inputs") == [], "database_login_identity_mismatch")
+            completed = True
+        finally:
+            # Track a committed alias even if subsequent receipt validation fails.
+            committed = self.session(env)
+            created = (bool(committed.get("token")) and bool(committed.get("keyring_account"))
+                and committed.get("keyring_account") != previous_alias)
+            if completed or created:
+                require(created, "login_credential_fixture_new_session_missing")
+                self.keys.track_created_login(committed, user, code, password)
+        return result
+
+    def database_sync(self):
+        """Keep legacy data crypto independent of historical host authentication."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        env = self.env("database-original")
+        user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
+        self.diagnostic_secrets.add(password)
+        for slot in ("super:", "pass:"):
+            self.keys.reserve("rsrs", slot + user)
+        account = {"user": user, "token": None, "confirmed": False}
+        self.accounts.append(account)
+        self.report["cloud_cleanup"]["remaining_users"].append(user)
+        self.save()
+        registered = self.cli(env, "register", "--addr", UPSTREAM, "--user", user,
+            prompts=[("  login password (for the server; can be reset): ", password)])
+        session = self.session(env)
+        require(registered["summary"].get("ok") is True and session.get("user") == user
+            and session.get("addr") == UPSTREAM and bool(session.get("token")), "registered_identity_mismatch")
+        account.update(token=session["token"], confirmed=True)
+        code = registered["summary"].get("super")
+        require(isinstance(code, str) and bool(code), "registered_super_missing")
+        self.keys.track_created_login(session, user, code, password)
+        self.diagnostic_secrets.update((code, session["token"]))
+        env["RSRS_SUPER"] = code
+        vault = self.api(account, "GET", "/api/self/vault")
+        urk = AESGCM(v4_kek(code, vault["kdf_salt"], vault["wrapped_urk"])).decrypt(
+            bytes.fromhex(vault["urk_nonce"]), encrypted_bytes(vault["wrapped_urk"]), None)
+        require(len(urk) == 32, "original_urk_invalid")
+        self.diagnostic_secrets.add(urk.hex())
+        plaintext = "Synthetic historical ciphertext survives migration and independent-device synchronization."
+        active = self.cli(env, "remember", plaintext, "--title", "CI legacy data", "--force", "--importance", "important")["summary"]["id"]
+        deleted = self.cli(env, "remember", "Historical encrypted tombstone", "--title", "CI legacy deleted", "--force", "--importance", "important")["summary"]["id"]
+        self.cli(env, "forget", deleted)
+        original = self.profile(env)
+        payloads = {}
+        with sqlite3.connect(original / "rsrs.db") as db:
+            register_witness_functions(db)
+            rows = db.execute("SELECT id,ciphertext,nonce,deleted,dirty FROM memories WHERE id IN (?,?) ORDER BY id", (active, deleted)).fetchall()
+            require(len(rows) == 2 and {row[3] for row in rows} == {0, 1}
+                and all(row[4] == 1 for row in rows), "legacy_database_pending_seed_missing")
+            for memory_id, ciphertext, nonce, tombstone, _ in rows:
+                payload = decrypt_content(urk, ciphertext, nonce)
+                payloads[memory_id] = (payload, tombstone)
+                old_nonce = secrets.token_bytes(12).hex()
+                old_ciphertext = AESGCM(hkdf(urk, None, b"onememory:data:v1")).encrypt(bytes.fromhex(old_nonce), payload, None).hex()
+                db.execute("UPDATE memories SET ciphertext=?,nonce=? WHERE id=?", (old_ciphertext, old_nonce, memory_id))
+                db.execute("UPDATE core_artifacts SET source=? WHERE memory_id=?", (old_ciphertext, memory_id))
+            verify_fixture_witness(db)
+        db.close()
+        source = Path(env["HOME"]) / ".onememory"
+        original.rename(source)
+        (source / "rsrs.db").rename(source / "onememory.db")
+        source_config = source / "client.json"
+        config = json.loads(source_config.read_text()) if source_config.exists() else {}
+        config["data_dir"] = str(source)
+        source_config.write_text(json.dumps(config), encoding="utf-8")
+        original_session = (source / "session.json").read_bytes()
+        original_database = digest(source / "onememory.db")
+        alias = "legacy-" + hashlib.sha256(str(source.resolve()).encode()).hexdigest()[:16]
+        for slot in ("super:", "pass:", "legacy-secret:"):
+            self.keys.reserve("rsrs", slot + alias)
+        migration_env = dict(env)
+        migration_env.pop("RSRS_DATA_DIR")
+        install_published_runtime(self.args.binary, migration_env)
+        candidates = self.cli(migration_env, "migrate")["details"]["profiles"]
+        candidates = [row for row in candidates if Path(row["source"]).resolve() == source.resolve()]
+        require(len(candidates) == 1, "legacy_source_not_unique")
+        result = self.cli(migration_env, "migrate", "--source", candidates[0]["source_id"], "--account", candidates[0]["account"])
+        require(result["summary"].get("state") == "migrated", "full_migration_not_published")
+        destination = Path(result["summary"]["dir"])
+        upgraded_env = dict(env, RSRS_DATA_DIR=str(destination))
+        install_published_runtime(self.args.binary, upgraded_env)
+        self.read_entry(upgraded_env, active, plaintext)
+        with sqlite3.connect((destination / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            converted = db.execute("SELECT id,ciphertext,nonce,deleted FROM memories WHERE id IN (?,?) ORDER BY id", (active, deleted)).fetchall()
+        require(len(converted) == 2 and all(row[1].startswith(PREFIX)
+            and (decrypt_content(urk, row[1], row[2]), row[3]) == payloads[row[0]] for row in converted),
+            "legacy_database_content_not_preserved")
+        self.report["stage"] = "migrated_sync"
+        self.save()
+        require(self.cli(upgraded_env, "sync").get("status") == "ok", "migrated_sync_not_completed")
+        final_env = self.env("database-new-device")
+        self.current_login(final_env, user, password, code)
+        recovered = self.session(final_env)
+        require(recovered.get("user") == user and bool(recovered.get("token")), "fresh_login_identity_mismatch")
+        account["token"] = recovered["token"]
+        self.report["stage"] = "fresh_device_sync"
+        self.save()
+        require(self.cli(final_env, "sync").get("status") == "ok", "fresh_device_sync_not_completed")
+        self.read_entry(final_env, active, plaintext)
+        with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            remote = db.execute("SELECT id,ciphertext,nonce,deleted FROM memories WHERE id IN (?,?) ORDER BY id", (active, deleted)).fetchall()
+        require(remote == converted, "new_device_ciphertext_or_tombstone_differs")
+        require(self.api(account, "GET", "/api/self/vault") == vault, "database_sync_changed_current_vault")
+        require((source / "session.json").read_bytes() == original_session
+            and digest(source / "onememory.db") == original_database, "original_source_changed")
+        self.passed("legacy_ciphertext_sync", urk_preserved=True, original_source_preserved=True,
+            old_content_decrypted=True, ciphertext_reencrypted=True, encrypted_tombstone_preserved=True,
+            migrated_push=True, independent_device_pull_decrypted=True, current_host_login=True,
+            historical_authentication_tested=False)
 
     def run_version(self, version):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -572,8 +702,11 @@ class Smoke:
             and probe.get("fresh_session") is True and probe.get("dimensions") == 1024
             and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=1024, model_hashes=MODEL_HASHES)
-        for version in ((2,) if self.args.auth_salt_only else (1, 2, 3)):
-            self.run_version(version)
+        if self.args.auth_salt_only:
+            # Explicit manual authentication diagnostic, outside release acceptance.
+            self.run_version(2)
+        else:
+            self.database_sync()
         self.report["status"] = "passed"
 
 
@@ -608,7 +741,7 @@ def main():
             except Exception as error:
                 smoke.report["keyring_cleanup"] = {"passed": False, "failure_code": type(error).__name__}
         required = smoke.report["required_cases"]
-        smoke.report["scope"] = "real_auth_salt_migration" if args.auth_salt_only else "legacy_vault"
+        smoke.report["scope"] = "real_auth_salt_migration" if args.auth_salt_only else "historical_ciphertext_sync"
         smoke.report["missing_cases"] = [case for case in required if case not in smoke.report["cases"]]
         if not smoke.report["cloud_cleanup"]["passed"]:
             smoke.report["status"] = "failed"

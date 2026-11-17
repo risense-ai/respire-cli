@@ -1151,7 +1151,7 @@
       "reason": "grant_snapshot has no callable public transport consumer; no nonexistent endpoint is added. Existing CLI CRUD, persistence and automatic root revocation remain required."
     }
   ],
-  "coverage_scope": "Existing callable operations and semantic effects; not an infinite Cartesian product of flags. Historical vault input formats require controlled legacy fixtures before claiming compatibility coverage.",
+  "coverage_scope": "Existing callable operations and semantic effects; not an infinite Cartesian product of flags. Historical database formats use published checkpoints; legacy ciphertext also requires migrated push and independent current-device pull/decryption, without historical host authentication combinations.",
   "supplemental_required": [
     "runtime",
     "ai_inject",
@@ -1201,9 +1201,9 @@
     },
     {
       "suite": "legacy_vault",
-      "feature": "Login/vault v1/v2/v3 to v4 upgrades and secret-key two-factor recovery",
-      "source": "crates/app/src/auth.rs:541",
-      "reason": "Current disposable users are v4. Must provision controlled genuine legacy wrap material through approved development API; passing --secret-key on v4 does not prove historical upgrades."
+      "feature": "Legacy ciphertext migration and real push/pull decryption on an independent current device",
+      "source": "scripts/dev-legacy-vault-smoke.py:database_sync",
+      "reason": "Use current registered accounts and explicit host key input. Preserve old ciphertext, original URK, encrypted tombstones and source bytes through migration and real remote sync; published DB checkpoint coverage remains separate. Old authentication salts, credential locations and cross-version TTY prompts are not release requirements."
     },
     {
       "suite": "profile_migration",

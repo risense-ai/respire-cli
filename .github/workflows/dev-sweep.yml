@@ -5,8 +5,8 @@ name: Dev server sweep
 on:
   workflow_dispatch:
     inputs:
-      auth_salt_only:
-        description: Only test real legacy authentication salt migration and fresh CLI login
+      database_sync_only:
+        description: Only test legacy ciphertext migration, real sync and independent current-device decryption
         type: boolean
         default: false
       api_only:
@@ -35,7 +35,7 @@ on:
         type: string
   workflow_call:
     inputs:
-      auth_salt_only:
+      database_sync_only:
         type: boolean
         default: false
       api_only:
@@ -63,14 +63,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.auth_salt_only || inputs.business_only }}
+    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
     name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((inputs.local_api_only || inputs.auth_salt_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON((inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -91,13 +91,13 @@ jobs:
           CLI_SHA: ${{ inputs.cli_sha }}
           API_ONLY: ${{ inputs.api_only }}
           LOCAL_API_ONLY: ${{ inputs.local_api_only }}
-          AUTH_SALT_ONLY: ${{ inputs.auth_salt_only }}
+          DATABASE_SYNC_ONLY: ${{ inputs.database_sync_only }}
           BUSINESS_ONLY: ${{ inputs.business_only }}
           EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
         run: |
-          node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.AUTH_SALT_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
+          node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.DATABASE_SYNC_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
-          node -e 'if(process.env.AUTH_SALT_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
+          node -e 'if(process.env.DATABASE_SYNC_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.BUSINESS_ONLY==="true"&&!/^[a-f0-9]{40}$/.test(process.env.EXPECTED_RUNTIME_SHA||"")) throw new Error("Pass the exact published Runtime source SHA for business diagnostics")'
           node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("CLI smoke requires https://api-dev.rsrs.rs"); if(!process.env.CLI_RUN_ID||!process.env.CLI_SHA) throw new Error("Pass the exact CI run ID and source SHA; mutable npm tags are not smoke artifacts")'
       - name: Verify the original release build
@@ -214,7 +214,7 @@ jobs:
           bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
       - name: Install PowerShell
-        if: ${{ !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Windows' }}
+        if: ${{ !inputs.local_api_only && !inputs.database_sync_only && runner.os != 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -231,7 +231,7 @@ jobs:
             brew install powershell
           fi
       - name: Sweep the exact CI binary
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.database_sync_only && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
         env:
           RSRS_LANG: en
@@ -255,7 +255,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Upload base smoke diagnostics
-        if: ${{ always() && !inputs.local_api_only && !inputs.auth_salt_only }}
+        if: ${{ always() && !inputs.local_api_only && !inputs.database_sync_only }}
         uses: actions/upload-artifact@v4
         with:
           retention-days: 1
@@ -266,7 +266,7 @@ jobs:
             ${{ runner.temp }}/base-sweep-credentials/business-keyring-selftest.json
           if-no-files-found: warn
       - name: Diagnose GNU login interruption with the original binary
-        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && matrix.target == 'x86_64-unknown-linux-gnu' && steps.standalone_runtime.outcome == 'success' && steps.native_credentials.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && matrix.target == 'x86_64-unknown-linux-gnu' && steps.standalone_runtime.outcome == 'success' && steps.native_credentials.outcome == 'success' }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -277,7 +277,7 @@ jobs:
           python3 scripts/test-login-interruption-contract.py
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/om-sweep/models/bge-m3"
       - name: Verify all supplementary CLI contracts
-        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -290,7 +290,7 @@ jobs:
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/supplement-credentials" --timeout 6600 -- python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
       - name: Verify historical Secret Service profile migration
-        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -309,7 +309,7 @@ jobs:
           python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
           test "$fixture_status" -eq 0
       - name: Verify native encrypted profile migration
-        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -327,8 +327,8 @@ jobs:
           $migrationExit = $LASTEXITCODE
           python scripts/dev-smoke-gate.py --migration-only --cli-report (Join-Path $env:RUNNER_TEMP 'om-sweep/coverage.json') --profile-migration (Join-Path $migrationRoot 'migration-coverage.json') --report (Join-Path $env:RUNNER_TEMP 'dev-supplements/migration-platform-gate.json') --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA
           if ($migrationExit -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Native migration or artifact gate failed.' }
-      - name: Verify real legacy authentication salt migration
-        if: ${{ !cancelled() && inputs.auth_salt_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+      - name: Verify migrated legacy ciphertext on an independent current device
+        if: ${{ !cancelled() && inputs.database_sync_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -340,7 +340,7 @@ jobs:
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           mkdir -p "$RUNNER_TEMP/dev-supplements"
-          python3 scripts/dev-legacy-vault-smoke.py --auth-salt-only --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/database-sync-credentials" --timeout 1500 -- python3 scripts/dev-legacy-vault-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
       - name: Diagnose runtime contracts without a full release claim
         if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
@@ -380,7 +380,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.auth_salt_only && !inputs.business_only }}
+    if: ${{ !inputs.database_sync_only && !inputs.business_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
