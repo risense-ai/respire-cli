@@ -111,8 +111,18 @@ Runtime24 为旧宿主保留原有文件读取和私有 setter，不能据此宣
 通过独立 CLI 复用该流程。普通及 client-only 的 agent-config 读取仍不启动 Runtime。
 启动应用使用既有安装接管锁、配置修订检查和 Runtime revision 0 CAS；非零 revision
 由已经应用的操作所有，不以持久配置覆盖在线 setter，也不将 read 回读冒充 apply。
-原操作号和响应保存在宿主的 `runtime/autostart/core-config-application.json`；丢失响应
-时只查询原操作，旧实例退出后仍未知的操作会阻止后续启动应用，不自动重放。
+候选与配置修订来自同一份已捕获字节，并复用宿主的严格 JSON／对象校验；发送前另核对当前
+字节的修订。缺文件明确解析为默认配置，且在修订中与空文件区分；空文件仍按非法 JSON 拒绝。
+原操作号和响应按已核验的完整 owner scope 分开保存在宿主的
+`runtime/autostart/core-config-applications/<scope-sha256>.json`。文件名使用规范化 profile 路径与
+完整 scope（account_id／instance_id／generation）序列化字节的 SHA-256，不把原始身份字段
+拼入路径。同一 owner 丢失响应时只查询原操作，仍未知则
+明确失败，不根据 read 值补造成功，也不重发 apply。旧 owner 经既有生命周期核验退出后，
+新 instance／generation 的 scope 在 revision 0 下初始化当前持久配置，使用新的操作号并取得
+真实 apply 回执。旧 unknown 记录保持原样，不被覆盖，也不阻断新 owner 的初始化。
+身份及原操作核验通过的 `core_config_rejected` 与 Unknown 分开处理：首次拒绝仍报错并保存
+原响应（包括首次从原操作查询恢复拒绝的情况）；同 owner 后续启动仅在真实 read 证明已有非零 revision 时继续，不覆盖其他客户端的
+应用，也不把拒绝回执改成我方已应用。revision 仍为 0 时继续报告原拒绝，不自动重发。
 本段描述源码行为；合并、公开产物及原生验收状态须分别核对。
 
 Runtime24 源码固定为 `7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b`，以下仍未清理，

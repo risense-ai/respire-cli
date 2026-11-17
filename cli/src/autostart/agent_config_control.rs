@@ -167,7 +167,7 @@ fn original_core_response(scope: &respire_protocol::RuntimeRequestScope, operati
 struct StartupCoreConfig {
     profile: std::path::PathBuf,
     operation_id: String,
-    config_revision: String,
+    config_revision: Option<String>,
     control: CoreConfigTransaction,
 }
 
@@ -181,7 +181,9 @@ pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
         && std::path::Path::new(&owner.installation_root).canonicalize()? == root,
         "startup core configuration owner changed");
     let scope = crate::net_rpc::request_scope(owner)?;
-    let path = root.join("runtime/autostart/core-config-application.json");
+    let scope_digest = crate::autostart::hash(&serde_json::to_vec(&(&profile, &scope))?);
+    let path = root.join("runtime/autostart/core-config-applications")
+        .join(format!("{scope_digest}.json"));
     respire_client_host::config::normalize_control_path(&path)?;
     let mut previous = match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),
@@ -190,38 +192,53 @@ pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
     };
     let saved: Option<StartupCoreConfig> = previous.as_deref().map(serde_json::from_slice).transpose()?;
     if let Some(mut saved) = saved.filter(|saved| saved.control.apply_sent) {
-        let recovered = saved.control.response.is_none();
-        if saved.control.response.is_none() {
-            anyhow::ensure!(saved.profile == profile && saved.control.scope.as_ref() == Some(&scope),
-                "agent_config_outcome_unknown; startup core owner exited; retain original operation {}; do not replay",
-                saved.operation_id);
+        anyhow::ensure!(saved.profile == profile && saved.control.scope.as_ref() == Some(&scope),
+            "startup core journal differs from its owner scope");
+        let recovered = saved.control.response.as_ref().is_none_or(|response|
+            !response.ok && response.code.as_deref() != Some("core_config_rejected"));
+        if recovered {
             saved.control.response = Some(original_core_response(&scope, &saved.operation_id)?);
         }
         let response = saved.control.response.as_ref().context("startup core receipt missing")?;
-        anyhow::ensure!(response.id == saved.operation_id
+        anyhow::ensure!(response.v == 1 && response.exit >= 0 && response.ok == (response.exit == 0)
+            && response.id == saved.operation_id
             && response.scope == saved.control.scope
             && response.operation_id.as_deref() == Some(saved.operation_id.as_str())
             && response.idempotency_key.as_deref() == Some(saved.operation_id.as_str()),
             "startup core receipt operation mismatch");
+        let rejected = !response.ok && response.code.as_deref() == Some("core_config_rejected");
+        anyhow::ensure!(response.ok || rejected,
+            "agent_config_outcome_unknown; original startup core operation is unresolved; do not replay");
+        if rejected {
+            let reason = response.error.as_deref().context("core rejection reason missing")?;
+            if recovered {
+                crate::autostart::private_write(&path, &serde_json::to_vec(&saved)?,
+                    previous.as_deref().map(crate::autostart::hash).as_deref())?;
+                anyhow::bail!("startup core operation {} was rejected: {reason}; no automatic retry",
+                    saved.operation_id);
+            }
+            let current = core_exchange(maintenance, &profile, &scope, "core_config.read",
+                &uuid::Uuid::new_v4().to_string(), None, None)?;
+            let current = core_state(&current, "current", None, None)?;
+            // A competing successful apply can explain our CAS rejection. Preserve
+            // that owner's revision and our rejected receipt; never retry this write.
+            anyhow::ensure!(current["revision"].as_u64().is_some_and(|revision| revision > 0),
+                "startup core operation {} was rejected: {reason}; no automatic retry", saved.operation_id);
+            return Ok(());
+        }
         core_state(response, "applied", Some(&saved.control.candidate), Some(1))?;
         anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
             == saved.control.validated.as_ref().context("startup core validation missing")?["effective"],
             "startup core application differs from validation");
-        if saved.profile == profile && saved.control.scope.as_ref() == Some(&scope) {
-            if recovered {
-                crate::autostart::private_write(&path, &serde_json::to_vec(&saved)?,
-                    previous.as_deref().map(crate::autostart::hash).as_deref())?;
-            }
-            return Ok(());
+        if recovered {
+            crate::autostart::private_write(&path, &serde_json::to_vec(&saved)?,
+                previous.as_deref().map(crate::autostart::hash).as_deref())?;
         }
+        return Ok(());
     }
     let config_path = profile.join("agent.json");
-    let bytes = match std::fs::read(&config_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let candidate = core_candidate(&crate::client_config::read_agent_config_for_write(&profile)?)?;
+    let bytes = crate::client_config::agent_config_bytes(&config_path)?;
+    let candidate = core_candidate(&crate::client_config::parse_agent_config_bytes(bytes.as_deref())?)?;
     let current = core_exchange(maintenance.as_deref_mut(), &profile, &scope, "core_config.read",
         &uuid::Uuid::new_v4().to_string(), None, None)?;
     let current = core_state(&current, "current", None, None)?;
@@ -232,15 +249,12 @@ pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
         &uuid::Uuid::new_v4().to_string(), Some(&candidate), None)?;
     let validated = core_state(&validated, "validated", Some(&candidate), Some(0))?;
     let mut record = StartupCoreConfig { profile: profile.clone(),
-        operation_id: uuid::Uuid::new_v4().to_string(), config_revision: crate::autostart::hash(&bytes),
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        config_revision: bytes.as_deref().map(crate::autostart::hash),
         control: CoreConfigTransaction { scope: Some(scope.clone()), revision: 0, candidate,
             validated: Some(validated), apply_sent: true, rollback_sent: false, response: None } };
-    let actual = match std::fs::read(&config_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    anyhow::ensure!(crate::autostart::hash(&actual) == record.config_revision,
+    let actual = crate::client_config::agent_config_bytes(&config_path)?;
+    anyhow::ensure!(actual.as_deref().map(crate::autostart::hash) == record.config_revision,
         "agent config changed before startup application");
     let sent = serde_json::to_vec(&record)?;
     crate::autostart::private_write(&path, &sent, previous.as_deref().map(crate::autostart::hash).as_deref())?;
