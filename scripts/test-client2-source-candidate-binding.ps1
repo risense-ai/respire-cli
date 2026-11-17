@@ -9,6 +9,19 @@ foreach ($name in @('Assert-SourceClient2Manifest','Assert-CandidateRegularPath'
     . ([scriptblock]::Create($nodes[0].Extent.Text))
 }
 $source=$ast.Extent.Text
+$payloadLoops=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Condition.Extent.Text.Contains('$runtimeMetadata.files')},$true))
+if ($payloadLoops.Count -ne 2) { throw 'Online and candidate Runtime payload checks must both remain' }
+$runtimeMetadata=@{files=@(
+    @{path='rsrs-runtime.exe'}, @{path='core-runtime.json'}, @{path='core-notices/consumer/.coderabbit.yaml'},
+    @{path='core-notices-extra/library.dll'}, @{path='lib/provider.dll'}
+)}
+foreach ($loop in $payloadLoops) {
+    $selected=@(Invoke-Expression $loop.Condition.Extent.Text)
+    if (($selected.path -join ',') -cne 'rsrs-runtime.exe,core-runtime.json,core-notices-extra/library.dll,lib/provider.dll') { throw 'Managed payload inventory omitted loader files or retained compacted notices' }
+    foreach ($check in @('$file.size','$file.sha256','Get-FileHash')) {
+        if (-not $loop.Body.Extent.Text.Contains($check)) { throw 'Runtime payload integrity check missing' }
+    }
+}
 foreach ($old in @("release = 'v2.0.0-dev.5'", "source_sha = 'be682108", '/releases/download/v2.0.0-dev.5/')) {
     if ($source.Contains($old)) { throw 'Old Client2 defaults remain' }
 }
