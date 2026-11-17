@@ -149,6 +149,7 @@ class UpgradeProfileTest(unittest.TestCase):
                 else:
                     self.assertFalse(download_only, "download-only must never execute a product fixture")
                     if standalone:
+                        self.assertNotIn('--expect-supervised-worker', command)
                         self.assertEqual(command[command.index("--runtime-binary") + 1], str(runtime))
                         self.assertEqual(command[command.index("--runtime-sha256") + 1], runtime_digest)
                         self.assertEqual(command[command.index("--runtime-version") + 1], runtime_version)
@@ -179,11 +180,14 @@ class UpgradeProfileTest(unittest.TestCase):
                             'verified_accounts': ['main', 'alternate']}
                     if standalone:
                         checks[0].update(upgrade_contract="standalone-v1", source_rpc_checked=False,
-                            legacy_client_rejected=False, legacy_handoff_actor="fixture",
-                            live_owner_restart_rejected=True, safe_restart_checked=True,
+                            legacy_client_rejected=False, legacy_handoff_actor=None,
+                            live_owner_restart_rejected=False, safe_restart_checked=False,
+                            supervised_worker_checked=False, global_engine_preserved=False,
+                            coverage_scope="historical-database", host_checks_delegated_to="resident-concurrency",
+                            normal_reopen_checked=True, runtime_artifact_reused=True,
                             old_rpc_checked=False, forced_restart_checked=False,
                             runtime_mode="standalone_runtime", standalone_runtime_evidence=True,
-                            runtime_installed_after_legacy_data=True,
+                            runtime_installed_after_legacy_data=False,
                             runtime_binary_sha256=runtime_digest, runtime_version=runtime_version,
                             runtime_identity_receipts=[{"pid": 1234, "instance_id": "fake-child-only"}])
                     if checks_transform is not None:
@@ -385,11 +389,10 @@ class UpgradeProfileTest(unittest.TestCase):
                     self.assert_rejected_checks(lambda checks: [{**checks[0], "upgrade_contract": contract}], standalone)
 
     def test_standalone_required_flags_are_present_and_strictly_true(self):
-        flags = ["passed", "real_model", "supervised_worker_checked", "global_engine_preserved",
+        flags = ["passed", "real_model",
                  "distinct_vault_keys", "original_records_preserved", "original_sync_work_preserved",
                  "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked",
-                 "live_owner_restart_rejected",
-                 "safe_restart_checked", "standalone_runtime_evidence", "runtime_installed_after_legacy_data"]
+                 "normal_reopen_checked", "standalone_runtime_evidence", "runtime_artifact_reused"]
         self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()
                                                     if key not in flags}], True)
         for name in flags:
@@ -401,15 +404,18 @@ class UpgradeProfileTest(unittest.TestCase):
                     self.assert_rejected_checks(lambda checks: [{**checks[0], name: value}], True)
 
     def test_standalone_legacy_flags_must_be_explicit_false(self):
-        for name in ["old_rpc_checked", "forced_restart_checked"]:
+        for name in ["old_rpc_checked", "forced_restart_checked", "live_owner_restart_rejected",
+                     "safe_restart_checked", "supervised_worker_checked", "in_process_checked", "global_engine_preserved"]:
             self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()
                                                         if key != name}], True)
             for value in [None, True, 0, 1, "false"]:
                 with self.subTest(name=name, value=value):
                     self.assert_rejected_checks(lambda checks: [{**checks[0], name: value}], True)
 
-    def test_standalone_requires_fixture_handoff_and_runtime_evidence(self):
-        fields = {"legacy_handoff_actor": [None, "", True, "runtime", "client"],
+    def test_standalone_requires_database_scope_and_runtime_evidence(self):
+        self.assert_rejected_checks(lambda checks: [{**checks[0], 'legacy_handoff_actor': 'fixture'}], True)
+        fields = {"coverage_scope": [None, "", True, "current-host"],
+                  "host_checks_delegated_to": [None, "", True, "historical-database"],
                   "runtime_mode": [None, "explicit_cli_shim"],
                   "runtime_binary_sha256": [None, "wrong"], "runtime_version": [None, "wrong"],
                   "runtime_identity_receipts": [None, [], [None]]}

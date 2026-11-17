@@ -303,8 +303,8 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertTrue(same_existing_path('\\\\?\\' + str(first.resolve()), first))
                 self.assertTrue(same_existing_path('\\\\?\\' + str(root.resolve()), root))
 
-    def test_upgrade_fixture_downloads_runtime_after_legacy_data_and_handoff(self):
-        tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text())
+    def test_upgrade_fixture_reuses_verified_runtime_after_legacy_seed(self):
+        tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text(encoding='utf-8'))
         branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)]
         fresh = next(node for node in branches
                      if ast.unparse(node.test) == 'not (args.seed_binary and args.runtime_binary)')
@@ -312,21 +312,23 @@ class FixtureInstallationTests(unittest.TestCase):
                        if ast.unparse(node.test) == 'args.seed_binary and args.runtime_binary')
         calls = [node for node in ast.walk(upgrade) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Name)]
-        install = next(node for node in calls if node.func.id == 'install_official_runtime')
-        stage = next(node for node in calls if node.func.id == 'stage_fixture_cli')
-        self.assertLess(stage.lineno, install.lineno)
+        install = next(node for node in calls if node.func.id == 'install_published_runtime')
+        self.assertFalse(any(node.func.id in ('install_official_runtime', 'stage_fixture_cli') for node in calls))
         loop = next(node for node in tree.body if isinstance(node, ast.For))
         session = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
                        and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text'
                        and any(isinstance(part, ast.Constant) and part.value == 'session.json'
                                for part in ast.walk(node.func.value)))
-        handoff = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
-                       and any(isinstance(target, ast.Name) and target.id == 'legacy_handoff_actor'
-                               for target in node.targets)
-                       and isinstance(node.value, ast.Constant) and node.value.value == 'fixture')
+        old_host = next(node for node in branches if any(isinstance(child, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == 'web_help' for target in child.targets)
+            for child in node.body))
+        exec(compile(ast.Module(body=[old_host], type_ignores=[]), '<skip-old-host>', 'exec'),
+             dict(args=types.SimpleNamespace(seed_binary=True), database_upgrade=True))
         self.assertLess(fresh.end_lineno, session.lineno)
-        self.assertLess(session.lineno, handoff.lineno)
-        self.assertLess(handoff.lineno, install.lineno)
+        self.assertLess(session.lineno, install.lineno)
+        baseline = next(node for node in upgrade.body if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == 'legacy_data' for target in node.targets))
+        self.assertLess(baseline.lineno, install.lineno)
         snapshot_assert = next(node for node in ast.walk(upgrade) if isinstance(node, ast.Assert)
                                and any(isinstance(part, ast.Name) and part.id == 'legacy_data'
                                        for part in ast.walk(node.test)))
@@ -338,6 +340,31 @@ class FixtureInstallationTests(unittest.TestCase):
                       and [getattr(arg, 'value', None) for arg in node.args[:2]] == ['account', 'use'])
         self.assertLess(snapshot_assert.lineno, custody.lineno)
         self.assertLess(custody.lineno, switch.lineno)
+        for fault in (None, 'missing', 'changed-data', 'invalid-artifact'):
+            with self.subTest(artifact=fault), tempfile.TemporaryDirectory() as directory:
+                main = Path(directory)
+                alternate = main / 'accounts/alternate'
+                data = {str(main): 'original-main', str(alternate): 'original-alternate'}
+                def reuse(binary, env):
+                    if fault == 'invalid-artifact':
+                        raise ValueError('fixture artifact verification failed')
+                    if fault == 'changed-data':
+                        data[str(main)] = 'changed database'
+                    return None if fault == 'missing' else main / 'verified-runtime'
+                helper = Mock(side_effect=reuse)
+                scope = dict(args=types.SimpleNamespace(seed_binary=True, runtime_binary='selected-runtime'),
+                    main=main, alternate=alternate, binary='fixture-cli', env={}, runtime_artifact_reused=False,
+                    snapshot=lambda profile: data[str(profile)], install_published_runtime=helper)
+                code = compile(ast.Module(body=[upgrade], type_ignores=[]), '<reuse-upgrade-artifact>', 'exec')
+                if fault:
+                    with self.assertRaises(ValueError if fault == 'invalid-artifact' else AssertionError):
+                        exec(code, scope)
+                    self.assertFalse(scope['runtime_artifact_reused'])
+                else:
+                    exec(code, scope)
+                    self.assertTrue(scope['runtime_artifact_reused'])
+                    self.assertEqual(scope['args'].runtime_binary, main / 'verified-runtime')
+                helper.assert_called_once_with('fixture-cli', scope['env'])
         post_restart = next(node for node in ast.walk(loop) if isinstance(node, ast.If)
                             and ast.unparse(node.test) == 'args.seed_binary'
                             and any(isinstance(child, ast.For) for child in node.body)
