@@ -338,6 +338,44 @@ class FixtureInstallationTests(unittest.TestCase):
                       and [getattr(arg, 'value', None) for arg in node.args[:2]] == ['account', 'use'])
         self.assertLess(snapshot_assert.lineno, custody.lineno)
         self.assertLess(custody.lineno, switch.lineno)
+        post_restart = next(node for node in ast.walk(loop) if isinstance(node, ast.If)
+                            and ast.unparse(node.test) == 'args.seed_binary'
+                            and any(isinstance(child, ast.For) for child in node.body)
+                            and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                                    and child.func.id == 'verify_fixture_custody' for child in ast.walk(node)))
+        for platform in ('darwin', 'linux'):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                main = Path(directory)
+                alternate = main / 'accounts/alternate'
+                alternate.mkdir(parents=True)
+                config = main / 'client.json'
+                config.write_text(json.dumps({'data_dir': str(main)}), encoding='utf-8')
+                events = []
+                def select_account(*command):
+                    self.assertEqual(command[:2], ('account', 'use'))
+                    events.append(command[2])
+                    profile = alternate if command[2] == 'alternate' else main
+                    config.write_text(json.dumps({'data_dir': str(profile)}), encoding='utf-8')
+                def verify(profile, *unused):
+                    if platform == 'darwin':
+                        self.assertEqual(json.loads(config.read_bytes())['data_dir'], str(profile))
+                    events.append('verify-' + profile.name)
+                namespace = dict(args=types.SimpleNamespace(seed_binary=True, runtime_binary='runtime'),
+                    sys=types.SimpleNamespace(platform=platform), main=main, alternate=alternate,
+                    run=select_account, wait_index_ready=lambda: events.append('ready'),
+                    verify_fixture_custody=verify, keys=None, binary='fixture-cli', env={},
+                    custody_slots={str(path): None for path in (main, alternate)},
+                    expected_urks={str(path): None for path in (main, alternate)},
+                    recovery_factors={str(path): None for path in (main, alternate)},
+                    before_restart={str(path): str(path) for path in (main, alternate)},
+                    config_before=config.read_bytes(), snapshot=lambda path: path,
+                    library_state=lambda path, factors: str(path), replacement='restart-owner',
+                    observe_runtime=lambda: 'selected-owner')
+                exec(compile(ast.Module(body=[post_restart], type_ignores=[]), '<post-restart-custody>', 'exec'), namespace)
+                expected = (['alternate', 'ready', 'verify-alternate', 'main', 'ready', 'verify-' + main.name]
+                            if platform == 'darwin' else ['verify-alternate', 'verify-' + main.name])
+                self.assertEqual(events, expected)
+                self.assertEqual(namespace['replacement'], 'selected-owner' if platform == 'darwin' else 'restart-owner')
 
     def run_fixture(self, fault=None):
         with tempfile.TemporaryDirectory() as temporary:
