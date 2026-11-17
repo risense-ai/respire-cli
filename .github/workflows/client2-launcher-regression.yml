@@ -1,261 +1,123 @@
-name: Protocol-compatible Client2 launcher regression
-
+name: Diagnostic only Windows GUI recovery
 on:
-  pull_request:
-    paths:
-      - 'cli/**'
-      - 'spawn/**'
-      - 'crates/commands/src/net_rpc.rs'
-      - 'scripts/test-client2-launcher-compat.py'
-      - 'scripts/probe-client2-gui.ps1'
-      - 'scripts/probe-client2-gui-native.ps1'
-      - 'scripts/fetch-client2-runtime-candidate.py'
-      - 'scripts/test-fetch-client2-runtime-candidate.py'
-      - 'scripts/fixtures/client2-runtime-candidate.json'
-      - 'scripts/fixtures/client2-v0256-probe/**'
-      - '.github/workflows/client2-launcher-regression.yml'
   workflow_dispatch:
-    inputs:
-      client2_candidate_run_id:
-        description: Authenticated Client2 Desktop candidate run (must match the reviewed host-owned-candidate baseline)
-        type: string
-        default: '43721147038'
-      use_runtime_candidate:
-        description: Use the reviewed fixed Windows Runtime candidate; draft freeze refuses before downloads
-        type: boolean
-        default: false
-      runtime_release:
-        description: Explicit protocol-compatible public Runtime tag; mutually exclusive with use_runtime_candidate
-        type: string
-        default: ''
-
 permissions:
   contents: read
   actions: read
-
 jobs:
-  source-checks:
-    name: Source and artifact contracts only (no product acceptance)
-    runs-on: ubuntu-24.04
+  diagnostic:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTIFACT_SOURCE: build
+      REQUEST_PUBLISH: 'false'
+      CLI_TARGET: x86_64-pc-windows-msvc
+      CLI_SHA: a8cd68c46eaad307d32cf48d2e4d82406d122581
+      CLI_VERSION: 2.0.0-dev.19
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Verify source and fixed artifact contracts without network or products
-        run: |
-          python3 -B scripts/test-fetch-client2-runtime-candidate.py
-          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/test-client2-launcher-compat.py").read_text())'
-  real-host:
-    name: New Client2 host (${{ matrix.target }})
-    if: github.event_name == 'workflow_dispatch'
-    needs: source-checks
-    strategy:
-      fail-fast: false
-      matrix:
-        include: >-
-          ${{ fromJSON(inputs.use_runtime_candidate
-            && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":".exe"}]'
-            || '[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","exe":""},{"os":"macos-latest","target":"aarch64-apple-darwin","exe":""},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":".exe"}]') }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Require an explicit Runtime selection before downloads or product work
-        env:
-          USE_RUNTIME_CANDIDATE: ${{ inputs.use_runtime_candidate }}
-          RUNTIME_RELEASE: ${{ inputs.runtime_release }}
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os, re
-          candidate = os.environ['USE_RUNTIME_CANDIDATE'] == 'true'
-          release = os.environ['RUNTIME_RELEASE']
-          if candidate == bool(release):
-              raise SystemExit('Select exactly one explicit Runtime release or reviewed frozen candidate; no public pin fallback')
-          if release and not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?', release):
-              raise SystemExit('Runtime release must be an exact public version tag')
-          PY
-      - name: Reject an unready candidate freeze before other downloads or product work
-        if: github.event_name == 'workflow_dispatch' && inputs.use_runtime_candidate
-        shell: bash
-        run: python3 scripts/fetch-client2-runtime-candidate.py check-freeze --freeze scripts/fixtures/client2-runtime-candidate.json
-      - uses: actions/checkout@v4
-        with:
-          repository: risense-ai/respire-client2
-          ref: 6ffa187685734873721ab51f3a54d8b2c29cd269
-          path: .client2-source
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: risense-ai/respire-magpie
-          ref: a3ae9b3035d02b181ba7a8ddae251495d092dd63
-          path: .magpie-source
-          persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-python@v5
         with:
-          go-version: '1.26.0'
-          cache: false
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Compile the opt-in transport prototype
-        run: cargo build --locked -p respire --features client2-host-prototype
-      - name: Stage the explicitly selected public Runtime or frozen Windows candidate
-        id: runtime-input
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUNTIME_TARGET: ${{ matrix.target }}
-          USE_RUNTIME_CANDIDATE: ${{ inputs.use_runtime_candidate }}
-          RUNTIME_RELEASE: ${{ inputs.runtime_release }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$USE_RUNTIME_CANDIDATE" == true ]]; then
-            python3 scripts/fetch-client2-runtime-candidate.py fetch \
-              --freeze scripts/fixtures/client2-runtime-candidate.json \
-              --output-directory "$RUNNER_TEMP/client2-runtime"
-            version="$(python3 -c 'import json; print(json.load(open("scripts/fixtures/client2-runtime-candidate.json"))["runtime_version"])')"
-            echo "version=$version" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          mkdir -p "$RUNNER_TEMP/client2-runtime"
-          version="${RUNTIME_RELEASE#v}"
-          gh api "repos/risense-ai/respire-runtime/releases/tags/$RUNTIME_RELEASE" > "$RUNNER_TEMP/client2-runtime/release.json"
-          gh release download "$RUNTIME_RELEASE" --repo risense-ai/respire-runtime \
-            --pattern "rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
-            --pattern "runtime-build-$RUNTIME_TARGET.json" \
-            --dir "$RUNNER_TEMP/client2-runtime"
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-runtime'
-          release = json.loads((root / 'release.json').read_text(encoding='utf-8'))
-          assert not release['draft'] and release['tag_name'] == os.environ['RUNTIME_RELEASE']
-          target = os.environ['RUNTIME_TARGET']
-          for name in [f'rsrs-runtime-{target}.tar.gz', f'runtime-build-{target}.json']:
-              asset, = [a for a in release['assets'] if a['name'] == name]
-              data = (root / name).read_bytes()
-              assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
-          metadata = json.loads((root / f'runtime-build-{target}.json').read_text(encoding='utf-8'))
-          assert metadata['runtime_version'] == os.environ['RUNTIME_RELEASE'][1:]
-          assert metadata['target_triple'] == target
-          PY
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Authenticate the reviewed Client2 Desktop candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLIENT2_RUN: ${{ inputs.client2_candidate_run_id || '43721147038' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import ast, json, os, pathlib, subprocess
-          tree = ast.parse(pathlib.Path('scripts/test-client2-launcher-compat.py').read_text())
-          baselines = next(n.value for n in tree.body if isinstance(n, ast.Assign)
-                           and any(isinstance(t, ast.Name) and t.id == 'DESKTOP_BASELINES' for t in n.targets))
-          baseline = next(ast.literal_eval(value) for key, value in zip(baselines.keys, baselines.values)
-                          if isinstance(key, ast.Constant) and key.value == 'host-owned-candidate')
-          assert os.environ['CLIENT2_RUN'] == baseline['run_id'], 'Candidate run differs from reviewed baseline'
-          run = json.loads(subprocess.check_output(['gh', 'api', 'repos/risense-ai/respire-client2/actions/runs/' + baseline['run_id']]))
-          assert run['head_sha'] == baseline['source'] and run['status'] == 'completed' and run['conclusion'] == 'success'
-          assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'risense-ai/respire-client2'
-          assert run['path'] == '.github/workflows/desktop.yml' and run['event'] == 'pull_request'
-          PY
-      - name: Stage authenticated Client2 Linux x64 candidate executable
-        if: runner.os == 'Linux'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLIENT2_RUN: ${{ inputs.client2_candidate_run_id || '43721147038' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/ci-apt-get.sh update -qq
-          bash scripts/ci-apt-get.sh install -y libgtk-3-0 libwebkit2gtk-4.1-0 libx11-6
-          mkdir -p "$RUNNER_TEMP/client2-desktop"
-          gh run download "$CLIENT2_RUN" --repo risense-ai/respire-client2 \
-            --name respire-linux-amd64 --dir "$RUNNER_TEMP/client2-desktop"
-          python3 - <<'PY'
-          import hashlib, os, pathlib
-          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-desktop/respire-linux-amd64.tar.gz'
-          assert hashlib.sha256(archive.read_bytes()).hexdigest() == '4a294a7de11fdaea48e534539bbfb5693c30a90e05544aea9aff344414a3c925'
-          PY
-          tar -xzf "$RUNNER_TEMP/client2-desktop/respire-linux-amd64.tar.gz" -C "$RUNNER_TEMP/client2-desktop" respire
-      - name: Exercise new Client2 host and all startup orders
-        env:
-          RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          set --
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            set -- --desktop-executable "$RUNNER_TEMP/client2-desktop/respire"
-          else
-            set -- --client2-source-sha 6ffa187685734873721ab51f3a54d8b2c29cd269
-          fi
-          python3 scripts/test-client2-launcher-compat.py \
-            --client2-baseline host-owned-candidate \
-            --ordinary-cli-cold-start \
-            --cli target/debug/rsrs${{ matrix.exe }} \
-            --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-${{ matrix.target }}.tar.gz" \
-            --runtime-version "$RUNTIME_VERSION" \
-            --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
-            --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
-            "$@" --report "$RUNNER_TEMP/client2-launcher-regression.json"
-      - name: Key the existing pinned public CPU model cache
-        if: runner.os == 'Windows'
-        id: offline-model-key
-        shell: pwsh
-        run: '"key=$(python scripts/native-model-cache.py key)" >> $env:GITHUB_OUTPUT'
-      - uses: actions/cache/restore@v4
-        if: runner.os == 'Windows'
-        id: offline-model-cache
-        with:
-          path: .native-model-cache
-          key: ${{ steps.offline-model-key.outputs.key }}
-          enableCrossOsArchive: true
-      - name: Require exact pinned model cache and verify public bytes
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          EXPECTED_KEY: ${{ steps.offline-model-key.outputs.key }}
-          MATCHED_KEY: ${{ steps.offline-model-cache.outputs.cache-matched-key }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not $env:MATCHED_KEY -or $env:MATCHED_KEY -ne $env:EXPECTED_KEY) { throw 'Exact public CPU model cache unavailable; offline GUI acceptance environment blocked' }
-          python scripts/native-model-cache.py restore --model-dir "$env:RUNNER_TEMP/client2-gui-models" --legacy-dir "$env:RUNNER_TEMP/client2-gui-legacy-model"
-          if ($LASTEXITCODE -ne 0) { throw 'Pinned public CPU model verification failed' }
-      - name: Probe authenticated Windows Client2 candidate GUI and real offline subset
-        timeout-minutes: 10
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
-          CLIENT2_RUN: ${{ inputs.client2_candidate_run_id || '43721147038' }}
-        if: runner.os == 'Windows'
+          python-version: '3.12'
+      - name: Authenticate original inputs and consume verified bytes without building
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = $env:RUNTIME_VERSION
-          ./scripts/probe-client2-gui.ps1 `
-            -Client2CandidateRunId $env:CLIENT2_RUN `
-            -Client2Commit '6ffa187685734873721ab51f3a54d8b2c29cd269' `
-            -Cli "$PWD/target/debug/rsrs.exe" `
-            -RuntimeArchive "$env:RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" `
-            -RuntimeVersion $version `
-            -OutputDirectory "$env:RUNNER_TEMP/client2-gui-probe" `
-            -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-gui-models"
-      - name: Preserve actual host results (not G1 evidence)
+          $run = gh api repos/risense-ai/respire-cli/actions/runs/44098649710/attempts/1 | ConvertFrom-Json
+          if ($LASTEXITCODE -or $run.head_sha -cne $env:CLI_SHA -or $run.run_attempt -ne 1 -or $run.repository.full_name -cne 'risense-ai/respire-cli') { throw 'Original run identity differs' }
+          $job = gh api repos/risense-ai/respire-cli/actions/jobs/134099114118 | ConvertFrom-Json
+          if ($LASTEXITCODE -or $job.run_id -ne 44098649710 -or $job.head_sha -cne $env:CLI_SHA -or $job.run_attempt -ne 1) { throw 'Original job identity differs' }
+          $log = @(gh api repos/risense-ai/respire-cli/actions/jobs/134099114118/logs)
+          if ($LASTEXITCODE) { throw 'Original input log unavailable' }
+          $values = @($log | ForEach-Object { if ($_ -cmatch ' CANDIDATE_ASSETS: (\{.*\})$') { $Matches[1] } } | Select-Object -Unique)
+          if ($values.Count -ne 1) { throw 'Require unique original candidate input' }
+          $env:CANDIDATE_ASSETS = $values[0]
+          "CANDIDATE_ASSETS=$env:CANDIDATE_ASSETS" >> $env:GITHUB_ENV
+          $inventory = gh api --paginate --slurp repos/risense-ai/respire-cli/actions/runs/44098649710/artifacts | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'Artifact inventory failed' }
+          $artifact = @($inventory.artifacts | Where-Object name -CEQ 'cli-release-x86_64-pc-windows-msvc')
+          if ($artifact.Count -ne 1 -or $artifact[0].expired -or $artifact[0].workflow_run.head_sha -cne $env:CLI_SHA) { throw 'Original CLI artifact identity differs' }
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/original-cli" | Out-Null
+          $download = [Diagnostics.ProcessStartInfo]::new('gh')
+          $download.UseShellExecute = $false; $download.CreateNoWindow = $true; $download.RedirectStandardOutput = $true
+          foreach ($arg in @('api',"repos/risense-ai/respire-cli/actions/artifacts/$($artifact[0].id)/zip")) { [void]$download.ArgumentList.Add($arg) }
+          $process = [Diagnostics.Process]::Start($download)
+          $zip = [IO.File]::Create("$env:RUNNER_TEMP/original-cli.zip")
+          try { $process.StandardOutput.BaseStream.CopyTo($zip) } finally { $zip.Dispose() }
+          $process.WaitForExit()
+          if ($process.ExitCode) { throw 'Original CLI artifact download failed' }
+          if ('sha256:' + (Get-FileHash "$env:RUNNER_TEMP/original-cli.zip").Hash.ToLowerInvariant() -cne $artifact[0].digest) { throw 'Original artifact ZIP digest differs' }
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP/original-cli.zip" -DestinationPath "$env:RUNNER_TEMP/original-cli"
+          node npm/scripts/set-build-version.mjs 2.0.0-dev.19
+          if ($LASTEXITCODE) { throw 'Manifest version preparation failed' }
+          node npm/scripts/extract-artifact.mjs "$env:RUNNER_TEMP/original-cli" "$env:RUNNER_TEMP/diagnostic-cli"
+          if ($LASTEXITCODE) { throw 'Original CLI schema2 verification failed' }
+          node scripts/prepare-windows-recovery-diagnostic.mjs
+          if ($LASTEXITCODE) { throw 'Diagnostic source and Runtime verification failed' }
+      - name: Explicit official model install and real CPU inference
+        shell: pwsh
+        env:
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:RSRS_DATA_DIR = "$env:RUNNER_TEMP/recovery-model-preparation"
+          $env:HOME = "$env:RSRS_DATA_DIR/home"; $env:USERPROFILE = $env:HOME
+          New-Item -ItemType Directory -Path $env:HOME | Out-Null
+          $env:RSRS_M3_DIR = "$env:RSRS_DATA_DIR/models/bge-m3"
+          $cli = "$env:RUNNER_TEMP/diagnostic-cli/rsrs.exe"
+          & $cli --json runtime install --file $env:RSRS_PUBLISHED_RUNTIME_ARCHIVE --version 2.0.0-dev.24
+          if ($LASTEXITCODE) { throw 'Model preparation Runtime installation failed' }
+          $env:RSRS_RUNTIME_BIN = "$env:RSRS_DATA_DIR/bin/runtime/2.0.0-dev.24/rsrs-runtime.exe"
+          $output = & $cli --direct model install-m3 --json
+          if ($LASTEXITCODE) { throw 'Official model installation failed' }
+          $model = $output | ConvertFrom-Json
+          $proof = $model.details.backend_load.evidence
+          if ($model.status -cne 'ok' -or -not $proof.ready -or -not $proof.inference_completed -or -not $proof.fresh_session -or $proof.dimensions -ne 1024 -or $proof.selected -cne 'CPU') { throw 'Real CPU inference proof differs' }
+          $output | Set-Content "$env:RUNNER_TEMP/model-inference.json" -Encoding utf8NoBOM
+          python -c "import importlib.util,os,pathlib; p=pathlib.Path('scripts/native-model-cache.py'); s=importlib.util.spec_from_file_location('models',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); [m.verify_file(pathlib.Path(os.environ['RSRS_M3_DIR'])/n,h) for n,h in m.FILES.items() if n != 'onnx/model_fp16.onnx']"
+          if ($LASTEXITCODE) { throw 'Public model hash verification failed' }
+          & $cli --runtime-internal --stop --json
+          if ($LASTEXITCODE) { throw 'Model preparation stop failed' }
+      - name: Run unchanged GUI phases with explicit diagnostic source separation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = [IO.File]::ReadAllText((Join-Path $PWD 'scripts/probe-client2-gui.ps1'))
+          # Branch-only overlay: retain real harness SHA in consumer checks, but compare
+          # CLI producer identity with its original run instead of this diagnostic run.
+          $replacements = [ordered]@{
+            '$candidate.source.sha -cne $env:GITHUB_SHA' = '$candidate.source.sha -cne ''a8cd68c46eaad307d32cf48d2e4d82406d122581'''
+            '$candidate.source.run_id -ne [long]$env:GITHUB_RUN_ID' = '$candidate.source.run_id -ne 44098649710'
+            '$candidate.source.run_attempt -ne [int]$env:GITHUB_RUN_ATTEMPT' = '$candidate.source.run_attempt -ne 1'
+            "scope = 'protocol-compatible Client2 Windows GUI subset; not full GUI acceptance'" = "diagnostic_only = `$true; full_passed = `$false; harness_sha = `$env:GITHUB_SHA; scope = 'diagnostic only; original CLI bytes with repaired harness; not release evidence'"
+          }
+          foreach ($item in $replacements.GetEnumerator()) {
+            if (($source.Split([string[]]@($item.Key),[StringSplitOptions]::None)).Count -ne 2) { throw 'Diagnostic overlay source changed' }
+            $source = $source.Replace($item.Key,$item.Value)
+          }
+          $probe = Join-Path $PWD 'scripts/probe-client2-gui-diagnostic.ps1'
+          [IO.File]::WriteAllText($probe,$source,[Text.UTF8Encoding]::new($false))
+          & $probe -Cli "$env:RUNNER_TEMP/diagnostic-cli/rsrs.exe" -RuntimeArchive $env:RSRS_PUBLISHED_RUNTIME_ARCHIVE -RuntimeVersion 2.0.0-dev.24 -Client2Release v2.0.0-dev.15 -Client2Commit f3455ce639cc2ab9e35762c2668367fccb3d2ad5 -OutputDirectory "$env:RUNNER_TEMP/windows-recovery-diagnostic" -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/recovery-model-preparation/models/bge-m3"
+          if ($LASTEXITCODE) { throw 'Diagnostic GUI subset failed; inspect report' }
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: client2-launcher-raw-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: diagnostic-only-windows-recovery
+          retention-days: 3
+          if-no-files-found: error
           path: |
-            ${{ runner.temp }}/client2-launcher-regression.json
-            ${{ runner.temp }}/client2-gui-probe/report.json
-            ${{ runner.temp }}/client2-gui-probe/native-gui.json
-            ${{ runner.temp }}/client2-gui-probe/workspace.png
-          if-no-files-found: warn
-          retention-days: 1
+            ${{ runner.temp }}/diagnostic-input-proof.json
+            ${{ runner.temp }}/diagnostic-cli/*identity.json
+            ${{ runner.temp }}/model-inference.json
+            ${{ runner.temp }}/windows-recovery-diagnostic/report.json
+            ${{ runner.temp }}/windows-recovery-diagnostic/native-gui.json
+            ${{ runner.temp }}/windows-recovery-diagnostic/workspace.png

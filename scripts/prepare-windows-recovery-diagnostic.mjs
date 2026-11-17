@@ -16,7 +16,7 @@ assert.equal(candidate.runtime.version,'2.0.0-dev.24');
 assert.equal(candidate.runtime.source_sha,'7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b');
 // Ensure the actual executed probe is precisely the merged repair, not an unreviewed product change.
 const repaired=execFileSync('git',['show','b23ed8c4213fed3dd59b724d8623295cc4d59d9a:scripts/probe-client2-gui.ps1']);
-assert.ok(repaired.equals(readFileSync('scripts/probe-client2-gui.ps1')));
+assert.equal(repaired.toString('utf8').replaceAll('\r\n','\n'),readFileSync('scripts/probe-client2-gui.ps1','utf8').replaceAll('\r\n','\n'));
 const target=process.env.CLI_TARGET, root=join(process.env.RUNNER_TEMP,'diagnostic-assets');
 mkdirSync(root); for(const kind of ['cli','runtime'])mkdirSync(join(root,kind));
 const cliAssets=publishedAssetNames('cli',target).map(name=>{
