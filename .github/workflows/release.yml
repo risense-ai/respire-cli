@@ -364,8 +364,8 @@ jobs:
       CANDIDATE_ASSETS: ${{ needs.plan.outputs.candidate }}
       VALIDATION_PROFILE: full
       RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) }}
-    needs: [plan, artifact-inputs, published-assets-verification]
+    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) && needs.validate.result == 'success' }}
+    needs: [plan, validate, artifact-inputs, published-assets-verification]
     permissions:
       contents: read
       actions: read
@@ -599,8 +599,8 @@ jobs:
       VALIDATION_PROFILE: full
       RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
     name: Native migration (${{ matrix.target }})
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) }}
-    needs: [plan, artifact-inputs, published-assets-verification]
+    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) && needs.validate.result == 'success' }}
+    needs: [plan, validate, artifact-inputs, published-assets-verification]
     permissions:
       contents: read
       actions: read
