@@ -101,20 +101,24 @@ fn core_exchange(
         args: vec![serde_json::to_string(&payload)?], scope: Some(scope.clone()),
         operation_id: Some(operation.into()), idempotency_key: Some(operation.into()),
         parent_operation_id: None, queue_wait_ms: None, lifecycle: None };
-    let token = respire_client_host::credential::read_token_file(&crate::net_rpc::token_path())?
-        .context("core config Runtime bearer token missing")?;
-    let response: respire_protocol::RpcResponse<ResultEnvelope> = ureq::AgentBuilder::new()
-        .redirects(0).build().post(&format!("{}/api/rpc", crate::net_rpc::rpc_base_url()))
-        .set("Authorization", &format!("Bearer {token}"))
-        .send_json(serde_json::to_value(&request)?)?.into_json()?;
+    let http = ureq::AgentBuilder::new().redirects(0).build()
+        .post(&format!("{}/api/rpc", crate::net_rpc::rpc_base_url()));
+    // Preserve existing credentials on the first request, as the shared loopback transport does.
+    let http = match respire_client_host::credential::read_token_file(&crate::net_rpc::token_path())? {
+        Some(token) => http.set("Authorization", &format!("Bearer {token}")),
+        None => http,
+    };
+    let response: respire_protocol::RpcResponse<ResultEnvelope> =
+        http.send_json(serde_json::to_value(&request)?)?.into_json()?;
+    let response_profile = response.data_dir.as_deref().map(std::fs::canonicalize).transpose()?;
     anyhow::ensure!(response.v == request.v && response.id == request.id
         && response.exit >= 0 && response.ok == (response.exit == 0)
         && response.code.as_deref() != Some("protocol_version_mismatch")
         && response.scope.as_ref() == Some(scope) && response.pid == Some(owner.pid)
         && response.operation_id.as_deref() == Some(operation)
         && response.idempotency_key.as_deref() == Some(operation)
-        && response.data_dir.as_deref().is_some_and(|path| std::path::Path::new(path) == profile),
-        "core config response binding mismatch");
+        && response_profile.as_deref().is_none_or(|path| path == profile),
+        "core config response binding mismatch (code={:?}, error={:?})", response.code, response.error);
     Ok(response)
 }
 
@@ -147,9 +151,15 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
     owner: Option<&crate::net_rpc::Health>) -> Result<ResultEnvelope> {
     use respire_client_host::lock::LibraryLock;
     let review = record.review.clone();
-    let _root = LibraryLock::acquire(&review.installation_root, Duration::from_secs(15))?;
-    let _profile = if review.installation_root == review.profile { None }
-        else { Some(LibraryLock::acquire(&review.profile, Duration::from_secs(15))?) };
+    // A verified live Runtime owns the profile's database lock for its lifetime.
+    // Host publication uses takeover + Paused admission + occupancy + config CAS;
+    // only the offline path excludes a concurrent database/startup owner here.
+    let _root = if owner.is_none() {
+        Some(LibraryLock::acquire(&review.installation_root, Duration::from_secs(15))?)
+    } else { None };
+    let _profile = if owner.is_none() && review.installation_root != review.profile {
+        Some(LibraryLock::acquire(&review.profile, Duration::from_secs(15))?)
+    } else { None };
     host_config_preflight(&review.installation_root, &review.profile)?;
     anyhow::ensure!(!record.sent || record.receipt.is_some(),
         "agent_config_outcome_unknown operation_id={}; no publication receipt; do not replay", review.operation_id);
