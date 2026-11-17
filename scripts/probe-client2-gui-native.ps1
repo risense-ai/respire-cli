@@ -1515,13 +1515,16 @@ function Read-RecoveryRecord {
     $matches = @($records | Where-Object { $_.name -ceq 'auth_reset' })
     if ($matches.Count -ne 1) { throw 'Require exactly one real desktop reset request' }
     $record = $matches[0]
-    $allowed = @('id','name','started','state','host','transaction','materialSaved')
+    # Host input continuation persists a distinct public transport ID, never the submitted input.
+    $allowed = @('id','name','started','state','host','transaction','materialSaved','transportId')
     if (@($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -or
         @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin @('operation_id','source_profile','kind') }).Count -or
         $record.id -cnotmatch '\Adesktop-[0-9a-f-]{36}\z' -or $record.state -cne 'done' -or
         $record.host -isnot [bool] -or $record.host -ne $true -or $record.transaction.kind -cne 'key' -or
         $record.transaction.source_profile -isnot [string] -or -not $record.transaction.source_profile -or
         ($null -ne $record.materialSaved -and $record.materialSaved -isnot [bool]) -or
+        ($null -ne $record.transportId -and ($record.transportId -isnot [string] -or
+            $record.transportId -cnotmatch '\Adesktop-[0-9a-f-]{36}\z' -or $record.transportId -ceq $record.id)) -or
         $record.transaction.operation_id -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z') {
         # Export only fixed predicates, never journal values or unexpected field names.
         $report.recovery.journal_validation = [ordered]@{
@@ -1533,6 +1536,8 @@ function Read-RecoveryRecord {
             transaction_kind_key = $record.transaction.kind -ceq 'key'
             source_profile_valid = $record.transaction.source_profile -is [string] -and [bool]$record.transaction.source_profile
             material_saved_type_valid = $null -eq $record.materialSaved -or $record.materialSaved -is [bool]
+            transport_id_valid = $null -eq $record.transportId -or ($record.transportId -is [string] -and
+                $record.transportId -cmatch '\Adesktop-[0-9a-f-]{36}\z' -and $record.transportId -cne $record.id)
             operation_id_valid = $record.transaction.operation_id -cmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'
         }
         throw 'Reset journal must contain only a completed public transaction identity and materialSaved'
