@@ -2526,6 +2526,19 @@ mod tests {
         let result = crate::autostart::control_agent_config("diary_mode=verbose")?;
         assert!(matches!(result.status, respire_commands::output::Status::Ok));
         assert!(!marker_path(&root).exists() && !root.join("bin").exists() && !root.join("rsrs.db").exists());
+        for intent in ["read_heat=false", "read_heat=true", "recall_fusion={\"fusion\":\"attention\"}"] {
+            let saved = crate::autostart::control_agent_config(intent)?;
+            assert!(matches!(saved.status, respire_commands::output::Status::Ok));
+            assert_eq!(saved.summary["core_application"]["state"], "pending");
+            assert_eq!(saved.summary["core_application"]["reason"], "runtime_not_running");
+            assert!(!marker_path(&root).exists() && !root.join("bin").exists());
+        }
+        let saved = fs::read(root.join("agent.json"))?;
+        for intent in ["read_heat=bad", "recall_fusion={\"unknown\":true}"] {
+            assert!(crate::autostart::control_agent_config(intent).is_err());
+            assert_eq!(fs::read(root.join("agent.json"))?, saved);
+            assert!(!marker_path(&root).exists());
+        }
         use respire_protocol::config_control::{AgentConfigIntent, AgentConfigMaintenance};
         let review = crate::client_config::review_agent_config(
             AgentConfigIntent { key: "diary_mode".into(), raw_value: "concise".into() }, root.clone(), root.clone())?;

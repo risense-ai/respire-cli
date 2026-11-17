@@ -793,22 +793,18 @@ fn anonymous_owner_agent_setting_is_persisted_without_changing_other_fields() ->
     let restored = runtime.restored_after(&owner)?;
     runtime.assert_anonymous_selection_unchanged()?;
     let committed = std::fs::read(&agent)?;
-    // Runtime rejects this type before read-heat/SDK configuration. It returns
-    // a durable RolledBack terminal result, not an unknown operation to retry.
-    let (output, rejected) =
-        runtime
-            .fixture
-            .command(&["agent-config", "--set", "read_heat=not-a-bool"])?;
+    // Host input rejection neither publishes bytes nor restarts the verified owner.
+    let (output, rejected) = runtime.fixture.command(
+        &["agent-config", "--set", "read_heat=not-a-bool"])?;
     assert_eq!(output.status.code(), Some(1), "{rejected}");
-    assert_eq!(rejected["command"], "agent-config");
     assert_eq!(rejected["status"], "fail");
-    assert_eq!(rejected["summary"], json!({"action":"rolled_back"}));
-    assert_eq!(
-        rejected["errors"],
-        json!(["read_heat must be true or false"])
-    );
+    assert!(rejected["errors"].as_array().context("rejection errors missing")?.iter()
+        .any(|error| error.as_str().is_some_and(|error| error.contains("read_heat must be true or false"))));
     assert_eq!(std::fs::read(&agent)?, committed);
-    runtime.restored_after(&restored)?;
+    let unchanged = runtime.health()?;
+    assert_eq!(unchanged.instance_id, restored.instance_id);
+    assert_eq!(unchanged.pid, restored.pid);
+    assert!(!runtime.fixture.marker().exists());
     runtime.assert_anonymous_selection_unchanged()?;
     runtime.stop()?;
     Ok(())
