@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from native_fixture_process import install_official_runtime, same_existing_path, canonical_scope_path, runtime_scope_ids
 
@@ -86,9 +86,9 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertIn('OS registration acceptance is limited to an ephemeral GitHub-hosted runner', result.stderr)
         source = (scripts / 'test-runtime-autostart.py').read_text(encoding='utf-8')
         self.assertLess(source.index('assert not root.exists()'), source.index('        foreground(False)'))
-        self.assertLess(source.index('        foreground(False)'), source.index('        seed_local_credentials(binary, env, keys)'))
-        self.assertLess(source.index('        seed_local_credentials(binary, env, keys)'), source.index('        health = foreground(True)'))
-        self.assertLess(source.index('        binary = str(base / "bin"'), source.index('        seed_local_credentials(binary, env, keys)'))
+        self.assertLess(source.index('        foreground(False)'), source.index('        seed_local_credentials(binary, env, keys, root)'))
+        self.assertLess(source.index('        seed_local_credentials(binary, env, keys, root)'), source.index('        health = foreground(True)'))
+        self.assertLess(source.index('        binary = str(base / "bin"'), source.index('        seed_local_credentials(binary, env, keys, root)'))
         for proof in ('health["credential_state"] == "required"', '"keyless startup created a session"',
                       '"keyless startup opened a library"', 'keys.configure_business_env(env)',
                       'keys.configure_env(env)', 'hosted_user_bus=True', 'keys.cleanup()',
@@ -131,9 +131,11 @@ class FixtureInstallationTests(unittest.TestCase):
         operation = '12345678-1234-4234-9234-123456789abc'
         alias = 'login-' + 'fedcba98' * 4  # Native alias is independent of the operation ID.
         for fault in ('', 'keygen', 'keygen_early', 'keygen_prepared', 'keygen_nonjson', 'keygen_original_changed', 'keygen_cleanup', 'handoff', 'locked',
-                      'bound', 'foreign', 'material', 'session_alias', 'backend', 'stop'):
+                      'bound', 'foreign', 'material', 'session_alias', 'backend', 'stop', 'secondary', 'secondary_foreign_root'):
             with self.subTest(seed=fault), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve()
+                profile = root / 'accounts/secondary-profile' if fault.startswith('secondary') else root
+                profile.mkdir(parents=True, exist_ok=True)
                 keys = types.SimpleNamespace(entries=set(), credential_backend='native')
                 calls = []
                 def cli(command, **kwargs):
@@ -149,15 +151,15 @@ class FixtureInstallationTests(unittest.TestCase):
                                 (root / 'foreign').mkdir()
                             journal.write_text(json.dumps({'schema': 1, 'operation_id': operation,
                                 'stage': 'prepared' if fault.startswith('keygen') else 'committed',
-                                'root': str(root), 'source': str(root),
-                                'profile': str(root / 'foreign' if fault == 'foreign' else root),
+                                'root': str(profile if fault == 'secondary_foreign_root' else root), 'source': str(profile),
+                                'profile': str(root / 'foreign' if fault == 'foreign' else profile),
                                 'material': None if fault in ('keygen_prepared', 'keygen_original_changed') else {'vault_version': 4, 'auth_operation_id': operation if fault != 'material' else 'foreign',
                                              'keyring_account': alias, 'keyring_backend': 'foreign' if fault == 'backend' else 'native'}}), encoding='utf-8')
                             session = {'vault_version': 4, 'keyring_account': 'login-' + 'a'*32 if fault == 'session_alias' else alias,
                                        'keyring_backend': 'native'}
                             if fault == 'bound':
                                 session['user'] = 'foreign-account'
-                            (root / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+                            (profile / 'session.json').write_text(json.dumps(session), encoding='utf-8')
                         return types.SimpleNamespace(returncode=int(fault.startswith('keygen')),
                             stdout='private-sentinel-never-report' if fault == 'keygen_nonjson' else json.dumps({'summary': {'super': 'private-sentinel-never-report'},
                                                'errors': [('offline keygen original operation changed' if fault == 'keygen_original_changed' else 'host auth credential write failed') + ': private-sentinel-never-report']}),
@@ -170,9 +172,9 @@ class FixtureInstallationTests(unittest.TestCase):
                         or fault in ('stop', 'keygen_cleanup') and command[2:] == ['runtime', 'stop']),
                         stdout='private-sentinel-never-report', stderr='private-sentinel-never-report')
                 with patch('subprocess.run', side_effect=cli):
-                    if fault:
+                    if fault and fault != 'secondary':
                         with self.assertRaises(AssertionError) as raised:
-                            seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys)
+                            seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys, profile)
                         self.assertNotIn('private-sentinel-never-report', str(raised.exception))
                         if fault.startswith('keygen'):
                             self.assertIn('synthetic CLI keygen failed', str(raised.exception))
@@ -181,14 +183,79 @@ class FixtureInstallationTests(unittest.TestCase):
                                 self.assertIn('cleanup also failed', raised.exception.__notes__[0])
                                 self.assertNotIn('private-sentinel-never-report', str(raised.exception.__cause__))
                     else:
-                        seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys)
+                        seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys, profile)
                 self.assertEqual(calls[0], ['keygen'])
                 self.assertEqual(calls[-1], ['runtime', 'stop'])
                 self.assertEqual(calls.count(['keygen']), 1)
-                self.assertEqual(keys.entries, set() if fault in ('foreign', 'material', 'backend', 'keygen_early', 'keygen_prepared', 'keygen_original_changed') else
+                self.assertEqual(keys.entries, set() if fault in ('foreign', 'secondary_foreign_root', 'material', 'backend', 'keygen_early', 'keygen_prepared', 'keygen_original_changed') else
                     {('rsrs', 'super:' + alias)})
-                if not fault:
+                if fault in ('', 'secondary'):
                     self.assertEqual(calls, [['keygen'], ['runtime', 'start'], ['runtime', 'status'], ['runtime', 'stop']])
+
+        seed_secondary = source.index('                seed_local_credentials(binary, env, keys, secondary)')
+        self.assertLess(seed_secondary, source.index('                enabled = run("runtime", "autostart", "enable")'))
+        for proof in ('command("account", "use", "secondary-profile")', 'command("account", "use", "main")',
+                      '(secondary / "rsrs.db").is_file()',
+                      'secondary_session["keyring_account"] != primary_session["keyring_account"]'):
+            self.assertIn(proof, source)
+        self.assertNotIn('secondary_env', source)
+        self.assertNotIn('copy_managed_installation(managed_fixture / "bin", secondary)', source)
+        # Execute the actual setup: selecting a profile must retain the installation environment.
+        tree = ast.parse(source)
+        setup = next(node.body for node in ast.walk(tree) if isinstance(node, ast.Try)
+                     and any(isinstance(item, ast.Assign) and ast.unparse(item.targets[0]) == 'secondary'
+                             for item in node.body))
+        first = next(index for index, item in enumerate(setup) if isinstance(item, ast.Assign)
+                     and ast.unparse(item.targets[0]) == 'secondary')
+        last = next(index for index, item in enumerate(setup) if isinstance(item, ast.Expr)
+                    and ast.unparse(item.value) == 'seed_local_credentials(binary, env, keys, secondary)')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            env = {'RSRS_DATA_DIR': str(root), 'RSRS_BIN_DIR': str(root / 'bin')}
+            seed = Mock()
+            command = Mock(return_value=types.SimpleNamespace(returncode=0))
+            scope = dict(root=root, env=env, binary='owned-cli', Path=Path, keys=object(),
+                         command=command, seed_local_credentials=seed)
+            exec(compile(ast.Module(body=setup[first:last + 1], type_ignores=[]), '<secondary-profile>', 'exec'), scope)
+            self.assertEqual(command.call_args_list, [call('account', 'use', 'secondary-profile')])
+            self.assertEqual(seed.call_args.args, ('owned-cli', env, scope['keys'], root / 'accounts/secondary-profile'))
+            self.assertIs(seed.call_args.args[1], env)
+            self.assertEqual(env, {'RSRS_DATA_DIR': str(root), 'RSRS_BIN_DIR': str(root / 'bin')})
+        # Run the actual switch block offline: config must stay idle before explicit start.
+        from contextlib import nullcontext
+        switch = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.For)
+                      and ast.unparse(node.target) == 'target' and ast.unparse(node.iter) == '(secondary, root)')
+        code = compile(ast.Module(body=[switch], type_ignores=[]), '<profile-switch-contract>', 'exec')
+        for fault in ('', 'running', 'locked', 'pending'):
+            with self.subTest(switch=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                secondary = root / 'accounts/secondary profile'
+                secondary.mkdir(parents=True)
+                if fault == 'pending':
+                    marker = root / 'runtime/autostart/maintenance.json'
+                    marker.parent.mkdir(parents=True)
+                    marker.write_text('{"phase":"Paused"}', encoding='utf-8')
+                results = []
+                for pid, target in enumerate((secondary, root), start=2):
+                    results.extend([{}, {'runtime': {'running': fault == 'running'}}, {},
+                                    {'runtime': {'data_dir': str(target), 'pid': pid, 'store_ready': fault != 'locked'}}])
+                run = Mock(side_effect=results)
+                pairs = [object(), object()]
+                owned = Mock(side_effect=[nullcontext(pair) for pair in pairs])
+                replaced = Mock()
+                scope = dict(root=root, secondary=secondary, previous_pid=1, Path=Path,
+                             os=types.SimpleNamespace(name='nt'), run=run,
+                             owned_windows_pair=owned, require_replacement_pair=replaced)
+                if fault:
+                    with self.assertRaises(AssertionError):
+                        exec(code, scope)
+                else:
+                    exec(code, scope)
+                    self.assertEqual(run.call_args_list, [item for target in (secondary, root) for item in
+                        (call('config', '--data-dir', str(target)), call('runtime', 'status'),
+                         call('runtime', 'start'), call('runtime', 'status'))])
+                    self.assertEqual(replaced.call_args_list, [call(pairs[0], secondary), call(pairs[1], root)])
+                    self.assertEqual(scope['previous_pid'], 3)
 
     def test_scope_ids_use_os_canonical_paths_and_preserve_bound_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
