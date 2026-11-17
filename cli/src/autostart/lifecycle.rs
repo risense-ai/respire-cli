@@ -626,6 +626,14 @@ impl Maintenance {
     }
 
     pub(crate) fn finish(&mut self) -> Result<()> {
+        self.finish_with_core_config(true)
+    }
+
+    pub(crate) fn finish_core_config_query(&mut self) -> Result<()> {
+        self.finish_with_core_config(false)
+    }
+
+    fn finish_with_core_config(&mut self, apply_startup: bool) -> Result<()> {
         if self.completed {
             return Ok(());
         }
@@ -633,7 +641,7 @@ impl Maintenance {
         if crate::rpc::endpoint_path().try_exists()? {
             let owner = crate::rpc::probe_runtime()?.context("owned Runtime exited before core configuration")?;
             self.mark(Phase::Paused)?;
-            super::supervise::apply_startup_core_config(&owner, Some(self))?;
+            if apply_startup { super::supervise::apply_startup_core_config(&owner, Some(self))?; }
         }
         self.mark(Phase::Verified)?;
         if let Some(config) = self.config.as_mut() {
@@ -1597,6 +1605,9 @@ fn emit(command: &str, summary: Value) -> Result<()> {
 
 pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
     match command {
+        RuntimeCommand::CoreConfigResult { context, source_profile } => {
+            return crate::emit_result(super::supervise::control_core_config_result(context, source_profile)?);
+        }
         RuntimeCommand::KeyResult { operation_id, source_profile } => {
             return crate::emit_result(super::control_key_result(operation_id, source_profile.as_deref())?);
         }
@@ -1716,7 +1727,8 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
-        RuntimeCommand::KeyResult { .. }
+        RuntimeCommand::CoreConfigResult { .. }
+        | RuntimeCommand::KeyResult { .. }
         | RuntimeCommand::KeyRollback { .. }
         | RuntimeCommand::AuthResult { .. }
         | RuntimeCommand::AccountResult { .. }

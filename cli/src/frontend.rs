@@ -1047,7 +1047,12 @@ fn install_cli_host_hooks() -> bool {
 
 fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     let (mut envelope, code) = respire_commands::output_emit::command_failure(error);
-    if let Some(original) = error.downcast_ref::<autostart::AuthOutcomeUnknown>() {
+    if let Some(original) = error.downcast_ref::<autostart::CoreConfigUnknown>() {
+        envelope.summary = serde_json::json!({"reason":"agent_config_outcome_unknown", "core_application":{"state":"unknown"}});
+        envelope.details = original.details.clone();
+        envelope.details["error_type"] = serde_json::json!("outcome_unknown");
+        envelope.errors = vec!["Core configuration outcome is unknown; query the original operation without replaying".into()];
+    } else if let Some(original) = error.downcast_ref::<autostart::AuthOutcomeUnknown>() {
         envelope.summary = serde_json::json!({"reason":"auth_outcome_unknown"});
         envelope.details = serde_json::json!({
             "error_type":"outcome_unknown", "operation_id":original.operation_id,
@@ -2254,6 +2259,20 @@ mod capture_tests {
         assert_eq!(envelope.details["source_profile"], "original-profile");
         assert_eq!(envelope.details["register"], true);
         assert_eq!(envelope.details["result_command"], "runtime account-result");
+        let scope = serde_json::json!({"account_id":"synthetic", "instance_id":"synthetic-instance", "generation":1});
+        let unknown: anyhow::Error = super::autostart::CoreConfigUnknown {
+            details: serde_json::json!({"operation_id":original, "idempotency_key":original,
+                "source_profile":"synthetic-profile", "scope":scope, "kind":"core_config",
+                "query_only":true, "replayed":false, "result_command":"runtime core-config-result"}),
+        }.into();
+        let (envelope, code) = super::command_failure(&unknown.context("private candidate must not escape"));
+        assert_eq!(code, 1);
+        assert_eq!(envelope.summary["core_application"]["state"], "unknown");
+        assert_eq!(envelope.details["scope"], scope);
+        assert_eq!(envelope.details["operation_id"], original);
+        assert_eq!(envelope.details["query_only"], true);
+        assert_eq!(envelope.details["replayed"], false);
+        assert!(envelope.errors.iter().all(|error| !error.contains("private candidate")));
         let parsed = capture_run(vec!["--json".into(), "--not-a-command".into()]);
         assert_eq!(parsed.exit, 2);
         assert_eq!(parsed.envelope.summary["reason"], "invalid_input");
