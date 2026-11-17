@@ -83,7 +83,7 @@ struct CoreConfigTransaction {
 }
 
 fn core_exchange(
-    maintenance: &mut super::lifecycle::Maintenance,
+    maintenance: Option<&mut super::lifecycle::Maintenance>,
     profile: &std::path::Path,
     scope: &respire_protocol::RuntimeRequestScope,
     method: &str,
@@ -93,7 +93,11 @@ fn core_exchange(
 ) -> Result<respire_protocol::RpcResponse<ResultEnvelope>> {
     let owner = crate::rpc::probe_runtime()?.context("core config owner is unavailable")?;
     anyhow::ensure!(crate::net_rpc::request_scope(&owner)? == *scope, "core config owner changed");
-    let binding = maintenance.auth_launch_binding(profile)?.context("core config lost Paused maintenance")?;
+    let binding = match maintenance {
+        Some(maintenance) => Some(maintenance.auth_launch_binding(profile)?
+            .context("core config lost Paused maintenance")?),
+        None => None,
+    };
     let mut payload = serde_json::json!({"schema_version":1,"maintenance":binding});
     if let Some(candidate) = candidate { payload["candidate"] = candidate.clone(); }
     if let Some(revision) = revision { payload["expected_revision"] = revision.into(); }
@@ -140,6 +144,121 @@ fn core_state(response: &respire_protocol::RpcResponse<ResultEnvelope>, state: &
     Ok(summary.clone())
 }
 
+fn original_core_response(scope: &respire_protocol::RuntimeRequestScope, operation_id: &str)
+    -> Result<respire_protocol::RpcResponse<ResultEnvelope>> {
+    let operation = respire_commands::runtime_error::OperationContext { scope: scope.clone(),
+        operation_id: operation_id.into(), idempotency_key: operation_id.into() };
+    let result = crate::net_rpc::rpc_result(&operation)?;
+    let state = &result["envelope"]["summary"];
+    anyhow::ensure!(matches!(state["state"].as_str(), Some("completed" | "failed"))
+        && state["operation_id"] == operation_id && state["scope"] == serde_json::to_value(scope)?,
+        "agent_config_outcome_unknown; original core operation has no terminal response; do not replay");
+    let response: respire_protocol::RpcResponse<ResultEnvelope> = serde_json::from_value(state["response"].clone())?;
+    anyhow::ensure!(response.v == 1 && response.id == operation_id && response.exit >= 0
+        && response.ok == (response.exit == 0) && response.scope.as_ref() == Some(scope)
+        && response.operation_id.as_deref() == Some(operation_id)
+        && response.idempotency_key.as_deref() == Some(operation_id),
+        "core original operation receipt mismatch");
+    Ok(response)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupCoreConfig {
+    profile: std::path::PathBuf,
+    operation_id: String,
+    config_revision: String,
+    control: CoreConfigTransaction,
+}
+
+/// Caller holds installation takeover. Never replace an online setter's revision.
+pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
+    mut maintenance: Option<&mut super::lifecycle::Maintenance>) -> Result<()> {
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(std::path::Path::new(&owner.data_dir).canonicalize()? == profile
+        && std::path::Path::new(&owner.installation_root).canonicalize()? == root,
+        "startup core configuration owner changed");
+    let scope = crate::net_rpc::request_scope(owner)?;
+    let path = root.join("runtime/autostart/core-config-application.json");
+    respire_client_host::config::normalize_control_path(&path)?;
+    let mut previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let saved: Option<StartupCoreConfig> = previous.as_deref().map(serde_json::from_slice).transpose()?;
+    if let Some(mut saved) = saved.filter(|saved| saved.control.apply_sent) {
+        let recovered = saved.control.response.is_none();
+        if saved.control.response.is_none() {
+            anyhow::ensure!(saved.profile == profile && saved.control.scope.as_ref() == Some(&scope),
+                "agent_config_outcome_unknown; startup core owner exited; retain original operation {}; do not replay",
+                saved.operation_id);
+            saved.control.response = Some(original_core_response(&scope, &saved.operation_id)?);
+        }
+        let response = saved.control.response.as_ref().context("startup core receipt missing")?;
+        anyhow::ensure!(response.id == saved.operation_id
+            && response.scope == saved.control.scope
+            && response.operation_id.as_deref() == Some(saved.operation_id.as_str())
+            && response.idempotency_key.as_deref() == Some(saved.operation_id.as_str()),
+            "startup core receipt operation mismatch");
+        core_state(response, "applied", Some(&saved.control.candidate), Some(1))?;
+        anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
+            == saved.control.validated.as_ref().context("startup core validation missing")?["effective"],
+            "startup core application differs from validation");
+        if saved.profile == profile && saved.control.scope.as_ref() == Some(&scope) {
+            if recovered {
+                crate::autostart::private_write(&path, &serde_json::to_vec(&saved)?,
+                    previous.as_deref().map(crate::autostart::hash).as_deref())?;
+            }
+            return Ok(());
+        }
+    }
+    let config_path = profile.join("agent.json");
+    let bytes = match std::fs::read(&config_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let candidate = core_candidate(&crate::client_config::read_agent_config_for_write(&profile)?)?;
+    let current = core_exchange(maintenance.as_deref_mut(), &profile, &scope, "core_config.read",
+        &uuid::Uuid::new_v4().to_string(), None, None)?;
+    let current = core_state(&current, "current", None, None)?;
+    // A nonzero revision belongs to an applied operation, possibly an online setter.
+    // Do not replay persisted values over it or claim its readback is our apply receipt.
+    if current["revision"].as_u64() != Some(0) { return Ok(()); }
+    let validated = core_exchange(maintenance.as_deref_mut(), &profile, &scope, "core_config.validate",
+        &uuid::Uuid::new_v4().to_string(), Some(&candidate), None)?;
+    let validated = core_state(&validated, "validated", Some(&candidate), Some(0))?;
+    let mut record = StartupCoreConfig { profile: profile.clone(),
+        operation_id: uuid::Uuid::new_v4().to_string(), config_revision: crate::autostart::hash(&bytes),
+        control: CoreConfigTransaction { scope: Some(scope.clone()), revision: 0, candidate,
+            validated: Some(validated), apply_sent: true, rollback_sent: false, response: None } };
+    let actual = match std::fs::read(&config_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(crate::autostart::hash(&actual) == record.config_revision,
+        "agent config changed before startup application");
+    let sent = serde_json::to_vec(&record)?;
+    crate::autostart::private_write(&path, &sent, previous.as_deref().map(crate::autostart::hash).as_deref())?;
+    previous = Some(sent);
+    let response = core_exchange(maintenance, &profile, &scope, "core_config.apply", &record.operation_id,
+        Some(&record.control.candidate), Some(0)).context(
+            "agent_config_outcome_unknown; query original startup core operation; do not replay")?;
+    record.control.response = Some(response);
+    crate::autostart::private_write(&path, &serde_json::to_vec(&record)?,
+        previous.as_deref().map(crate::autostart::hash).as_deref())?;
+    let response = record.control.response.as_ref().context("startup core response missing")?;
+    core_state(response, "applied", Some(&record.control.candidate), Some(1))?;
+    anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
+        == record.control.validated.as_ref().context("startup core validation missing")?["effective"],
+        "startup core application differs from validation");
+    Ok(())
+}
+
 fn save_core_receipt(record: &mut AgentConfigMaintenance, maintenance: &mut super::lifecycle::Maintenance,
     control: &CoreConfigTransaction, output: ResultEnvelope, outcome: AgentConfigOutcome) -> Result<()> {
     record.receipt = Some(AgentConfigReceipt { review: record.review.clone(), outcome,
@@ -172,11 +291,11 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         let mut control = CoreConfigTransaction { scope: owner.map(crate::net_rpc::request_scope).transpose()?,
             revision: 0, candidate, validated: None, apply_sent: false, rollback_sent: false, response: None };
         if let Some(scope) = control.scope.as_ref() {
-            let current = core_exchange(maintenance, &review.profile, scope, "core_config.read",
+            let current = core_exchange(Some(maintenance), &review.profile, scope, "core_config.read",
                 &uuid::Uuid::new_v4().to_string(), None, None)?;
             let current = core_state(&current, "current", None, None)?;
             control.revision = current["revision"].as_u64().context("core revision missing")?;
-            let validated = core_exchange(maintenance, &review.profile, scope, "core_config.validate",
+            let validated = core_exchange(Some(maintenance), &review.profile, scope, "core_config.validate",
                 &uuid::Uuid::new_v4().to_string(), Some(&control.candidate), None)?;
             control.validated = Some(core_state(&validated, "validated", Some(&control.candidate), Some(control.revision))?);
         }
@@ -212,18 +331,11 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         "agent_config_outcome_unknown; original core owner changed; do not replay");
     if control.response.is_none() {
         let response = if control.apply_sent {
-            let operation = respire_commands::runtime_error::OperationContext { scope: scope.clone(),
-                operation_id: review.operation_id.clone(), idempotency_key: review.operation_id.clone() };
-            let result = crate::net_rpc::rpc_result(&operation)?;
-            let state = &result["envelope"]["summary"];
-            anyhow::ensure!(matches!(state["state"].as_str(), Some("completed" | "failed"))
-                && state["operation_id"] == review.operation_id && state["scope"] == serde_json::to_value(&scope)?,
-                "agent_config_outcome_unknown; original core operation has no terminal response; do not replay");
-            serde_json::from_value(state["response"].clone())?
+            original_core_response(&scope, &review.operation_id)?
         } else {
             control.apply_sent = true;
             save_core_receipt(record, maintenance, &control, output.clone(), AgentConfigOutcome::Committed)?;
-            core_exchange(maintenance, &review.profile, &scope, "core_config.apply", &review.operation_id,
+            core_exchange(Some(maintenance), &review.profile, &scope, "core_config.apply", &review.operation_id,
                 Some(&control.candidate), Some(control.revision)).context(
                     "agent_config_outcome_unknown; query original core operation; do not replay")?
         };
@@ -252,7 +364,7 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
         let applied = core_state(&response, "applied", Some(&control.candidate), Some(revision))?;
         let validated = control.validated.as_ref().context("core validation receipt missing")?;
         anyhow::ensure!(applied["effective"] == validated["effective"], "core effective state differs from validation");
-        let current = core_exchange(maintenance, &review.profile, &scope, "core_config.read",
+        let current = core_exchange(Some(maintenance), &review.profile, &scope, "core_config.read",
             &uuid::Uuid::new_v4().to_string(), None, None)?;
         let current = core_state(&current, "current", Some(&control.candidate), Some(revision))?;
         anyhow::ensure!(current["effective"] == applied["effective"], "core state changed after application");

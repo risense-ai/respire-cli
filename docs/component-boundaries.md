@@ -90,8 +90,8 @@ CLI 的配置读取。`--client-only` 限制副作用，不改变命令的归属
 | Windows 登录 custody 容量 | PR #381 已合并；真实原生凭据写入和清理验证通过 | 云端 x64／ARM 重登及 cleanup 已全部通过 |
 | legacy vault 交互提示 | PR #382 已合并；现有检查通过 | 真实旧库登录及凭据清理已闭环 |
 | agent-config 读取 | PR #384 已合并；普通及 client-only 本地读取、完整字段和实际插件读回已验证 | 已在公开 CLI 发布；Core 已支持这些设置；常驻 Runtime 已加载这些值 |
-| agent-config 设置 | PR #387 普通宿主配置写入已合并；PR #393 特殊项迁移仍在验证 | 配置持久化已经完整移到宿主；新 CLI 已公开 |
-| 核心配置特殊项 | Runtime #120 已合并，dev24 已发布；真实 SDK／HTTP 定向检查和八平台原生检查通过 | CLI／Client2 已完成集成；保存配置等于核心已应用 |
+| agent-config 设置 | PR #387、#393 已合并；宿主持久化并区分 pending 与 applied；本分支补齐启动应用 | 新 CLI 已公开；Runtime 旧私有配置写入入口已删除 |
+| 核心配置特殊项 | Runtime #120 已合并，dev24 已发布；宿主在线 setter 已接入，本分支补齐启动／重启 apply | 保存配置等于核心已应用；Runtime 已完全不读写宿主配置 |
 | 其他原生待验项 | 跨服务转移重试、Client2 ExistingKeys 自动传钥及特殊设置 live-owner 事务仍待闭环 | 最新整套产物验收已通过 |
 
 特殊项的接口缺口不能通过静默禁用、复制 Core 逻辑或调用会写宿主文件的私有 setter 隐藏。
@@ -103,6 +103,34 @@ Runtime24 接收宿主传入的配置候选，只负责核心验证和运行态�
 Core SDK 沿用 dev.4，数据库格式不变。接口契约见 Runtime 仓库的 `docs/core-config.md`。
 Runtime24 为旧宿主保留原有文件读取和私有 setter，不能据此宣称其源码中的宿主兼容路径已全部删除。
 新宿主应只通过纯核心接口验证和应用设置，自行负责配置文件。
+
+### 宿主启动应用与 Runtime24 的剩余边界
+
+宿主启动、重启和后台拉起 Runtime 后，CLI 从已持久化的 agent.json 构造有效候选，
+通过 `core_config.validate/apply` 取得真实回执。此过程不依赖数据库解锁；Client2
+通过独立 CLI 复用该流程。普通及 client-only 的 agent-config 读取仍不启动 Runtime。
+启动应用使用既有安装接管锁、配置修订检查和 Runtime revision 0 CAS；非零 revision
+由已经应用的操作所有，不以持久配置覆盖在线 setter，也不将 read 回读冒充 apply。
+原操作号和响应保存在宿主的 `runtime/autostart/core-config-application.json`；丢失响应
+时只查询原操作，旧实例退出后仍未知的操作会阻止后续启动应用，不自动重放。
+本段描述源码行为；合并、公开产物及原生验收状态须分别核对。
+
+Runtime24 源码固定为 `7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b`，以下仍未清理，
+本次仅修改 CLI，不代表 Runtime 纯度目标完成：
+
+- [启动 reload](https://github.com/risense-ai/respire-runtime/blob/7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b/crates/commands/src/rpc_serve.rs#L2932)
+  仍读 agent.json；损坏配置仍可使 Runtime 在宿主 apply 前退出。
+- [首次 apply 前的 read/query](https://github.com/risense-ai/respire-runtime/blob/7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b/crates/app-domain/src/core_config.rs#L76)
+  仍使用旧 read_heat、recall_fusion 文件读取；旧 receipt 和 bench 参数快照也保留文件读取。
+- [旧私有 setter](https://github.com/risense-ai/respire-runtime/blob/7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b/runtime/src/config_control.rs#L149)
+  及私有 agent-config 读取仍保留，并受原有身份、维护及 CAS 校验；最新宿主配置命令已不调用它们。
+- [recall_mode](https://github.com/risense-ai/respire-runtime/blob/7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b/crates/commands/src/recall_select.rs#L72)、
+  quality provider 和 [purge_days](https://github.com/risense-ai/respire-runtime/blob/7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b/crates/commands/src/engine.rs#L5798)
+  仍由 Runtime 读取宿主配置，即使核心候选已 apply。
+- [同步 401](https://github.com/risense-ai/respire-runtime/blob/7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b/crates/app-domain/src/transport/remote.rs#L21)
+  仍经 `write_agent_config_key("readonly", true)` → `set_workspace_mode` 写 client.json。
+
+上述 Runtime 读取、旧控制及业务写入需另获用户授权后处理，不能由宿主启动 apply 的完成推导为已删除。
 
 ## 发布与验收
 

@@ -788,6 +788,13 @@ pub(crate) fn checked_executable() -> Result<PathBuf> {
 /// strict or managed owner, and never retries an uncertain spawn.
 pub(crate) fn start_locked_with_expectation(
     expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
+    start_locked_inner(expectation)?;
+    let owner = crate::rpc::probe_runtime()?.context("compatibility Runtime exited before core configuration")?;
+    crate::autostart::apply_startup_core_config(&owner, None)
+}
+
+fn start_locked_inner(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     anyhow::ensure!(crate::autostart::lifecycle_boot_token().is_none(),
         "compatibility startup cannot inherit account maintenance");
