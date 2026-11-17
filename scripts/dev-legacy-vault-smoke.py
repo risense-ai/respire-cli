@@ -481,6 +481,134 @@ class Smoke:
             remote_tombstone_propagated=True, remote_tombstone_content="canonical_empty",
             historical_authentication_tested=False)
 
+    def historical_database_sync(self, env, expected_urk, code, expected_records):
+        """Continue a real upgraded historical DB; never replace its file or data key."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        self.verify_development_server()
+        source = self.profile(env).resolve()
+        database = source / "rsrs.db"
+        identity = (database.stat().st_dev, database.stat().st_ino)
+        def rows():
+            require(self.profile(env).resolve() == source
+                and (database.stat().st_dev, database.stat().st_ino) == identity, "historical_database_replaced")
+            with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+                require(db.execute("PRAGMA integrity_check").fetchall() == [("ok",)], "historical_database_integrity_failed")
+                return (db.execute("SELECT id,ciphertext,nonce,dirty,deleted FROM memories ORDER BY id").fetchall(),
+                        db.execute("SELECT * FROM sync_outbox ORDER BY seq").fetchall())
+        before = rows()
+        expected = {record[0]: record for record in expected_records}
+        require(expected and any(record[3] for record in expected.values())
+            and any(not record[3] for record in expected.values()) and before[1], "historical_sync_seed_empty")
+        for memory_id, ciphertext, nonce, dirty, deleted in before[0]:
+            require((memory_id, decrypt_content(expected_urk, ciphertext, nonce), dirty, deleted) == expected[memory_id],
+                    "historical_sync_original_key_mismatch")
+        self.diagnostic_secrets.update((code, expected_urk.hex()))
+        self.report["stage"] = "historical_same_key_recovery"
+        self.save()
+        self.cli(env, "logout", "--full")
+        require(not (source / "session.json").exists() and rows() == before, "historical_logout_changed_database")
+        salt, nonce = secrets.token_hex(16), secrets.token_bytes(12)
+        wrapped = PREFIX + AESGCM(v4_kek(code, salt, PREFIX)).encrypt(nonce, expected_urk, None).hex()
+        self.diagnostic_secrets.update((salt, nonce.hex(), wrapped))
+        request = {"v": 1, "id": "historical-recover-" + uuid.uuid4().hex, "method": "auth.recover",
+            "params": {"addr": "", "user": "", "super": code,
+                "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce.hex()}}
+        try:
+            recovered = self.cli(env, "fivekeys", host_request=request)["summary"]
+        finally:
+            # A public recovery may commit before its output/stop check fails.
+            candidate = self.session(env)
+            operation = candidate.get("auth_operation_id")
+            if candidate.get("wrapped_urk") == wrapped and isinstance(operation, str):
+                self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation)
+        require(recovered.get("outcome") == "committed" and recovered.get("source_profile") == str(source)
+            and recovered.get("operation_id") == operation and candidate.get("user") == ""
+            and candidate.get("addr") == "" and rows() == before, "historical_recovery_not_committed_in_place")
+        require(AESGCM(v4_kek(code, salt, wrapped)).decrypt(nonce, encrypted_bytes(candidate["wrapped_urk"]), None)
+            == expected_urk, "historical_recovery_changed_urk")
+        user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
+        self.diagnostic_secrets.add(password)
+        account = {"user": user, "token": None, "confirmed": False}
+        self.accounts.append(account)
+        self.report["cloud_cleanup"]["remaining_users"].append(user)
+        self.report["stage"] = "historical_existing_keys_register"
+        self.save()
+        register = {"v": 1, "id": "historical-register-" + uuid.uuid4().hex, "method": "auth.register",
+            "params": {"addr": UPSTREAM, "user": user, "password": password}}
+        try:
+            registered = self.cli(env, "register", host_request=register)["summary"]
+        finally:
+            session = self.session(env)
+            if session.get("user") == user and session.get("addr") == UPSTREAM and session.get("token"):
+                account.update(token=session["token"], confirmed=True)
+                self.diagnostic_secrets.add(session["token"])
+                self.keys.track_created_login(session, user, code, password, recovery_operation=operation)
+        require(registered.get("outcome") == "committed" and registered.get("source_profile") == str(source)
+            and registered.get("target_profile") == str(source) and account["confirmed"]
+            and all(session.get(field) == candidate.get(field) for field in
+                ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend"))
+            and rows() == before, "historical_registration_changed_vault_or_database")
+        self.cli(env, "config", "--addr", UPSTREAM, "--autosync", "false")
+        require(rows() == before, "historical_endpoint_configuration_changed_database")
+        vault = self.api(account, "GET", "/api/self/vault")
+        require(vault.get("version") == 4 and all(vault.get(field) == session[field] for field in
+            ("wrapped_urk", "kdf_salt", "urk_nonce")), "historical_server_vault_changed_original_key")
+        self.report["stage"] = "historical_source_push"
+        self.save()
+        require(self.cli(env, "sync").get("status") == "ok", "historical_source_sync_not_completed")
+        peer = self.env("historical-independent-device")
+        self.current_login(peer, user, password, code)
+        peer_session = self.session(peer)
+        account["token"] = peer_session["token"]
+        require(AESGCM(v4_kek(code, peer_session["kdf_salt"], peer_session["wrapped_urk"])).decrypt(
+            bytes.fromhex(peer_session["urk_nonce"]), encrypted_bytes(peer_session["wrapped_urk"]), None) == expected_urk,
+            "historical_independent_device_changed_urk")
+        require(self.cli(peer, "sync").get("status") == "ok", "historical_independent_pull_not_completed")
+        for memory_id, plaintext, _, deleted in expected.values():
+            if not deleted:
+                self.read_entry(peer, memory_id, json.loads(plaintext)["content"])
+        with sqlite3.connect((self.profile(peer) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            observed = {row[0]: row for row in db.execute("SELECT id,ciphertext,nonce,deleted FROM memories")}
+            heads = {memory_id: json.loads(wire) for memory_id, wire in db.execute("SELECT id,wire FROM sync_remote_heads")}
+        for memory_id, plaintext, _, deleted in expected.values():
+            row, head = observed.get(memory_id), heads.get(memory_id, {})
+            require(row is not None and row[3] == deleted and head.get("deleted") == bool(deleted),
+                    "historical_remote_record_or_head_missing")
+            if deleted:
+                require(row[1:3] == ("", "") and head.get("ciphertext") == head.get("nonce") == "",
+                        "historical_remote_tombstone_not_propagated")
+            else:
+                require(decrypt_content(expected_urk, row[1], row[2]) == plaintext
+                    and head.get("ciphertext") == row[1] and head.get("nonce") == row[2], "historical_independent_plaintext_differs")
+        marker_text = "Historical reverse synchronization " + secrets.token_hex(16)
+        marker = self.cli(peer, "remember", marker_text, "--title", "historical-reverse-marker",
+            "--importance", "important", "--force")["summary"]["id"]
+        require(self.cli(peer, "sync").get("status") == "ok", "historical_reverse_push_not_completed")
+        require(self.cli(env, "sync").get("status") == "ok", "historical_source_pull_not_completed")
+        self.read_entry(env, marker, marker_text)
+        after, _ = rows()
+        current = {row[0]: row for row in after}
+        for memory_id, plaintext, _, deleted in expected.values():
+            row = current.get(memory_id)
+            require(row is not None and row[4] == deleted, "historical_sync_lost_original_record")
+            if deleted:
+                require(row[1:3] == ("", ""), "historical_source_tombstone_not_canonical")
+            else:
+                require(decrypt_content(expected_urk, row[1], row[2]) == plaintext, "historical_source_pull_changed_plaintext")
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            require(db.execute("SELECT count(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] == 0
+                and db.execute("SELECT count(*) FROM memories WHERE dirty<>0").fetchone()[0] == 0,
+                "historical_sync_unacknowledged_work")
+        require(self.api(account, "GET", "/api/self/vault") == vault, "historical_sync_changed_server_vault")
+        final_session = self.session(env)
+        require(all(final_session.get(field) == session.get(field) for field in
+            ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend")),
+            "historical_sync_changed_source_wrap")
+        return {"profile": str(source), "original_urk_preserved": True, "recovery_operation": operation,
+            "existing_keys_registered": True, "source_push": True, "independent_pull_decrypted": True,
+            "reverse_marker_source_pull": True, "original_active_preserved": True,
+            "tombstones_propagated": True, "pending_work_acknowledged": True}
+
     def run_version(self, version):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         env = self.env(f"v{version}-original")
@@ -725,7 +853,7 @@ class Smoke:
             cleanup["events"].append(event)
         cleanup["passed"] = not cleanup["remaining_users"]
 
-    def run(self):
+    def verify_development_server(self):
         expected_server = os.environ.get("RSRS_DEV_SERVER_SHA", "")
         require(os.environ.get("RSRS_DEV_SERVER_ADDR") == UPSTREAM
                 and re.fullmatch("[0-9a-f]{40}", expected_server), "exact_development_server_required")
@@ -737,6 +865,9 @@ class Smoke:
                     and value.get("source_revision") == expected_server,
                     "development_server_revision_mismatch")
         self.report["server_sha"] = expected_server
+
+    def run(self):
+        self.verify_development_server()
         import cryptography
         require(cryptography.__version__ == "46.0.3", "cryptography_version_not_pinned")
         keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")

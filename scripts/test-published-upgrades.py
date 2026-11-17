@@ -14,6 +14,7 @@ parser.add_argument('--model-dir',required=not download_only)
 parser.add_argument('--legacy-model-dir',required=not download_only)
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
+parser.add_argument('--source',action='append',default=[],help='Diagnostic subset only: exact selected tag or latest formal; never full coverage')
 parser.add_argument('--include-legacy-baselines',action='store_true',help='Manual historical diagnostics only: include unpublished draft and DEV baselines')
 add_runtime_arguments(parser)
 args=parser.parse_args()
@@ -136,6 +137,9 @@ def verify_upgrade(source):
             and checkpoint.get('special_state_seeded') is True \
             and checkpoint.get('special_state_preserved') is True \
             and checkpoint.get('verified_accounts')==['main','alternate'], 'database checkpoint-specific state was not verified'
+        if args.runtime_binary:
+            assert checkpoint.get('post_sync_special_state_preserved') is True \
+                and checkpoint.get('sync_verified_accounts')==['main'], 'database checkpoint state was not verified after real sync'
     assert check.get('historical_credential_migration_actor')=='fixture', 'explicit fixture credential migration missing'
     custody=check.get('host_credential_custody')
     assert isinstance(custody,dict) and custody.get('required') is True and custody.get('cleanup_passed') is True, 'historical credential custody or cleanup unconfirmed'
@@ -157,6 +161,13 @@ def verify_upgrade(source):
         assert check.get('legacy_handoff_actor') is None, 'database upgrade must not require a running legacy host'
         assert check.get('coverage_scope')=='historical-database', 'historical database coverage scope missing'
         assert check.get('host_checks_delegated_to')=='resident-concurrency', 'current host checks must remain in the resident fixture'
+        assert check.get('post_upgrade_sync_checked') is True, 'historical schema synchronization or cleanup was not verified'
+        sync=check.get('post_upgrade_sync')
+        assert isinstance(sync,dict) and all(sync.get(field) is True for field in ('original_urk_preserved',
+            'existing_keys_registered','source_push','independent_pull_decrypted','reverse_marker_source_pull',
+            'original_active_preserved','tombstones_propagated','pending_work_acknowledged')), 'historical bidirectional sync evidence incomplete'
+        assert isinstance(check.get('cloud_cleanup'),dict) and check['cloud_cleanup'].get('passed') is True \
+            and check['cloud_cleanup'].get('remaining_users')==[], 'historical sync cloud cleanup unconfirmed'
         assert check.get('runtime_mode')=='standalone_runtime','standalone Runtime mode missing'
         assert check.get('runtime_binary_sha256')==args.runtime_sha256,'upgrade Runtime digest differs'
         assert check.get('runtime_version')==args.runtime_version,'upgrade Runtime version differs'
@@ -190,6 +201,16 @@ if args.download_only:
 
 try:
     selected=select_upgrade_sources(sources,args.target,args.profile)
+    if args.source:
+        requested=[]
+        for tag in args.source:
+            if tag=='latest':
+                tag=next((tag for tag in reversed(formal_sources) if platform_applicability(tag,args.target,
+                    [asset['name'] for asset in sources[tag]['assets']]) is None),None)
+            assert tag in selected and tag not in requested, 'diagnostic source is absent or duplicated: '+str(tag)
+            requested.append(tag)
+        selected={tag:selected[tag] for tag in requested}
+        report['diagnostic_sources']=requested
     report['selected_sources']=sorted(selected)
     # Legacy macOS model workers have a fixed 30-second deadline; avoid competing model loads.
     with ThreadPoolExecutor(max_workers=1 if sys.platform == 'darwin' else 2) as pool:
@@ -203,7 +224,8 @@ try:
     if first_platform_release:
         report['upgrade_status']='not-applicable: first Intel macOS release; fresh inference is validated separately'
     report['passed']=True
-    report['post_upgrade_sync_checked']=False
-    report['full_coverage']=report['all_published_sources_covered']=args.profile=='full'
+    applicable=[item for item in report['sources'] if item.get('passed') is True]
+    report['post_upgrade_sync_checked']=bool(applicable) and all(item.get('post_upgrade_sync_checked') is True for item in applicable)
+    report['full_coverage']=report['all_published_sources_covered']=args.profile=='full' and not args.source
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')

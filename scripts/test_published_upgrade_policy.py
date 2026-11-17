@@ -94,7 +94,7 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def run_fixture(self, profile=None, missing_latest=False, registry=None, empty_checks=False,
                     checks_transform=None, standalone=False, standalone_mode="published-assets",
-                    cache_draft=False, download_only=False, corrupt_draft=False, missing_checkpoint=False):
+                    cache_draft=False, download_only=False, corrupt_draft=False, missing_checkpoint=False, diagnostic_sources=()):
         # Execute the real orchestration with local artifact bytes and a fake upgrade child.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -179,12 +179,21 @@ class UpgradeProfileTest(unittest.TestCase):
                             'special_state_seeded': True, 'special_state_preserved': True,
                             'verified_accounts': ['main', 'alternate']}
                     if standalone:
+                        if checks[0].get('database_dev_checkpoint'):
+                            checks[0]['database_dev_checkpoint'].update(post_sync_special_state_preserved=True,
+                                sync_verified_accounts=['main'])
                         checks[0].update(upgrade_contract="standalone-v1", source_rpc_checked=False,
                             legacy_client_rejected=False, legacy_handoff_actor=None,
                             live_owner_restart_rejected=False, safe_restart_checked=False,
                             supervised_worker_checked=False, global_engine_preserved=False,
                             coverage_scope="historical-database", host_checks_delegated_to="resident-concurrency",
                             normal_reopen_checked=True, runtime_artifact_reused=True,
+                            post_upgrade_sync_checked=True,
+                            post_upgrade_sync={field: True for field in ('original_urk_preserved',
+                                'existing_keys_registered','source_push','independent_pull_decrypted',
+                                'reverse_marker_source_pull','original_active_preserved','tombstones_propagated',
+                                'pending_work_acknowledged')},
+                            cloud_cleanup={'passed': True, 'remaining_users': []},
                             old_rpc_checked=False, forced_restart_checked=False,
                             runtime_mode="standalone_runtime", standalone_runtime_evidence=True,
                             runtime_installed_after_legacy_data=False,
@@ -199,6 +208,8 @@ class UpgradeProfileTest(unittest.TestCase):
                     "--output-dir", str(root / "reports")]
             if profile is not None:
                 argv += ["--profile", profile]
+            for source in diagnostic_sources:
+                argv += ['--source', source]
             if cache_draft:
                 folder = root / "reports" / "v1.0.10"
                 folder.mkdir(parents=True)
@@ -266,6 +277,11 @@ class UpgradeProfileTest(unittest.TestCase):
         self.assertEqual(report["profile"], "full")
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])
+        targeted, diagnostic = self.run_fixture(standalone=True, diagnostic_sources=('latest', 'v1.0.11-dev.1'))
+        self.assertEqual(set(targeted), {'v1.0.18', 'v1.0.11-dev.1'})
+        self.assertFalse(diagnostic['full_coverage'])
+        self.assertFalse(diagnostic['all_published_sources_covered'])
+        self.assertTrue(diagnostic['post_upgrade_sync_checked'])
         applicable, gap_report = self.run_fixture(missing_checkpoint=True)
         self.assertEqual(set(applicable), set(upgraded) - {"v1.0.17-dev.6"})
         self.assertIn("v1.0.17-dev.6", gap_report["selected_sources"])
@@ -392,7 +408,7 @@ class UpgradeProfileTest(unittest.TestCase):
         flags = ["passed", "real_model",
                  "distinct_vault_keys", "original_records_preserved", "original_sync_work_preserved",
                  "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked",
-                 "normal_reopen_checked", "standalone_runtime_evidence", "runtime_artifact_reused"]
+                 "normal_reopen_checked", "standalone_runtime_evidence", "runtime_artifact_reused", "post_upgrade_sync_checked"]
         self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()
                                                     if key not in flags}], True)
         for name in flags:
@@ -413,6 +429,12 @@ class UpgradeProfileTest(unittest.TestCase):
                     self.assert_rejected_checks(lambda checks: [{**checks[0], name: value}], True)
 
     def test_standalone_requires_database_scope_and_runtime_evidence(self):
+        for field in ('original_urk_preserved', 'existing_keys_registered', 'source_push', 'independent_pull_decrypted',
+                      'reverse_marker_source_pull', 'original_active_preserved', 'tombstones_propagated', 'pending_work_acknowledged'):
+            self.assert_rejected_checks(lambda checks: [{**checks[0], 'post_upgrade_sync': {
+                **checks[0]['post_upgrade_sync'], field: False}}], True)
+        for cleanup in ({'passed': False, 'remaining_users': []}, {'passed': True, 'remaining_users': ['unconfirmed']}):
+            self.assert_rejected_checks(lambda checks: [{**checks[0], 'cloud_cleanup': cleanup}], True)
         self.assert_rejected_checks(lambda checks: [{**checks[0], 'legacy_handoff_actor': 'fixture'}], True)
         fields = {"coverage_scope": [None, "", True, "current-host"],
                   "host_checks_delegated_to": [None, "", True, "historical-database"],

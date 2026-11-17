@@ -91,11 +91,18 @@ class TrackedKeys:
         require(value is not None, "fixture_credential_missing")
         return value
 
-    def track_created_login(self, session, user, super_password, login_password):
+    def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None):
         # Claim only the exact alias returned by this owned fixture's successful
         # login transaction, never enumerate credentials on the host.
-        require(re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
-                and session.get("user") == user, "login_credential_fixture_identity_mismatch")
+        recovery = (isinstance(recovery_operation, str)
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", recovery_operation)
+            and session.get("auth_operation_id") == recovery_operation
+            and session.get("keyring_account") == "login-" + recovery_operation.replace("-", "")
+            and session.get("vault_version") == 4)
+        require((re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+                or recovery and user == "" and session.get("addr") == "")
+                and session.get("user") == user
+                and (recovery_operation is None or recovery), "login_credential_fixture_identity_mismatch")
         alias = session.get("keyring_account")
         require(isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "login_credential_fixture_alias_invalid")
@@ -110,7 +117,8 @@ class TrackedKeys:
         found = []
         for prefix, expected in slots:
             entry = ("rsrs", prefix + alias)
-            require(entry not in self.entries, "login_credential_fixture_alias_not_created")
+            require(entry not in self.entries or recovery and prefix == "super:",
+                    "login_credential_fixture_alias_not_created")
             present = self._read(*entry) is not None
             found.append(present)
             if present:

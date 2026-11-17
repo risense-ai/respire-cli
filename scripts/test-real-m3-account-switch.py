@@ -4,6 +4,7 @@ from native_fixture_process import (install_official_runtime, install_published_
     add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, canonical_scope_path)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from contextlib import closing
+from types import SimpleNamespace
 
 def recover_fixture_urk(session, factors):
     version = session.get('vault_version', 1)
@@ -260,6 +261,8 @@ for binary in BINARIES:
     custody_slots={}
     custody_receipts={}
     components_started=False
+    network_smoke=None
+    network_evidence=None
     def run(*args, allow_failure=False, timeout=120, cancel=None):
         result = captured_run([str(binary),'--json',*args],env=env,timeout=timeout,cancel=cancel)
         if result.returncode and not allow_failure: raise RuntimeError(result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
@@ -993,6 +996,29 @@ for binary in BINARIES:
                 assert_database_checkpoint_preserved(checkpoint_before[str(profile)], state)
             checkpoint_evidence = {'tag': args.database_dev_checkpoint, 'special_state_seeded': True,
                 'special_state_preserved': True, 'verified_accounts': ['main', 'alternate']}
+        if database_upgrade:
+            # All offline evidence above is complete before any account/network changes.
+            network_smoke=vault_crypto.Smoke(SimpleNamespace(root=root/'historical-sync', binary=binary,
+                binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                source_sha=os.environ['CLI_SHA'], version=os.environ['CLI_VERSION']))
+            network_smoke.keys=keys
+            network_smoke.model=CACHE
+            network_evidence=network_smoke.historical_database_sync(env, expected_urks[str(main)], code,
+                original_state[str(main)][0])
+            assert library_state(snapshot(alternate),recovery_factors[str(alternate)])==original_state[str(alternate)], 'network stage changed the offline alternate library'
+            if args.database_dev_checkpoint:
+                current=snapshot(main)
+                active=[(row[0],vault_crypto.decrypt_content(expected_urks[str(main)],row[1],row[2]),row[3],row[4])
+                    for row in current[0][0] if row[1]]
+                state=database_checkpoint_state(main,args.database_dev_checkpoint,current,active)
+                before=checkpoint_before[str(main)]
+                if before['kind']=='legacy_relation_payload':
+                    live_ids={row[0] for row in original_state[str(main)][0] if not row[3]}
+                    before={**before,'links':[row for row in before['links'] if row[0] in live_ids]}
+                assert_database_checkpoint_preserved(before,state)
+                checkpoint_evidence['post_sync_special_state_preserved']=True
+                checkpoint_evidence['sync_verified_accounts']=['main']
+            assert run('recall','Historical reverse synchronization','--titles').get('items'), 'verified source owner lost reverse marker'
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'supervised_worker_checked':args.expect_supervised_worker,'owned_worker_identities':worker_identities,
@@ -1004,6 +1030,7 @@ for binary in BINARIES:
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
             'encrypted_tombstones_preserved':bool(args.seed_binary),
             'post_upgrade_sync_checked':False,
+            'post_upgrade_sync':network_evidence,
             'seed_vault_versions':seed_vault_versions,
             'database_dev_checkpoint':checkpoint_evidence,
             'host_credential_custody':{'required':bool(args.seed_binary),'verified_accounts':list(custody_receipts.values())},
@@ -1040,14 +1067,26 @@ for binary in BINARIES:
             if old_runtime is not None and old_runtime.poll() is None:
                 old_runtime.terminate(); old_runtime.wait(timeout=15)
         except Exception as error: cleanup_errors.append('old runtime: '+str(error))
+        if network_smoke is not None:
+            try:
+                network_smoke.cleanup()
+                reports[-1]['cloud_cleanup']=network_smoke.report['cloud_cleanup']
+                assert reports[-1]['cloud_cleanup']['passed'] is True, 'historical sync cloud cleanup failed'
+            except Exception as error:
+                cleanup_errors.append('cloud: '+str(error))
+            reports[-1]['post_upgrade_sync_diagnostic']={field:network_smoke.report[field]
+                for field in ('stage','server_sha','cli_failure') if field in network_smoke.report}
         if keys is not None:
             try:
+                expected_slots=len(keys.entries) if network_smoke is not None else None
                 reports[-1]['native_credential_cleanup']=keys.cleanup()
                 assert reports[-1]['native_credential_cleanup'].get('passed') is True \
                     and not reports[-1]['native_credential_cleanup'].get('remaining_entries'), 'native credential cleanup failed'
                 custody=reports[-1].get('host_credential_custody')
                 if custody is not None and custody['required']:
-                    assert len(reports[-1]['native_credential_cleanup']['events'])==sum(len(plan[2]) for plan in custody_slots.values()), 'custody cleanup omitted an owned slot'
+                    if expected_slots is None:
+                        expected_slots=sum(len(plan[2]) for plan in custody_slots.values())
+                    assert len(reports[-1]['native_credential_cleanup']['events'])==expected_slots, 'custody cleanup omitted an owned slot'
                     custody['cleanup_passed']=True
             except Exception as error:
                 reports[-1].setdefault('native_credential_cleanup',
@@ -1056,6 +1095,13 @@ for binary in BINARIES:
         if cleanup_errors:
             reports[-1]['passed']=False
             reports[-1]['cleanup_errors']=cleanup_errors
+        if network_evidence and reports[-1]['passed']:
+            reports[-1]['post_upgrade_sync_checked']=(network_evidence.get('profile')==str(main.resolve())
+                and all(network_evidence.get(field) is True for field in ('original_urk_preserved',
+                    'existing_keys_registered','source_push','independent_pull_decrypted','reverse_marker_source_pull',
+                    'original_active_preserved','tombstones_propagated','pending_work_acknowledged'))
+                and reports[-1]['cloud_cleanup']['passed'] is True
+                and reports[-1]['native_credential_cleanup']['passed'] is True)
         reports[-1].update(runtime_report(args,reports[-1]['passed']))
         if args.runtime_binary and not reports[-1]['standalone_runtime_evidence']:
             reports[-1]['passed']=False

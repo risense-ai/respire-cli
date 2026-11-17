@@ -247,6 +247,24 @@ class AliasTests(unittest.TestCase):
                 keys.track_created_login(session, USER, SUPER, PASSWORD)
             self.assertFalse(keys.entries)
             self.assertFalse(keys.reads)
+        operation = '33333333-3333-4333-8333-333333333333'
+        alias = 'login-' + operation.replace('-', '')
+        candidate = dict(user='', addr='', vault_version=4, auth_operation_id=operation,
+                         keyring_account=alias, keyring_backend='native')
+        keys = MemoryKeys()
+        keys.values['rsrs', 'super:' + alias] = SUPER
+        keys.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+        keys.values['rsrs', 'pass:' + alias] = PASSWORD
+        keys.track_created_login(dict(candidate, user=USER, addr=legacy.UPSTREAM), USER, SUPER, PASSWORD,
+                                 recovery_operation=operation)
+        self.assertEqual(keys.entries, {('rsrs', 'super:' + alias), ('rsrs', 'pass:' + alias)})
+        with self.assertRaises(RuntimeError):
+            keys.track_created_login(dict(candidate, user=USER), USER, SUPER, PASSWORD, recovery_operation=operation)
+        for field, value in (('auth_operation_id', 'wrong'), ('keyring_account', OTHER), ('vault_version', 3)):
+            with self.assertRaises(RuntimeError):
+                MemoryKeys().track_created_login(dict(candidate, **{field: value}), '', SUPER, None,
+                                                recovery_operation=operation)
+        self.assertTrue(keys.cleanup()['passed'])
 
     def test_wrong_password_tracked_for_cleanup_without_secret_output(self):
         keys = MemoryKeys()
