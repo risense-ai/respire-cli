@@ -270,14 +270,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
           uid="$(id -u)"
           sudo loginctl enable-linger "$(id -un)"
           sudo systemctl start "user@$uid.service"
+          sudo systemctl is-active --quiet "user@$uid.service"
           export XDG_RUNTIME_DIR="/run/user/$uid"
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test ! -L "$XDG_RUNTIME_DIR"
+          test "$(stat -c '%u:%a' "$XDG_RUNTIME_DIR")" = "$uid:700"
+          test ! -L "$XDG_RUNTIME_DIR/bus"
           test -S "$XDG_RUNTIME_DIR/bus"
-          busctl --user status org.freedesktop.systemd1
+          test "$(stat -c '%u' "$XDG_RUNTIME_DIR/bus")" = "$uid"
+          # user@ readiness covers basic.target, not the socket-activated API bus.
+          systemctl --user start dbus.service
+          systemctl --user is-active --quiet dbus.socket dbus.service
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = 'b true'
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
           printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
       - name: Verify OS autostart registration from verified release bytes
         if: inputs.validation_profile == 'full'

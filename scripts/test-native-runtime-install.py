@@ -44,13 +44,30 @@ class FixtureInstallationTests(unittest.TestCase):
         self.assertLess(workflow.index(systemd), workflow.index(name))
         systemd_step = workflow.split('      - name: ' + systemd + '\n')[1].split('\n      - ')[0]
         for guard in ("if: runner.os == 'Linux' && inputs.validation_profile == 'full'",
+                      'test "$GITHUB_ACTIONS" = true',
                       'test "$RUNNER_ENVIRONMENT" = github-hosted',
                       'sudo loginctl enable-linger "$(id -un)"',
                       'sudo systemctl start "user@$uid.service"',
+                      'sudo systemctl is-active --quiet "user@$uid.service"',
                       'export XDG_RUNTIME_DIR="/run/user/$uid"',
-                      'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"',
-                      'busctl --user status org.freedesktop.systemd1'):
+                      'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"'):
             self.assertIn(guard, systemd_step)
+        proofs = ('test ! -L "$XDG_RUNTIME_DIR"',
+                  'test "$(stat -c \'%u:%a\' "$XDG_RUNTIME_DIR")" = "$uid:700"',
+                  'test ! -L "$XDG_RUNTIME_DIR/bus"',
+                  'test -S "$XDG_RUNTIME_DIR/bus"',
+                  'test "$(stat -c \'%u\' "$XDG_RUNTIME_DIR/bus")" = "$uid"',
+                  'systemctl --user start dbus.service',
+                  'systemctl --user is-active --quiet dbus.socket dbus.service',
+                  'test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = \'b true\'',
+                  'test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"',
+                  '>> "$GITHUB_ENV"')
+        for proof in proofs:
+            self.assertIn(proof, systemd_step)
+        for before, after in zip(proofs, proofs[1:]):
+            self.assertLess(systemd_step.index(before), systemd_step.index(after))
+        for forbidden in ('dbus-run-session', 'continue-on-error', '|| true', 'retry'):
+            self.assertNotIn(forbidden, systemd_step)
         self.assertEqual(workflow.count('python -m venv "$RUNNER_TEMP/upgrade-python"'), 1)
         for dependency in ('dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0'):
             self.assertEqual(workflow.count(dependency), 1)
