@@ -1225,6 +1225,9 @@ class Smoke:
             return actual['pid']
         try:
             cli(['space', 'list'])
+            # An existing Absent target cannot prove store readiness. Use a real
+            # keygen-Unbound profile, whose verified switch deliberately stays idle.
+            cli(['keygen'])
             cli(['runtime', 'start'])
             old_pid = health(library)
             cli(['space', 'create', 'probe'])
@@ -1245,6 +1248,11 @@ class Smoke:
             require(probe.is_dir(), 'space_removed_active_profile')
             health(probe)
             cli(['space', 'use', 'main'])
+            with socket.socket() as listener:
+                listener.settimeout(2)
+                require(listener.connect_ex(('127.0.0.1', port)) != 0,
+                        'space_unbound_switch_started_runtime')
+            cli(['runtime', 'start'])
             health(library)
             before = config.read_bytes()
             cli(['space', 'use', 'missing'], 2)
