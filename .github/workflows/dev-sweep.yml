@@ -363,7 +363,9 @@ jobs:
           args = SimpleNamespace(binary=pathlib.Path(sys.argv[1]), root=pathlib.Path(os.environ['RUNNER_TEMP'])/'historical-model',
               source_sha=os.environ['CLI_SHA'], version=os.environ['CLI_VERSION'], binary_sha256=module.digest(pathlib.Path(sys.argv[1])))
           smoke = module.Smoke(args)
-          smoke.cli(smoke.env('install'), 'model', 'install-m3', timeout=900)
+          env = smoke.env('install')
+          smoke.cli(env, 'model', 'install-m3', timeout=900)
+          module.share_cpu_container(smoke.root, env, smoke.model)
           PY
             model="$RUNNER_TEMP/historical-model/models/bge-m3"
             mkdir -p "$RUNNER_TEMP/native-legacy-model/onnx"
