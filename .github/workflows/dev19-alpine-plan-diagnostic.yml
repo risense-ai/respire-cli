@@ -51,6 +51,7 @@ jobs:
           assert.equal(metadata.binary_sha256, 'e413dade98813291980856ef2ac20c4758e36a988c1150052a7cc3c524424949');
           assert.equal(createHash('sha256').update(readFileSync('release-cli/rsrs')).digest('hex'), metadata.binary_sha256);
           NODE
+          git fetch --no-tags origin "$CLI_SHA"
           git show "$CLI_SHA:scripts/probe-native-arm64-alpine.sh" > scripts/probe-native-arm64-alpine-original.sh
           python3 - <<'PY'
           from pathlib import Path
