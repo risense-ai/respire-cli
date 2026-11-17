@@ -91,6 +91,28 @@ def process_start_id(pid):
     raise RuntimeError('authoritative Runtime birth unsupported on this platform')
 
 
+def runtime_install_diagnostic(result):
+    """Retain fixed installer failure fields without raw errors, paths or stderr."""
+    diagnostic = {'exit_code': result.returncode, 'structured_reason': 'unknown',
+                  'category': 'unclassified', 'envelope': 'invalid_json'}
+    try:
+        value = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return diagnostic
+    if not isinstance(value, dict):
+        diagnostic['envelope'] = 'non_object'
+        return diagnostic
+    diagnostic['envelope'] = 'object'
+    summary = value.get('summary')
+    reason = summary.get('reason') if isinstance(summary, dict) else None
+    if type(reason) is str and reason in ('invalid_input', 'runtime_error', 'request_outcome_unknown'):
+        diagnostic['structured_reason'] = reason
+    errors = value.get('errors')
+    if isinstance(errors, list) and 'runtime restart blocked: owner roots do not match this installation' in errors:
+        diagnostic['category'] = 'owner_roots_mismatch'
+    return diagnostic
+
+
 def install_official_runtime(binary, env, version, binary_hash):
     """Install the pinned Runtime into a fresh source-build fixture, then bind its identity."""
     if (os.environ.get('GITHUB_ACTIONS') != 'true'
@@ -116,7 +138,8 @@ def install_official_runtime(binary, env, version, binary_hash):
         result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
                                 env=install_env, capture_output=True, timeout=180)
         if result.returncode:
-            raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
+            raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode)
+                               + '; diagnostic=' + json.dumps(runtime_install_diagnostic(result)))
     receipt = json.loads((root / 'bin/runtime.json').read_text(encoding='utf-8'))
     proof = receipt.get('release') or {}
     metadata_bytes = proof.get('metadata_json', '').encode('utf-8')
@@ -243,7 +266,8 @@ def install_published_runtime(binary, env):
         result = subprocess.run([str(binary), '--json', 'runtime', 'install', '--file', str(archive),
                                  '--version', version], env=install_env, capture_output=True, timeout=180)
         if result.returncode:
-            raise RuntimeError('selected published Runtime offline install failed: exit ' + str(result.returncode))
+            raise RuntimeError('selected published Runtime offline install failed: exit ' + str(result.returncode)
+                               + '; diagnostic=' + json.dumps(runtime_install_diagnostic(result)))
     receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
     proof = receipt.get('release', {})
     installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
