@@ -1169,6 +1169,37 @@ class OriginalFactorTests(unittest.TestCase):
         case = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'case')
         body = ast.unparse(case)
         self.assertLess(body.index('self.keys.track_created_login(independent,'), body.index("self.cli(remote, 'sync')"))
+        setup = next(node for node in ast.walk(case) if isinstance(node, ast.Assign)
+                     and isinstance(node.value, ast.Constant) and node.value.value == 'independent_current_login')
+        login = next(node for node in ast.walk(case) if isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Call) and ast.unparse(node.value.func) == 'self.cli'
+                     and node.value.args and ast.unparse(node.value.args[0]) == 'remote')
+        statements = sorted((node for node in ast.walk(case) if isinstance(node, ast.stmt)
+                             and setup.lineno <= node.lineno < login.lineno), key=lambda node: node.lineno)
+        with tempfile.TemporaryDirectory() as temporary:
+            smoke = object.__new__(profile.Smoke)
+            smoke.root, smoke.model = Path(temporary), Path(temporary) / 'models'
+            smoke.args, smoke.base_env, smoke.keys = SimpleNamespace(binary=Path(temporary) / 'rsrs'), {}, None
+            smoke.report, smoke.save = {}, Mock()
+            fixture = {'code': SUPER}
+            scope = dict(self=smoke, user=USER, fixture=fixture, Path=Path, require=profile.require)
+            with patch.object(profile.support, 'install_published_runtime') as install:
+                exec(compile(ast.Module(body=statements, type_ignores=[]), '<actual-independent-profile>', 'exec'), scope)
+            remote = scope['remote']
+            session = Path(remote['RSRS_DATA_DIR']) / 'session.json'
+            self.assertFalse(session.exists())
+            self.assertFalse((session.parent / 'rsrs.db').exists())
+            self.assertTrue(session.parent.is_relative_to(smoke.root))
+            self.assertEqual(remote['RSRS_SUPER'], SUPER)
+            self.assertEqual(smoke.report['fixture_operation'], 'independent_current_login')
+            install.assert_called_once()
+            self.assertEqual(fixture, {'code': SUPER})
+            # A partial named session is an existing recovery target, not a fresh login.
+            session.write_text(json.dumps({'user': USER}), encoding='utf-8')
+            guard = next(node.value for node in statements if isinstance(node, ast.Expr)
+                         and isinstance(node.value, ast.Call) and ast.unparse(node.value.func) == 'require')
+            with self.assertRaisesRegex(RuntimeError, '^independent_profile_not_empty$'):
+                eval(compile(ast.Expression(guard), '<independent-profile-guard>', 'eval'), scope)
         for code in ('existing_target_data_overwritten', 'existing_target_session_overwritten'):
             self.assertIn(code, body)
         self.assertIn('self.read_entry(current_env,', body)

@@ -695,7 +695,11 @@ class Smoke(support.Smoke):
                                 and row[2] == row[3] == row[5] == "",
                                 "sync_retained_deleted_payload")
                 user = fixture["account"]["user"]
-                remote = self.env("independent-" + user, user)
+                self.report["fixture_operation"] = "independent_current_login"
+                self.save()
+                remote = self.env("independent-" + user)
+                require(not (Path(remote["RSRS_DATA_DIR"]) / "session.json").exists(),
+                        "independent_profile_not_empty")
                 remote["RSRS_SUPER"] = fixture["code"]
                 self.cli(remote, "login", "--interactive", "--addr", support.UPSTREAM, "--user", user, "--pass", fixture["password"], "--super", fixture["code"])
                 independent = self.session(remote)
