@@ -5,7 +5,9 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import {publishedFullFixture} from './full-report-fixture.mjs';
+import {publishedAssetNames} from './extract-artifact.mjs';
 import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun} from './release-preparation.mjs';
 
 const sha='a'.repeat(40),hash='b'.repeat(64),version='1.2.3-dev.4';
@@ -29,7 +31,8 @@ function fixture(){
   const assets=targets.flatMap(([t])=>[`rsrs-${t}${t.includes('windows')?'.exe':''}`,`rsrs-${t}-runtime.tar.gz`,`cli-build-${t}.json`]).map(file=>({file,size:100,sha256:hash}));
   const packs=[...targets.map(([,n])=>`@rsrsai/${n}`),'@rsrsai/cli'].map((name,i)=>({name,version,file:`pack-${i}.tgz`,size:100,sha256:hash}));
   jobs.push({id:900,name:'preparation-receipt',status:'in_progress',started_at:time(3)});
-  const context={source,identity,manifest,run,jobs,ci,artifacts,assets,packs,now:time(4)};
+  const full_result={schema:1,kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:source.sha,product_sources:{cli:source.sha},manifest_sha256:hash,run_id:Number(source.run_id),run_attempt:Number(source.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
+  const context={source,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result,now:time(4)};
   const receipt=createPreparation(context);
   Object.assign(jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});
   context.run={...context.run,status:'completed',conclusion:'success'};
@@ -150,69 +153,83 @@ test('actual synthetic npm packs must match the full exact-version local pack in
   }finally{rmSync(folder,{recursive:true,force:true});}
 });
 
-test('Release no longer emits or consumes unpublished preparation proofs',()=>{
+test('Release attests all full candidate consumers and publishes only verified imported bytes',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  assert.doesNotMatch(release,/preparation-receipt:|prepared-import:|release-preparation.mjs|prepared_run/);
+  assert.match(release,/needs: \[plan, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke\]/);
+  assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
   const publisher=release.split('\n  publish:\n')[1];
-  assert.match(publisher,/needs.validate.result == 'success'/);
+  assert.match(publisher,/needs.prepared-import.result == 'success'/);
   assert.match(publisher,/needs.publication-ready.result == 'success'/);
-  assert.doesNotMatch(publisher,/needs.validate.result == 'skipped'/);
+  assert.match(publisher,/--reuse-packs npm\/release-packages --export-packs npm\/publication-packages/);
+  assert.doesNotMatch(publisher,/--pack npm\/publication-packages/);
 });
 
 test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',()=>{
   const directory=mkdtempSync(join(tmpdir(),'preparation-process-'));
   try{
-    const bin=join(directory,'bin'),assets=join(directory,'assets'),packs=join(directory,'packs');
-    for(const folder of [bin,assets,packs])mkdirSync(folder);
-    for(const t of manifest.targets){
-      const binary=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,runtime=`rsrs-${t.triple}-runtime.tar.gz`;
-      const bytes=Buffer.from(t.triple),sha256=createHash('sha256').update(bytes).digest('hex');
-      writeFileSync(join(assets,binary),bytes);writeFileSync(join(assets,runtime),bytes);
-      writeFileSync(join(assets,`cli-build-${t.triple}.json`),JSON.stringify({schema_version:1,git_sha:sha,version,target:t.triple,
-        binary_file:binary,runtime_file:runtime,binary_sha256:sha256,runtime_sha256:sha256}));
-    }
+    const assets=join(directory,'assets'),packs=join(directory,'packs'),reports=join(directory,'reports');
+    for(const folder of [assets,packs,reports])mkdirSync(folder);
+    const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));manifest.cliVersion=version;
+    const files=manifest.targets.flatMap(t=>{
+      const file=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,bytes=Buffer.from('synthetic CLI bytes; never executed');
+      writeFileSync(join(assets,file),bytes);
+      const metadata=`cli-build-${t.triple}.json`;
+      writeFileSync(join(assets,metadata),JSON.stringify({schema_version:2,artifact_layout:manifest.artifactLayout,git_sha:sha,version,target:t.triple,
+        binary_file:file,binary_size:bytes.length,binary_sha256:createHash('sha256').update(bytes).digest('hex'),producer:{run_id:'700',run_attempt:1}}));
+      return [file,metadata];
+    });
+    const inventory=files.map(file=>{const bytes=readFileSync(join(assets,file));return {file,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};});
     const packages=[...manifest.targets.map(t=>t.pkg),manifest.npmScope].map((name,i)=>{
       const file=`pack-${i}.tgz`,bytes=Buffer.from(name);writeFileSync(join(packs,file),bytes);
       return {name,version,file,sha256:createHash('sha256').update(bytes).digest('hex')};
     });
     writeFileSync(join(packs,'source-version.json'),JSON.stringify({schema_version:1,git_sha:sha,version,packages}));
-    const lock={targets:Object.fromEntries(targets.map(([target])=>[target,{sdk_version:'1.0.2-dev.12',manifest_sha256:hash,archive_sha256:hash}]))};
+    const runtimeVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url))).required;
+    const candidate={schema:1,kind:'unpublished-cli-candidate',client2:{release:'v2.0.0-dev.6',source_sha:'f'.repeat(40)},source:{repository:source.repository,sha,version,run_id:700,run_attempt:1},
+      runtime:{repository:'risense-ai/respire-runtime',release_id:22,version:runtimeVersion,source_sha:'b'.repeat(40),producer:{run_id:91,run_attempt:2},
+        assets:manifest.targets.flatMap((t,i)=>publishedAssetNames('runtime',t.triple).map((name,n)=>({id:i*3+n+1,name,size:64,sha256:'b'.repeat(64)})))}};
+    const raw=publishedFullFixture(reports,{candidate,assets:inventory,packsFolder:packs});
     const inputs={'Cargo.lock':'synthetic locked dependencies','rust-toolchain.toml':'[toolchain]\nchannel="1.95.0"',
-      'sdk/core-sdk.lock.json':JSON.stringify(lock),'crates/core-sdk/core-sdk.lock.json':JSON.stringify(lock),
-      '.github/workflows/release.yml':'synthetic trusted Release',
+      'runtime-pin.json':JSON.stringify({required:runtimeVersion}),'.github/workflows/release.yml':'synthetic trusted Release',
       '.github/workflows/release-validation.yml':'synthetic trusted build and package validation',
-      '.github/workflows/release-native-validation.yml':'synthetic trusted native validation',
-      'npm/artifact-manifest.json':JSON.stringify({...manifest,cliVersion:'1.0.16'})};
-    writeFileSync(join(bin,'git'),`#!${process.execPath}\nconst fs=require('fs'),s=JSON.parse(fs.readFileSync(process.env.MOCK_PREPARATION)),a=process.argv.slice(2);if(a.join(' ')==='rev-parse HEAD')console.log(s.source.sha);else if(a[0]==='show'&&a[1].startsWith(s.source.sha+':')){const x=s.inputs[a[1].slice(41)];if(x===undefined)throw Error('Unknown source input');process.stdout.write(x);}else throw Error('Unexpected git action');\n`,{mode:0o755});
-    writeFileSync(join(bin,'gh'),`#!${process.execPath}\nconst fs=require('fs'),s=JSON.parse(fs.readFileSync(process.env.MOCK_PREPARATION)),a=process.argv.slice(2),p=a.at(-1),base='repos/risense-ai/respire-cli/actions/';if(a[0]!=='api'||a.some(x=>['--method','-X','POST','PATCH','PUT','DELETE'].includes(x)))throw Error('Non-read API action');fs.appendFileSync(process.env.MOCK_READS,p+'\\n');let r;if(p===base+'runs/700')r=s.run;else if(p===base+'runs/600')r=s.ci;else if(p===base+'runs/700/attempts/1/jobs?per_page=10')r=[{jobs:s.jobs}];else if(p===base+'runs/700/artifacts?per_page=100')r=[{artifacts:s.artifacts}];else if(p===base+'workflows/ci.yml/runs?head_sha='+s.source.sha+'&per_page=100')r=[{workflow_runs:[s.ci]}];else throw Error('Unexpected API scope');console.log(JSON.stringify(r));\n`,{mode:0o755});
-    const state=join(directory,'state.json'),reads=join(directory,'reads'),output=join(directory,'proof.json');
-    const env={PATH:bin+':'+process.env.PATH,HOME:directory,TMPDIR:directory,MOCK_PREPARATION:state,MOCK_READS:reads,
-      GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'700',GITHUB_RUN_ATTEMPT:'1',GITHUB_EVENT_NAME:'workflow_dispatch',
-      GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,CLI_SHA:sha,CLI_VERSION:version};
-    for(const [index,mutate] of [()=>{},s=>s.run.head_sha='f'.repeat(40),s=>s.ci.event='workflow_dispatch',s=>s.jobs[0].conclusion='skipped',s=>s.run.run_attempt=2].entries()){
-      const {context}=fixture(),value={...context,run:{...context.run,status:'in_progress'},inputs};
-      value.jobs.at(-1).status='in_progress';mutate(value);
-      writeFileSync(state,JSON.stringify(value));rmSync(output,{force:true});
-      const result=spawnSync(process.execPath,[fileURLToPath(new URL('./release-preparation.mjs',import.meta.url)),'attest',assets,packs,output],{env,encoding:'utf8',timeout:15000});
+      '.github/workflows/release-native-validation.yml':'synthetic trusted native validation','npm/artifact-manifest.json':JSON.stringify(manifest)};
+    const state=join(directory,'state.json'),reads=join(directory,'reads'),output=join(directory,'proof.json'),mock=join(directory,'mock.mjs');
+    writeFileSync(mock,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
+ const s=JSON.parse(fs.readFileSync(process.env.MOCK_PREPARATION));
+ if(command==='git'){if(a.join(' ')==='rev-parse HEAD')return s.source.sha+'\\n';if(a[0]==='show'&&a[1].startsWith(s.source.sha+':')){const x=s.inputs[a[1].slice(41)];if(x===undefined)throw Error('Unknown source input');return Buffer.from(x);}throw Error('Unexpected git action');}
+ if(command!=='gh')return original(command,a,options);
+ const p=a.at(-1),base='repos/risense-ai/respire-cli/actions/';if(a[0]!=='api'||a.some(x=>['--method','-X','POST','PATCH','PUT','DELETE'].includes(x)))throw Error('Non-read API action');fs.appendFileSync(process.env.MOCK_READS,p+'\\n');let r;
+ if(p===base+'runs/700')r=s.run;else if(p===base+'runs/600')r=s.ci;else if(p===base+'runs/700/attempts/1/jobs?per_page=10')r=[{jobs:s.jobs}];else if(p===base+'runs/700/artifacts?per_page=100')r=[{artifacts:s.artifacts}];else if(p===base+'workflows/ci.yml/runs?head_sha='+s.source.sha+'&per_page=100')r=[{workflow_runs:[s.ci]}];else throw Error('Unexpected API scope');return JSON.stringify(r);
+};syncBuiltinESMExports();`);
+    const env={...process.env,MOCK_PREPARATION:state,MOCK_READS:reads,GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'700',GITHUB_RUN_ATTEMPT:'1',GITHUB_EVENT_NAME:'workflow_dispatch',
+      GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,CLI_SHA:sha,CLI_VERSION:version,VALIDATION_PROFILE:'full',CANDIDATE_ASSETS:JSON.stringify(candidate)};
+    const artifactNames=[...manifest.targets.map(t=>'cli-release-'+t.triple),'npm-release-validation','npm-release-packages'];
+    for(const [index,mutate] of [()=>{},s=>s.run.head_sha='f'.repeat(40),s=>s.ci.event='workflow_dispatch',s=>s.jobs[0].conclusion='skipped',s=>s.run.run_attempt=2,
+      ()=>rmSync(join(reports,'client2-published-online-x86_64-pc-windows-msvc','report.json'))].entries()){
+      const {context}=fixture();
+      const value={...context,run:{...context.run,status:'in_progress'},inputs,
+        jobs:[...raw.jobs.map(j=>({...j,started_at:time(0),completed_at:time(3)})),{id:900,name:'preparation-receipt',status:'in_progress',started_at:time(3)}],
+        artifacts:artifactNames.map((name,i)=>({name,id:i+1,size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:700,head_sha:sha}}))};
+      mutate(value);writeFileSync(state,JSON.stringify(value));rmSync(output,{force:true});
+      const result=spawnSync(process.execPath,['--import',pathToFileURL(mock).href,fileURLToPath(new URL('./release-preparation.mjs',import.meta.url)),'attest',assets,packs,output,reports],{env,encoding:'utf8',timeout:15000});
       if(index===0){
         assert.equal(result.status,0,result.stderr);const proof=JSON.parse(readFileSync(output));
-        assert.deepEqual(proof.source,source);assert.equal(Object.keys(proof.identity.hashes).length,8);
-        assert.equal(proof.assets.length,12);assert.equal(proof.packs.length,5);assert.equal(proof.state,'validated-unpublished');
+        assert.deepEqual(proof.source,source);assert.equal(Object.keys(proof.identity.hashes).length,7);
+        assert.equal(proof.assets.length,16);assert.equal(proof.packs.length,9);assert.equal(proof.state,'validated-unpublished');assert.equal(proof.full_result.gui_passed,true);
       }else{assert.notEqual(result.status,0);assert.equal(existsSync(output),false);}
     }
     assert(readFileSync(reads,'utf8').trim().split('\n').every(p=>p.startsWith('repos/risense-ai/respire-cli/actions/')));
   }finally{rmSync(directory,{recursive:true,force:true});}
 });
 
-test('preparation profiles preserve old full proofs and reject critical as full authority',()=>{
-  const old=fixture();delete old.receipt.validation_profile;validatePreparation(old.receipt,old.context);
-  const f=fixture(),c=f.context;
-  c.jobs=c.jobs.filter(j=>j.name.startsWith('validate / ')||j.name==='preparation-receipt');
-  c.jobs.at(-1).status='in_progress';delete c.jobs.at(-1).conclusion;delete c.jobs.at(-1).completed_at;c.run.status='in_progress';
-  const receipt=createPreparation({...c,profile:'critical'});
-  Object.assign(c.jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});c.run.status='completed';
-  assert.equal(receipt.validation_profile,'critical');validatePreparation(receipt,{...c,validation_profile:'critical'});
-  assert.throws(()=>validatePreparation(receipt,{...c,validation_profile:'full'}));
-  for(const profile of [undefined,'full','invalid']){const r=structuredClone(receipt);if(profile===undefined)delete r.validation_profile;else r.validation_profile=profile;assert.throws(()=>validatePreparation(r,c))}
-  const skipped=structuredClone(c);skipped.jobs.find(j=>j.name.startsWith('validate / Release')).conclusion='skipped';assert.throws(()=>validatePreparation(receipt,skipped));
+test('preparation requires full GUI and DB evidence and never upgrades critical or old incomplete proofs',()=>{
+  const f=fixture();
+  for(const change of [r=>delete r.full_result,r=>r.full_result.gui_passed=false,r=>r.full_result.full_passed=false,
+    r=>r.full_result.historical_upgrades.pop(),r=>r.full_result.run_attempt++,r=>r.validation_profile='critical']){
+    const receipt=structuredClone(f.receipt);change(receipt);assert.throws(()=>validatePreparation(receipt,f.context));
+  }
+  assert.throws(()=>createPreparation({...f.context,run:{...f.context.run,status:'in_progress'},profile:'critical'}));
+  const skipped=structuredClone(f.context);skipped.jobs.find(j=>j.name.startsWith('validate / Release')).conclusion='skipped';
+  assert.throws(()=>validatePreparation(f.receipt,skipped));
 });

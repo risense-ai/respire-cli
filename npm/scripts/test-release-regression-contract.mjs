@@ -217,7 +217,7 @@ test('workflow runs independent fixture work before the join, and keeps Linux su
   assert.match(join,/needs: \[plan, cloud-sweep, native-migration, artifact-inputs, published-assets-verification\]/);assert.match(join,/base-release-sweep-/);assert.match(join,/native-profile-migration-fixture-/);
   assert.match(join,/--migration-only/);assert.match(join,/--binary-sha256 \$build.binary_sha256/);assert.match(join,/\$build.git_sha -ne \$env:CLI_SHA/);assert.match(join,/\$build.target -ne \$env:CLI_TARGET/);
   assert.doesNotMatch(base,/dev-profile-migration-smoke.py/);assert.match(base,/dev-smoke-supplements.py/);assert(base.indexOf('dev-smoke-supplements.py')<base.indexOf('dev-login-interruption-smoke.py'));
-  assert.match(ready,/regressionStatus\(jobs,contract\)==='success'/);assert.doesNotMatch(ready,/native.length===4&&cloud.length===3/);assert.doesNotMatch(ready,/concurrency:|id-token:|contents: write/);assert.match(publish,/needs.publication-ready.result == 'success'/);assert.doesNotMatch(publish,/async function requireCi|async function requireRegression/);
+  assert.match(ready,/prepared-import.mjs readiness/);assert.doesNotMatch(ready,/native.length===4&&cloud.length===3/);assert.doesNotMatch(ready,/concurrency:|id-token:|contents: write/);assert.match(publish,/needs.publication-ready.result == 'success'/);assert.doesNotMatch(publish,/async function requireCi|async function requireRegression/);
 });
 
 
@@ -324,22 +324,22 @@ test('only explicit inactive full matrices are ignored by critical and never ent
   assert.throws(()=>regressionStatus([...inventory(),...inactive],contract));
 });
 
-test('critical publication requires build identity and final full acceptance consumes only published assets',()=>{
+test('critical cannot publish; full candidate preparation precedes promotion and public acceptance',()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const release=text('release.yml'),part=name=>release.split('\n  '+name+':\n')[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
   const guard=release.split('\n').find(line=>line.includes("if(['latest','stable'].includes(channel))"));
   assert(guard);
   for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
   runInNewContext(guard,{channel:'dev'});
-  assert.match(release,/validation_profile:[\s\S]*?default: critical/);
-  assert.match(release,/Reject full acceptance before public Release assets exist/);
+  assert.match(release,/validation_profile:[\s\S]*?default: full/);
+  assert.match(release,/Require full candidates before publication/);
   const client2Guard=release.match(/node -e "(if\(process.env.ARTIFACT_SOURCE==='published-assets'.*)"/)[1];
   for(const env of [{},{CLIENT2_RELEASE:'v2.0.0-dev.6'},{CLIENT2_COMMIT:'c'.repeat(40)},{CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'main'}])assert.throws(()=>runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',...env}}}),/must be explicit/);
   runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'c'.repeat(40)}}});
   runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'build'}}});
   assert.doesNotMatch(release,/^  native-regression-critical(?:-readonly)?:/m);
-  assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
-  assert.match(part('publication-ready'),/Require successful CLI CI for this exact source/);
+  assert.match(part('publication-ready'),/prepared-import.mjs readiness/);
+  assert.match(part('preparation-receipt'),/Require all full consumers including GUI and historical DB/);
   const daily=text('release-full-regression.yml');
   assert.doesNotMatch(daily,/schedule:/);
   assert.match(daily,/-f publish=false -f validation_profile=full/);
@@ -537,7 +537,7 @@ test('published consumers declare every condition dependency and cannot execute 
     const make=(mode,failed)=>new Proxy(Object.fromEntries(dependencies.map(id=>[id,{result:id===failed?'failure':id==='plan'&&mode==='published-assets'?'skipped':id==='published-assets-verification'&&mode==='build'?'skipped':'success',outputs:{validation_profile:'full'}}])),{get(t,key){assert(dependencies.includes(key),'undeclared '+name+' dependency '+key);return t[key];}});
     for(const mode of ['build','published-assets']) {
       const context={always:()=>true,needs:make(mode),inputs:{artifact_source:mode,reuse_dev12_validation:false,prepared_run:''}};
-      assert.equal(Boolean(runInNewContext(js(condition),context)),mode==='published-assets'||name==='validate',name+' '+mode);
+      assert.equal(Boolean(runInNewContext(js(condition),context)),true,name+' '+mode);
       const required=mode==='published-assets'?['artifact-inputs','published-assets-verification',...(name==='native-regression'?['validate']:[]),...(name==='migration-gate'?['cloud-sweep','native-migration']:[])]:dependencies.filter(id=>!['artifact-inputs','published-assets-verification'].includes(id));
       for(const failed of required)assert.equal(Boolean(runInNewContext(js(condition),{...context,needs:make(mode,failed)})),false,name+' accepted failed '+failed);
     }

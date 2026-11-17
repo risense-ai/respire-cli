@@ -64,7 +64,7 @@ test('observed untagged draft shape reserves its intent and cannot relax canonic
   assert.throws(()=>assertReusableRelease(untagged,c,m),/Existing Release source\/version\/draft differs/);
   assert.throws(()=>assertReusableRelease(untagged,{...c,run_id:'701'},m),/fenced by previous Release run 700/);
 });
-test('full guard PATCH/GET preserves explicit tag; later untagged intent still refuses another run with registry404',t=>{
+test('persistent fence PATCH/GET preserves explicit tag; later untagged intent still refuses another run with registry404',t=>{
   const script=fileURLToPath(new URL('./fixtures/publication-crossrun.mjs',import.meta.url));
   const result=spawnSync(process.execPath,[script,fileURLToPath(new URL('../../',import.meta.url)),'untagged'],{encoding:'utf8',timeout:20000});
   assert.equal(result.error,undefined);assert.equal(result.status,0,result.stderr);
@@ -82,6 +82,11 @@ test('a second canonical draft cannot conceal the original untagged unknown-writ
   assert.equal(report.publish_calls,1);assert.deepEqual(report.write_runs,['700']);assert.equal(report.fence_owner,'700');
 });
 test('workflow guards a previous owner before replacing draft notes or clobbering assets',()=>{
+  for(const profile of ['critical','full']){
+    const rejected=spawnSync(process.execPath,[fileURLToPath(new URL('./release-publication.mjs',import.meta.url)),'guard-accepted'],
+      {env:{...process.env,VALIDATION_PROFILE:profile,PREPARED_RUN:''},encoding:'utf8'});
+    assert.notEqual(rejected.status,0);assert.match(rejected.stderr,/full prepared candidate and exact-byte import/);
+  }
   const w=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert(w.indexOf('guard-reservation-accepted')<w.indexOf("gh',['release','edit',`v${version}`"));
   const publisher=w.split('\n  publish:\n')[1].split('\n  dev6-publication-resume:')[0];

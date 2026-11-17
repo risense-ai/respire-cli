@@ -27,9 +27,17 @@ fs.appendFileSync(path.join(process.env.FIXTURE_ROOT,'npm-all.log'),process.env.
 if(args[0]==='pack'){const pkg=JSON.parse(fs.readFileSync('package.json')),p=f.expected.find(p=>p.name===pkg.name),dest=args[args.indexOf('--pack-destination')+1];fs.writeFileSync(path.join(dest,p.filename),Buffer.from(f.bytes,'base64'));process.stdout.write(JSON.stringify([p]));}
 else if(args[0]==='publish'){fs.appendFileSync(path.join(process.env.FIXTURE_ROOT,'npm-writes.log'),process.env.GITHUB_RUN_ID+'\\n');process.stderr.write('synthetic submission outcome unknown\\n');process.exitCode=1;}
 else throw Error('Unexpected npm operation');`);
-writeFileSync(path.join(root,'run.mjs'),`import {main} from './npm/scripts/release-publication.mjs';import {publishAcceptedPackage} from './npm/scripts/registry-publication.mjs';import fs from 'node:fs';
+writeFileSync(path.join(root,'run.mjs'),`import cp from 'node:child_process';import fs from 'node:fs';import path from 'node:path';import {syncBuiltinESMExports} from 'node:module';
+const exec=cp.execFileSync,spawn=cp.spawn,spawnSync=cp.spawnSync;
+cp.execFileSync=(name,args,options)=>name==='gh'?exec(process.execPath,[path.join(process.env.FIXTURE_ROOT,'bin/gh'),...args],options):exec(name,args,options);
+cp.spawnSync=(name,args,options)=>['npm','npm.cmd'].includes(name)?spawnSync(process.execPath,[path.join(process.env.FIXTURE_ROOT,'bin/npm'),...args],{...options,shell:false}):spawnSync(name,args,options);
+cp.spawn=(name,args,options)=>['npm','npm.cmd'].includes(name)?spawn(process.execPath,[path.join(process.env.FIXTURE_ROOT,'bin/npm'),...args],{...options,shell:false}):spawn(name,args,options);
+syncBuiltinESMExports();
+// Exercise the historical immutable-version fence below the newer full-import gate.
+const {persistVersionFence}=await import('./npm/scripts/publication-fence.mjs');
+const {publishAcceptedPackage}=await import('./npm/scripts/registry-publication.mjs');
 let elapsed=0;const options={timeoutMs:30,pollMs:10,now:()=>elapsed,sleep:async ms=>{elapsed+=ms;},fetchImpl:async()=>new Response('',{status:404})};
-try{await main('guard-accepted');const f=JSON.parse(fs.readFileSync('fixture.json'));const p=f.expected[0];await publishAcceptedPackage('npm/dist/'+p.name,p,'latest',options);}catch(error){console.error(error.message);process.exitCode=1;}`);
+try{const f=JSON.parse(fs.readFileSync('fixture.json'));persistVersionFence(f.expected);const p=f.expected[0];await publishAcceptedPackage('npm/dist/'+p.name,p,'latest',options);}catch(error){console.error(error.message);process.exitCode=1;}`);
 const env={...process.env};for(const key of Object.keys(env))if(/TOKEN|SECRET|PASSWORD/i.test(key))delete env[key];
 Object.assign(env,{PATH:path.join(root,'bin')+path.delimiter+process.env.PATH,GITHUB_REPOSITORY:'risense-ai/respire-cli',GITHUB_RUN_ATTEMPT:'1',CLI_SHA:sha,CLI_VERSION:version,FIXTURE_ROOT:root});
 const runs=[];for(const runId of ['700','701']){if(runId==='701'&&['untagged','duplicate-untagged'].includes(process.argv[3])){const f=JSON.parse(readFileSync(path.join(root,'fixture.json')));f.release.tag_name='untagged-observed-draft-shape';f.release.name='v'+version;if(process.argv[3]==='duplicate-untagged'){const next={...fence,run_id:'701'};f.extra=[{...f.release,id:301,tag_name:'v'+version,body:'<!-- rsrs-npm-write-fence:'+Buffer.from(JSON.stringify(next)).toString('base64url')+' -->'}];}writeFileSync(path.join(root,'fixture.json'),JSON.stringify(f));}const r=spawnSync(process.execPath,[path.join(root,'run.mjs')],{cwd:root,env:{...env,GITHUB_RUN_ID:runId},encoding:'utf8',timeout:10000});runs.push({run:runId,status:r.status,error:r.error?.message,stderr:r.stderr.trim()});}
