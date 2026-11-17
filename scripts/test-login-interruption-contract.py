@@ -81,7 +81,14 @@ class JournalContract(unittest.TestCase):
         scope['keys'] = object()
         scope['report']['stage'] = 'initial_authentication'
         scope['cli']('--json', 'remember')
-        self.assertEqual(runner.call_args.kwargs['env']['RSRS_SUPER'], 'synthetic-legacy-super')
+        self.assertNotIn('RSRS_SUPER', runner.call_args.kwargs['env'])
+        scope['report']['stage'] = 'legacy_recovery_select_profile'
+        for command in (('--json', 'account', 'use', 'recovered-original'),
+                        ('--direct', '--json', 'witness', '--verify'),
+                        ('--json', 'recall', 'fixture', '--titles')):
+            scope['cli'](*command)
+            self.assertNotIn('RSRS_SUPER', runner.call_args.kwargs['env'])
+        self.assertEqual(scope['env']['RSRS_SUPER'], 'synthetic-legacy-super')
 
     def test_wrong_original_and_unknown_phase_fail_closed(self):
         mutations = [
