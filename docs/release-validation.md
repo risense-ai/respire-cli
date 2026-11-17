@@ -48,7 +48,8 @@ All eight CLI SDK pins bind the same reviewed SDK version and its per-target dig
 
 Current frontend releases use eight CLI targets: Linux x64/ARM64 GNU and musl,
 macOS Intel/ARM64, and Windows x64/ARM64. Runtime stays pinned to
-`2.0.0-dev.22`. Stable publication remains disabled until separate complete G1
+`2.0.0-dev.23`. Merge this host pin only after the Runtime release is published
+and verified. Stable publication remains disabled until separate complete G1
 evidence is implemented and authorized.
 
 `critical` runs build and package checks only and cannot publish. `full` is the
