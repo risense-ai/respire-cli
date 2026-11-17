@@ -746,16 +746,76 @@ class SnapshotTests(unittest.TestCase):
         self.keys.track_created_login(self.session, USER, SUPER, PASSWORD)
 
     def test_exact_alias_snapshot_and_narrow_normalization(self):
-        before = {k: dict(v) for k, v in self.keys.attribute_snapshots.items()}
-        self.keys.register_current_target(self.session, USER)
-        self.assertEqual(self.keys.current_target_entries, set(before))
-        for item in self.keys.collection.items:
+        import secrets
+        registered = set()
+        for _ in range(2):
+            user = 'ci-migrate-' + secrets.token_hex(8)
+            alias = 'login-' + secrets.token_hex(16)
+            session = dict(user=user, keyring_account=alias)
+            entries = {('rsrs', prefix + alias) for prefix in ('super:', 'pass:')}
+            for prefix, value in (('super:', SUPER), ('pass:', PASSWORD)):
+                self.keys.collection.items.append(Item(self.keys.collection,
+                    self.keys.attributes('rsrs', prefix + alias), value))
+            self.keys.track_created_login(session, user, SUPER, PASSWORD)
+            before = {k: dict(v) for k, v in self.keys.attribute_snapshots.items()}
+            # A previous registration must neither block a new pair nor admit it unchecked.
+            for invalid_session, invalid_user in ((dict(session, user=USER), user),
+                    (dict(session, keyring_account=OTHER), user), (session, 'foreign')):
+                with self.assertRaises(RuntimeError):
+                    self.keys.register_current_target(invalid_session, invalid_user)
+                self.assertEqual(self.keys.current_target_entries, registered)
+            entry = ('rsrs', 'pass:' + alias)
+            snapshot = self.keys.attribute_snapshots.pop(entry)
+            with self.assertRaisesRegex(RuntimeError, 'not_verified_owned_entry'):
+                self.keys.register_current_target(session, user)
+            self.keys.attribute_snapshots[entry] = snapshot
+            self.keys.entries.remove(entry)
+            with self.assertRaisesRegex(RuntimeError, 'not_verified_owned_entry'):
+                self.keys.register_current_target(session, user)
+            self.keys.entries.add(entry)
+            item = self.keys.collection.items.pop()
+            with self.assertRaisesRegex(RuntimeError, 'not_verified_owned_entry'):
+                self.keys.register_current_target(session, user)
+            self.keys.collection.items.append(item)
+            item.attributes['extra'] = 'changed'
+            with self.assertRaisesRegex(RuntimeError, 'attributes_changed'):
+                self.keys.register_current_target(session, user)
+            del item.attributes['extra']
+            self.assertEqual(self.keys.current_target_entries, registered)
+            self.keys.register_current_target(session, user)
+            registered.update(entries)
+            self.assertEqual(self.keys.current_target_entries, registered)
+            with self.assertRaisesRegex(RuntimeError, 'registration_invalid'):
+                self.keys.register_current_target(session, user)
+            for current in self.keys.collection.items:
+                if ('rsrs', current.attributes['username']) in entries:
+                    current.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+            for prefix, value in (('super:', SUPER), ('pass:', PASSWORD)):
+                self.assertEqual(self.keys.read('rsrs', prefix + alias), value)
+            self.assertEqual(self.keys.attribute_snapshots, before)
+            del item.attributes['xdg:schema']
+            with self.assertRaisesRegex(RuntimeError, 'schema_reverted'):
+                self.keys.read('rsrs', 'pass:' + alias)
+            item.attributes['xdg:schema'] = 'foreign'
+            with self.assertRaisesRegex(RuntimeError, 'schema_not_generic'):
+                self.keys.read('rsrs', 'pass:' + alias)
             item.attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
-        self.assertEqual(self.keys.read('rsrs', 'pass:' + ALIAS), PASSWORD)
-        self.assertEqual(self.keys.attribute_snapshots, before)
-        self.keys.collection.items[1].attributes['application'] = 'foreign'
-        with self.assertRaisesRegex(RuntimeError, 'attributes_mismatch'):
+            item.attributes['application'] = 'foreign'
+            with self.assertRaisesRegex(RuntimeError, 'attributes_mismatch'):
+                self.keys.read('rsrs', 'pass:' + alias)
+            item.attributes['application'] = 'rust-keyring'
+        # Tracked but unregistered credentials retain strict raw schema snapshots.
+        self.keys.collection.items[1].attributes['xdg:schema'] = 'org.freedesktop.Secret.Generic'
+        with self.assertRaisesRegex(RuntimeError, 'attributes_changed'):
             self.keys.read('rsrs', 'pass:' + ALIAS)
+        report = self.keys.cleanup()
+        self.assertTrue(report['passed'])
+        baseline = report['provider_schema_baseline']
+        self.assertEqual(baseline['scope'],
+                         'two_new_owned_current_credentials_per_verified_registration_only')
+        self.assertEqual(baseline['registered_entries'], 4)
+        self.assertEqual(baseline['observed_normalizations'], 4)
+        self.assertFalse(baseline['initial_raw_snapshots_overwritten'])
 
     def test_foreign_user_alias_missing_untracked_rejected(self):
         for session in (dict(user='foreign', keyring_account=ALIAS), dict(user=USER, keyring_account=OTHER), dict(user=USER)):
