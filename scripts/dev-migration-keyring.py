@@ -70,6 +70,7 @@ class TrackedKeys:
         self.entries = set()
         self.recovery_controls = {}
         self.recovery_verifiers = {}
+        self.recovery_conflicts = set()
 
     def configure_env(self, env):
         owned_path(env["HOME"])
@@ -123,7 +124,8 @@ class TrackedKeys:
             entry = ("rsrs", prefix + alias)
             require(entry not in self.entries or recovery and prefix == "super:",
                     "login_credential_fixture_alias_not_created")
-            present = self._read(*entry) is not None
+            present = (self._read(*entry, metadata_only=True) if sys.platform == "darwin"
+                       else self._read(*entry)) is not None
             found.append(present)
             if present:
                 self.entries.add(entry)
@@ -169,6 +171,10 @@ class TrackedKeys:
                 self.recovery_controls[control] = payload
             except Exception:
                 self.entries.discard(control)
+                if sys.platform == "darwin":
+                    # Failed verification grants no deletion ownership, including
+                    # deletion of the surrounding dedicated keychain.
+                    self.recovery_conflicts.add(control)
                 raise
 
     def put(self, service, slot, value):
@@ -201,6 +207,8 @@ class TrackedKeys:
                 event = {"entry": index, "passed": False, "code": "credential_cleanup_failed"}
                 events.append(event)
                 remaining.append(event)
+        if self.recovery_conflicts:
+            remaining.append({"code": "recovery_control_verification_failed"})
         return {"passed": not remaining, "remaining_entries": remaining, "events": events}
 
 
@@ -401,13 +409,13 @@ class MacKeys(TrackedKeys):
         self.configured.add(home)
         return env
 
-    def _read(self, service, slot):
+    def _read(self, service, slot, *, metadata_only=False):
         metadata = self._security(self.root, ["find-generic-password", "-s", service,
                                              "-a", slot, str(self.keychain)])
         if metadata.returncode == 44:
             return None
         require(metadata.returncode == 0, "fixture_credential_metadata_failed")
-        if (service, slot) not in self.entries:
+        if metadata_only or (service, slot) not in self.entries:
             return ""
         result = self._security(self.root, ["find-generic-password", "-s", service,
                                            "-a", slot, "-w", str(self.keychain)])
