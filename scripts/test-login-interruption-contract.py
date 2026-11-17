@@ -461,7 +461,7 @@ class BarrierContract(unittest.TestCase):
         handler = next(node for node in ast.walk(main) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
         for barrier in ('before_publish', 'after_publish'):
             with self.subTest(barrier=barrier):
-                state = {'vault': {'original': True}, 'posts': 0, 'gets': 1, 'barrier': barrier}
+                state = {'vault': {'original': True}, 'posts': 0, 'gets': 0, 'barrier': barrier}
                 release, reached = Mock(), Mock()
                 release.wait.return_value = False
                 scope = {'BaseHTTPRequestHandler': object, 'json': json, 'state': state,
@@ -474,7 +474,19 @@ class BarrierContract(unittest.TestCase):
                 instance.rfile = io.BytesIO(body)
                 instance.send_error, instance.reply = Mock(), Mock()
                 if barrier == 'before_publish':
+                    # Both candidate preparation passes precede the publication check.
+                    for expected_gets in (1, 2):
+                        instance.do_GET()
+                        self.assertEqual(state['gets'], expected_gets)
+                        self.assertEqual(state['posts'], 0)
+                        reached.set.assert_not_called()
+                        release.wait.assert_not_called()
+                        instance.send_error.assert_not_called()
+                        instance.reply.assert_called_once_with(state['vault'])
+                        instance.reply.reset_mock()
                     instance.do_GET()
+                    self.assertEqual(state['gets'], 3)
+                    self.assertEqual(state['posts'], 0)
                 else:
                     instance.do_POST()
                 self.assertTrue(state['barrier_failed'])
