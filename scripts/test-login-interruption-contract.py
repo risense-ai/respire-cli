@@ -616,13 +616,20 @@ class ReportContract(unittest.TestCase):
         rpc = next(node for node in host.body if isinstance(node, ast.FunctionDef) and node.name == 'rpc')
         marker = ('runtime maintenance is incomplete; use the host runtime restart or the indicated '
                   'snapshot/login recovery before accessing the library')
+        diagnostic = next(node for node in TREE.body
+                          if isinstance(node, ast.FunctionDef) and node.name == 'safe_cli_diagnostic')
+        categories = ast.literal_eval(next(node.value for node in diagnostic.body
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'categories'
+                                                    for target in node.targets)))
         for error, category in ((marker + '; private-account-material', 'host_maintenance_pending'),
                                 ('host control response channel failure; private-account-material', 'control_response_channel'),
                                 ('host control deadline exceeded; private-account-material', 'control_deadline'),
                                 ('cannot wait for host control Runtime exit; private-account-material', 'control_exit_wait'),
                                 ('parent authorization ended or control channel was interrupted; private-account-material', 'control_parent_or_channel'),
                                 ('auth_diagnostic=auth_parent_revoked_or_channel_interrupted; private-account-material', 'control_parent_or_channel'),
-                                ('private-account-material', 'unclassified')):
+                                ('private-account-material', 'unclassified')) + tuple(
+                (text + '; private-account-material', category)
+                for category, text in categories if category.startswith('key_')):
             with self.subTest(category=category):
                 observation = {}
 
@@ -636,7 +643,7 @@ class ReportContract(unittest.TestCase):
                              subprocess=SimpleNamespace(run=reject))
                 exec(compile(ast.Module(body=[rpc], type_ignores=[]), '<actual-host-rpc>', 'exec'), scope)
                 with self.assertRaisesRegex(RuntimeError, 'login_continuation_transport_mismatch'):
-                    scope['rpc']('auth.login.continue', {}, 0)
+                    scope['rpc']('auth.reset', {}, 2)
                 diagnostic = observation['last_rpc']['diagnostic']
                 self.assertEqual(diagnostic['category'], category)
                 self.assertEqual(observation['last_rpc']['exit'], 1)
