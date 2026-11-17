@@ -413,29 +413,16 @@ pub(crate) fn exchange_control(
                 })?,
         );
         let response = receiver
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .context("host control response deadline or channel failure")?;
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "host control response deadline exceeded"
-        );
-        let response = response?;
+            .recv()
+            .context("host control response channel failure")??;
         let expected_exit = response.exit;
         let envelope = validate(response, child.id())?;
-        loop {
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "host control exit deadline exceeded"
-            );
-            if let Some(status) = child.try_wait()? {
-                anyhow::ensure!(
-                    status.code() == Some(expected_exit),
-                    "host control Runtime exit does not match its response"
-                );
-                return Ok(envelope);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let status = child.wait().context("cannot wait for host control Runtime exit")?;
+        anyhow::ensure!(
+            status.code() == Some(expected_exit),
+            "host control Runtime exit does not match its response"
+        );
+        Ok(envelope)
     })();
     let cleanup = if outcome.is_err() {
         stop_control_child(&mut child)
@@ -762,7 +749,7 @@ mod tests {
         unknown.exit = 2;
         unknown.code = Some("control_outcome_unknown".to_owned());
         for (code, private_error, diagnostic) in [
-            ("control_outcome_unknown", "fixture-private", "auth_runtime_deadline_or_parent_revoked"),
+            ("control_outcome_unknown", "fixture-private", "auth_parent_revoked_or_channel_interrupted"),
             ("auth_outcome_unknown", "fixture-private: Secret Service initialization failed", "auth_credential_backend_unavailable"),
             ("auth_outcome_unknown", "fixture-private: kernel keyring initialization failed", "auth_credential_backend_unavailable"),
             ("auth_outcome_unknown", "fixture-private: offline auth requires a persistent credential backend; the volatile kernel keyring cannot recover this transaction", "auth_credential_backend_not_persistent"),

@@ -410,10 +410,10 @@ pub(crate) fn validate_account_response(
             Some("auth_ownership_unavailable") => ("auth_ownership_unavailable", "account library ownership is unavailable"),
             Some("control_unavailable") => ("control_unavailable", "account controller is unavailable"),
             Some("account_outcome_unknown") => ("account_outcome_unknown", "account outcome is unknown; query the original operation without replaying"),
-            Some("control_outcome_unknown") => ("control_outcome_unknown", "account deadline or parent authorization ended; query the original operation without replaying"),
+            Some("control_outcome_unknown") => ("control_outcome_unknown", "parent authorization ended or control channel was interrupted; query the original operation without replaying"),
             _ => anyhow::bail!("invalid account control rejection code"),
         };
-        let deadline = code == "control_outcome_unknown";
+        let control_unknown = code == "control_outcome_unknown";
         let executed = code == "account_outcome_unknown";
         anyhow::ensure!(!response.ok && response.exit == 2
             && response.error.as_deref().is_some_and(|error| !error.is_empty())
@@ -421,13 +421,13 @@ pub(crate) fn validate_account_response(
             && envelope.details.is_null() && envelope.actions.is_empty() && envelope.related.is_empty()
             && envelope.items.len() == 2
             && envelope.items[0].name == "control_ready"
-            && envelope.items[0].value == (if deadline { "unknown" } else if executed { "true" } else { "false" })
-            && (if deadline { matches!(envelope.items[0].status, Status::Skip) }
+            && envelope.items[0].value == (if control_unknown { "unknown" } else if executed { "true" } else { "false" })
+            && (if control_unknown { matches!(envelope.items[0].status, Status::Skip) }
                 else if executed { matches!(envelope.items[0].status, Status::Ok) }
                 else { matches!(envelope.items[0].status, Status::Fail) })
             && envelope.items[1].name == "store_ready" && envelope.items[1].value == "false"
             && matches!(envelope.items[1].status, Status::Skip)
-            && (if deadline { envelope.summary == serde_json::json!({"outcome":"unknown"}) && envelope.errors.is_empty() }
+            && (if control_unknown { envelope.summary == serde_json::json!({"outcome":"unknown"}) && envelope.errors.is_empty() }
                 else { envelope.summary == serde_json::json!({}) && envelope.errors.len() == 1
                     && response.error.as_ref() == envelope.errors.first() }),
             "invalid account control rejection envelope");
@@ -503,7 +503,7 @@ pub(super) fn validate_auth_response(
     if matches!(response.code.as_deref(), Some("control_outcome_unknown" | "auth_outcome_unknown")) {
         // Keep private Runtime diagnostics inside this boundary; expose only fixed classifications.
         let diagnostic = if response.code.as_deref() == Some("control_outcome_unknown") {
-            "auth_runtime_deadline_or_parent_revoked"
+            "auth_parent_revoked_or_channel_interrupted"
         } else {
             response.error.as_deref().unwrap_or_default().split(": ").find_map(|cause| match cause {
                 "Secret Service initialization failed" | "kernel keyring initialization failed" =>

@@ -528,6 +528,9 @@ mod tests {
             "control_unavailable", "account_outcome_unknown", "control_outcome_unknown"] {
             let error = validate(rejection(code)?).err().context("rejection was accepted")?.to_string();
             assert!(error.contains(&format!("Runtime rejected account control ({code})")));
+            if code == "control_outcome_unknown" {
+                assert_eq!(error, "Runtime rejected account control (control_outcome_unknown): parent authorization ended or control channel was interrupted; query the original operation without replaying");
+            }
             assert!(!error.contains(diagnostic));
         }
         let mut register_request = prepare_auth_account_request(binding.clone(), respire_protocol::HostAuthIdentity::Absent,
