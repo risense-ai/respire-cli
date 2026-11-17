@@ -335,7 +335,8 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let imported = rows.iter().find(|row| row["source_id"] == source_id)
             .context("legacy database source missing")?;
-        assert_eq!(imported["migrated_to"], json!(destination));
+        assert_eq!(Path::new(imported["migrated_to"].as_str().context("migration destination missing")?).canonicalize()?,
+            destination.canonicalize()?);
         assert_eq!(pending_legacy_profiles()?.len(), 1);
         fs::write(legacy.join(SOURCE_RECEIPT), serde_json::to_vec(&json!({
             "source_identity":source_id,"complete":true,"destination":account
@@ -343,7 +344,19 @@ mod tests {
         let result = list_legacy_profiles()?;
         let imported = result["profiles"].as_array().context("legacy rows missing")?
             .iter().find(|row| row["source_id"] == source_id).context("source missing")?;
-        assert_eq!(imported["migrated_to"], json!(account));
+        assert_eq!(Path::new(imported["migrated_to"].as_str().context("migration destination missing")?).canonicalize()?,
+            account.canonicalize()?);
+        let host = respire_client_host::host_credentials::legacy_migration::LegacyMigration::collect(&source_id)?;
+        assert!(host.material().candidates.is_empty() && host.material().custody.is_none());
+        let child = legacy.join("accounts/second");
+        fs::create_dir_all(&child)?;
+        let child_session = br#"{"user":"synthetic-second"}"#;
+        fs::write(child.join("session.json"), child_session)?;
+        let child_id = source_identity(&child)?;
+        let host = respire_client_host::host_credentials::legacy_migration::LegacyMigration::collect(&child_id)?;
+        assert!(host.material().candidates.is_empty() && host.material().custody.is_none());
+        assert_eq!(fs::read(child.join("session.json"))?, child_session);
+        assert!(respire_client_host::host_credentials::legacy_migration::LegacyMigration::collect(&"0".repeat(64)).is_err());
         fs::write(account.join("session.json"), b"{")?;
         assert!(list_legacy_profiles().is_err());
         Ok(())
