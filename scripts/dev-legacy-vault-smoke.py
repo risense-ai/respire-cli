@@ -486,7 +486,9 @@ class Smoke:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         self.verify_development_server()
         source = self.profile(env).resolve()
-        database = source / "rsrs.db"
+        databases = [source / name for name in ("rsrs.db", "onememory.db") if (source / name).is_file()]
+        require(len(databases) == 1, "historical_database_file_not_unique")
+        database, = databases
         identity = (database.stat().st_dev, database.stat().st_ino)
         def rows():
             require(self.profile(env).resolve() == source
