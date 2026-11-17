@@ -376,17 +376,26 @@ impl Maintenance {
         maintenance_binding(profile, None, true)
     }
 
+    pub(crate) fn check_agent_config_record(&self, record: &respire_protocol::config_control::AgentConfigMaintenance) -> Result<()> {
+        let mut preview = self.marker.clone().context("agent config owner missing")?;
+        preview.agent_config = Some(serde_json::to_value(record)?);
+        anyhow::ensure!(serde_json::to_vec(&preview)?.len() <= MAINTENANCE_MARKER_MAX_BYTES,
+            "agent config exceeds maintenance record bound");
+        Ok(())
+    }
+
     pub(crate) fn save_agent_config(&mut self, record: &respire_protocol::config_control::AgentConfigMaintenance) -> Result<()> {
         let root = self.installation_root()?.to_path_buf();
         let actual = marker_bytes(&root)?.context("agent config maintenance missing")?;
         anyhow::ensure!(Some(hash(&actual)).as_deref() == self.marker_digest.as_deref(),
             "agent config maintenance changed");
-        let held = self.marker.as_mut().context("agent config owner missing")?;
-        anyhow::ensure!(held.phase == Phase::Paused && held.snapshot.is_none(), "agent config requires Paused maintenance");
-        held.agent_config = Some(serde_json::to_value(record)?);
-        let bytes = serde_json::to_vec(held)?;
+        let mut updated = self.marker.clone().context("agent config owner missing")?;
+        anyhow::ensure!(updated.phase == Phase::Paused && updated.snapshot.is_none(), "agent config requires Paused maintenance");
+        updated.agent_config = Some(serde_json::to_value(record)?);
+        let bytes = serde_json::to_vec(&updated)?;
         anyhow::ensure!(bytes.len() <= MAINTENANCE_MARKER_MAX_BYTES, "agent config exceeds maintenance record bound");
         private_write(&marker_path(&root), &bytes, Some(&hash(&actual)))?;
+        self.marker = Some(updated);
         self.marker_digest = Some(hash(&bytes));
         Ok(())
     }
@@ -2501,6 +2510,40 @@ mod tests {
             if stopped { assert!(ensure_managed_locked().is_err()); }
             fs::remove_file(control_path(&root))?;
         }
+        struct PortRestore(Option<std::ffi::OsString>);
+        impl Drop for PortRestore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("RSRS_RPC_PORT", value),
+                    None => std::env::remove_var("RSRS_RPC_PORT"),
+                }
+            }
+        }
+        let _port = PortRestore(std::env::var_os("RSRS_RPC_PORT"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
+        drop(listener);
+        let result = crate::autostart::control_agent_config("diary_mode=verbose")?;
+        assert!(matches!(result.status, respire_commands::output::Status::Ok));
+        assert!(!marker_path(&root).exists() && !root.join("bin").exists() && !root.join("rsrs.db").exists());
+        use respire_protocol::config_control::{AgentConfigIntent, AgentConfigMaintenance};
+        let review = crate::client_config::review_agent_config(
+            AgentConfigIntent { key: "diary_mode".into(), raw_value: "concise".into() }, root.clone(), root.clone())?;
+        let mut interrupted = begin_maintenance_locked()?;
+        interrupted.auth_launch_binding(&root)?;
+        let original = AgentConfigMaintenance { review: review.clone(), was_serving: false, store_ready: false,
+            sent: true, receipt: None };
+        interrupted.save_agent_config(&original)?;
+        crate::client_config::publish_agent_config(&review, || Ok(()))?;
+        let candidate = fs::read(root.join("agent.json"))?;
+        drop(interrupted);
+        let error = crate::autostart::control_agent_config("diary_mode=concise").err()
+            .context("sent agent config was replayed without its receipt")?;
+        assert!(format!("{error:#}").contains("agent_config_outcome_unknown"));
+        let (pending, _, _) = pending_agent_config(&root)?.context("original agent operation disappeared")?;
+        assert!(pending == original && fs::read(root.join("agent.json"))? == candidate);
+        assert!(marker(&root)?.context("agent maintenance disappeared")?.phase == Phase::Paused);
+        fs::remove_file(marker_path(&root))?;
         Ok(())
     }
 

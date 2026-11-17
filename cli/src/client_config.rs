@@ -142,8 +142,12 @@ pub(crate) fn review_agent_config(intent: respire_protocol::config_control::Agen
         }
     };
     let original_config = bytes.as_ref().map(|bytes| String::from_utf8(bytes.clone())).transpose()?;
-    let original = if workspace {
-        original_config.as_deref().map(serde_json::from_str).transpose()?.unwrap_or_else(|| json!({}))
+    let host_only = !matches!(intent.key.trim(), "read_heat" | "recall_fusion");
+    let original = if workspace || host_only {
+        let value: Value = original_config.as_deref().map(serde_json::from_str).transpose()
+            .context("agent config contains invalid JSON")?.unwrap_or_else(|| json!({}));
+        anyhow::ensure!(value.is_object(), "agent config must be an object");
+        value
     } else {
         original_config.as_deref().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_else(|| json!({}))
     };
@@ -157,6 +161,81 @@ pub(crate) fn review_agent_config(intent: respire_protocol::config_control::Agen
         fingerprint: String::new() };
     review.fingerprint = hex::encode(Sha256::digest(review.fingerprint_bytes()?));
     Ok(review)
+}
+
+pub(crate) fn read_agent_config_for_write(profile: &Path) -> Result<Value> {
+    let value: Value = agent_config_bytes(&profile.join("agent.json"))?
+        .as_deref().map(serde_json::from_slice).transpose()
+        .context("agent config contains invalid JSON")?.unwrap_or_else(|| json!({}));
+    anyhow::ensure!(value.is_object(), "agent config must be an object");
+    Ok(value)
+}
+
+fn reviewed_agent_config(
+    review: &respire_protocol::config_control::AgentConfigReview,
+) -> Result<(PathBuf, Vec<u8>)> {
+    anyhow::ensure!(!matches!(review.intent.key.trim(), "read_heat" | "recall_fusion"),
+        "Runtime setting requires its existing control entry point");
+    let (root, profile) = config::control_roots()?;
+    anyhow::ensure!(root.canonicalize()? == review.installation_root
+        && profile.canonicalize()? == review.profile
+        && respire_protocol::metadata_control::metadata_identity(&profile, |bytes| hex::encode(Sha256::digest(bytes)))? == review.identity
+        && uuid::Uuid::parse_str(&review.operation_id).is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == review.operation_id)
+        && revision(review.original_config.as_deref().map(str::as_bytes)).0 == review.original_revision
+        && hex::encode(Sha256::digest(review.fingerprint_bytes()?)) == review.fingerprint,
+        "agent config original operation or selection changed");
+    let workspace = review.intent.workspace_mode().map_err(anyhow::Error::msg)?.is_some();
+    let path = if workspace { paths::client_config_path() } else { profile.join("agent.json") };
+    config::normalize_control_path(&path)?;
+    let original: Value = review.original_config.as_deref().map(serde_json::from_str).transpose()?
+        .unwrap_or_else(|| json!({}));
+    anyhow::ensure!(original.is_object(), "agent config must be an object");
+    let candidate = review.intent.apply(&original).map_err(anyhow::Error::msg)?;
+    if workspace { config::validate_client_config(&candidate, &path)?; }
+    let bytes = serde_json::to_vec_pretty(&candidate)?;
+    anyhow::ensure!(hex::encode(Sha256::digest(&bytes)) == review.candidate_revision,
+        "agent config candidate differs from original intent");
+    Ok((path, bytes))
+}
+
+fn agent_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    config::normalize_control_path(path)?;
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Keep the config lock through publication of the original operation's receipt.
+pub(crate) fn publish_agent_config(
+    review: &respire_protocol::config_control::AgentConfigReview,
+    publish_receipt: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let (path, candidate) = reviewed_agent_config(review)?;
+    let _lock = config_lock(&path)?;
+    anyhow::ensure!(agent_config_bytes(&path)?.as_deref() == review.original_config.as_deref().map(str::as_bytes),
+        "agent config CAS conflict; no third-party edit was overwritten");
+    reviewed_agent_config(review)?;
+    replace_config(&path, Some(&candidate))?;
+    anyhow::ensure!(agent_config_bytes(&path)?.as_deref() == Some(candidate.as_slice()),
+        "agent config candidate changed after publication");
+    reviewed_agent_config(review)?;
+    publish_receipt()
+}
+
+pub(crate) fn verify_agent_config_receipt(receipt: &respire_protocol::config_control::AgentConfigReceipt) -> Result<()> {
+    use respire_protocol::config_control::AgentConfigOutcome;
+    let (path, candidate) = reviewed_agent_config(&receipt.review)?;
+    let _lock = config_lock(&path)?;
+    let expected = match receipt.outcome {
+        AgentConfigOutcome::Committed => Some(candidate.as_slice()),
+        AgentConfigOutcome::RolledBack => receipt.review.original_config.as_deref().map(str::as_bytes),
+        AgentConfigOutcome::Unknown => anyhow::bail!("agent_config_outcome_unknown; no terminal receipt"),
+    };
+    anyhow::ensure!(agent_config_bytes(&path)?.as_deref() == expected,
+        "agent config receipt or file changed; retain original operation");
+    Ok(())
 }
 
 /// Plan the five existing `config` flags without publishing any of them.
@@ -453,6 +532,32 @@ mod tests {
         }
         assert_eq!(fs::read(&path)?, external);
         assert_eq!(fs::read(&path)?, external);
+        use respire_protocol::config_control::{AgentConfigIntent, AgentConfigOutcome, AgentConfigReceipt};
+        let root = paths::main_data_dir().canonicalize()?;
+        let agent = root.join("agent.json");
+        let review = review_agent_config(AgentConfigIntent { key: "diary_mode".into(), raw_value: "verbose".into() },
+            root.clone(), root.clone())?;
+        fs::write(&agent, b"{\"third_party\":true}")?;
+        assert!(publish_agent_config(&review, || anyhow::bail!("receipt must not be called on conflict")).is_err());
+        assert_eq!(fs::read(&agent)?, b"{\"third_party\":true}");
+        fs::remove_file(&agent)?;
+        let mut published = false;
+        publish_agent_config(&review, || { published = true; Ok(()) })?;
+        assert!(published);
+        let receipt = AgentConfigReceipt { review: review.clone(), outcome: AgentConfigOutcome::Committed, result: Value::Null };
+        verify_agent_config_receipt(&receipt)?;
+        assert!(publish_agent_config(&review, || anyhow::bail!("original must not be replayed")).is_err());
+        fs::write(&agent, b"{\"third_party\":true}")?;
+        assert!(verify_agent_config_receipt(&receipt).is_err());
+        for corrupt in [b"{".as_slice(), b"[]".as_slice(), b"null".as_slice()] {
+            fs::write(&agent, corrupt)?;
+            assert!(read_agent_config_for_write(&root).is_err());
+            assert!(review_agent_config(review.intent.clone(), root.clone(), root.clone()).is_err());
+            assert_eq!(fs::read(&agent)?, corrupt);
+        }
+        fs::remove_file(&agent)?;
+        assert!(publish_agent_config(&review, || anyhow::bail!("synthetic receipt write failure")).is_err());
+        assert_eq!(serde_json::from_slice::<Value>(&fs::read(&agent)?)?, json!({"diary_mode":"verbose"}));
         Ok(())
     }
 
