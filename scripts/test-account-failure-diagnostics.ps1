@@ -57,4 +57,27 @@ foreach ($envelope in @($null, [pscustomobject]@{}, [pscustomobject]@{ summary =
 # Existing non-account classification remains intact.
 Assert-Diagnostic ([pscustomobject]@{ errors = @('already registered') }) 'account_exists'
 Assert-Diagnostic ([pscustomobject]@{ summary = @{ reason = 'synthetic-private-secret' }; errors = @('HTTP 503') }) 'http_503'
+foreach ($case in @(
+    @('host control response channel failure', 'account_helper_channel_failed', 'auth_helper_channel_failed'),
+    @('host control deadline exceeded', 'account_helper_launch_deadline', 'auth_helper_launch_deadline'),
+    @('cannot wait for host control Runtime exit', 'account_helper_exit_wait_failed', 'auth_helper_exit_wait_failed'),
+    @('host control response deadline or channel failure', 'account_helper_deadline_or_channel', 'auth_helper_deadline_or_channel'),
+    @('host control response deadline exceeded', 'account_helper_deadline_or_channel', 'auth_helper_deadline_or_channel'),
+    @('host control exit deadline exceeded', 'account_helper_deadline_or_channel', 'auth_helper_deadline_or_channel')
+)) {
+    Assert-Diagnostic ([pscustomobject]@{ summary = @{ reason = 'account_outcome_unknown' }
+        errors = @("$($case[0]): synthetic-private-secret") }) "account_outcome_unknown/$($case[1])"
+    Assert-Diagnostic ([pscustomobject]@{ errors = @("$($case[0]): synthetic-private-secret") }) $case[2]
+}
+foreach ($case in @(
+    @('parent authorization ended or control channel was interrupted', 'account_parent_revoked_or_channel_interrupted'),
+    @('account deadline or parent authorization ended', 'account_runtime_deadline_or_parent_revoked'),
+    @('control deadline or parent revocation; query the same operation ID before retrying', 'account_runtime_deadline_or_parent_revoked')
+)) {
+    Assert-Diagnostic ([pscustomobject]@{ summary = @{ reason = 'account_outcome_unknown' }
+        errors = @("Runtime rejected account control (control_outcome_unknown): $($case[0]); synthetic-private-secret") }) "account_outcome_unknown/$($case[1])"
+}
+foreach ($class in @('auth_parent_revoked_or_channel_interrupted', 'auth_runtime_deadline_or_parent_revoked')) {
+    Assert-Diagnostic ([pscustomobject]@{ errors = @("auth control completion is unknown; auth_diagnostic=$class; synthetic-private-secret") }) $class
+}
 Write-Host 'PASS: account diagnostic whitelist preserves outcomes without private fields'
