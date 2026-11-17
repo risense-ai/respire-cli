@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted isolated D-Bus: real legacy Secret Service profiles and native aliases."""
+"""Hosted isolated D-Bus: legacy databases with explicit current Secret Service credentials."""
 import importlib.util
 import os
 from pathlib import Path
@@ -15,7 +15,7 @@ def load(name, filename):
 
 migration = load("secret_service_migration_fixture", "dev-profile-migration-smoke.py")
 backend = load("secret_service_native_fixture", "dev-migration-secret-service.py")
-EXTRA_CASE = "secret_service_legacy_fields_and_aliases"
+EXTRA_CASE = "secret_service_current_credentials_for_legacy_db"
 required = migration.REQUIRED + (EXTRA_CASE,)
 
 
@@ -25,7 +25,7 @@ class SecretServiceSmoke(migration.Smoke):
         self.ss_profiles = 0
         self.ss_services = set()
         self.report.update(required_cases=list(required),
-            scope="Isolated D-Bus Secret Service credentials, encrypted profiles and native alias migration.")
+            scope="Current Secret Service credentials with encrypted legacy databases.")
 
     def migrated(self, home, fixtures):
         sessions = super().migrated(home, fixtures)
@@ -33,8 +33,8 @@ class SecretServiceSmoke(migration.Smoke):
             session_path, session = sessions[fixture["account"]["user"]]
             migration.require(session.get("keyring_backend") == "secret_service",
                 "migration_did_not_select_secret_service")
-            # Exact old service/username attributes and unchanged native values
-            # are verified by the shared migration fixture's native readbacks.
+            # The shared fixture verifies current source aliases and values;
+            # no old service/username credential placement is required.
             migration.require(self.keys.name == "linux-secret-service",
                 "secret_service_fixture_backend_mismatch")
             self.ss_profiles += 1
@@ -48,8 +48,8 @@ class SecretServiceSmoke(migration.Smoke):
         migration.require(self.ss_services == {"1memory", "memocap", "respire"}
             and self.ss_profiles >= 5, "secret_service_legacy_profiles_missing")
         self.passed(EXTRA_CASE, profiles=self.ss_profiles,
-            legacy_services=sorted(self.ss_services), backend="secret_service",
-            original_attributes_and_values_preserved=True)
+            database_origins=sorted(self.ss_services), backend="secret_service",
+            current_source_credentials_preserved=True)
 
 
 def main():
