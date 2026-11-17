@@ -1305,8 +1305,11 @@ function Invoke-CoreQueryAcceptance {
         $report.core_query.call_site = 'fusion_arm_reply_loss'
         $null = Read-CoreQueryControl 'lose_reply'
         $mismatch = $null
+        $report.core_query.call_site = 'fusion_save_focus'
+        $save = Find-CoreQuerySave
+        Focus-OfflineControl $save ([ref]$mismatch)
         $report.core_query.call_site = 'fusion_save_prepare'
-        $prepared = Prepare-OfflineButtonInvoke (Find-CoreQuerySave) ([ref]$mismatch)
+        $prepared = Prepare-OfflineButtonInvoke $save ([ref]$mismatch)
         $report.core_query.call_site = 'fusion_save_invoke'
         $prepared.pattern.Invoke()
     } elseif ($binding.core_query.phase -cne 'core-resume') { throw 'Unknown core query phase' }

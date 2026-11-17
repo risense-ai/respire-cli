@@ -218,7 +218,8 @@ if (-not $coreIssue -or $coreIssue.Contains('GetCurrentPattern(') -or $coreIssue
 }
 $last=-1
 foreach ($step in @('Focus-OfflineControl $combo', 'Send-OfflineKey 0x24 $comboId', 'Send-OfflineKey 0x28 $comboId',
-    'Send-OfflineKey 0x09 $comboId', "Read-CoreQueryControl 'lose_reply'", '$prepared.pattern.Invoke()')) {
+    'Send-OfflineKey 0x09 $comboId', "Read-CoreQueryControl 'lose_reply'", '$save = Find-CoreQuerySave',
+    'Focus-OfflineControl $save ([ref]$mismatch)', 'Prepare-OfflineButtonInvoke $save ([ref]$mismatch)', '$prepared.pattern.Invoke()')) {
     $index=$coreIssue.IndexOf($step)
     if ($index -le $last) { throw 'Core select keyboard/one-save order or original-focus guard changed' }
     $last=$index
