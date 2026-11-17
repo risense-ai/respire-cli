@@ -25,7 +25,7 @@ const cliAssets=publishedAssetNames('cli',target).map(name=>{
   return {name,size:statSync(path).size,sha256:createHash('sha256').update(bytes).digest('hex')};
 });
 const metadata=JSON.parse(readFileSync(join(root,'cli',`cli-build-${target}.json`)));
-assert.equal(metadata.producer.run_id,original.run_id);assert.equal(metadata.producer.run_attempt,1);
+assert.equal(metadata.producer.run_id,String(original.run_id));assert.equal(metadata.producer.run_attempt,'1');
 const spec={runtime:candidate.runtime,cli:{repository:'risense-ai/respire-cli',source_sha:original.sha,
   version:'2.0.0-dev.19',producer:{run_id:original.run_id,run_attempt:1},assets:cliAssets}};
 const options={token:process.env.GH_TOKEN,candidate:true};
