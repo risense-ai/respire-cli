@@ -58,6 +58,18 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   assert.doesNotThrow(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'false',EXPECTED_RUNTIME_SHA:''}}}));
   assert.match(step('Sweep the exact CI binary'),/\$businessArgs \+= '-BusinessOnly'/);
   for(const value of ["$coverage.diagnostic_only = $true","$coverage.publication_reusable = $false","$coverage.full_acceptance = $false","$coverage.release_acceptance = $false","$coverage.base_complete = $false","$coverage.coverage_full = $false","'api-smoke'","'supplemental_suites'","'business-independent-login'","'business-upload-confirmed'","'business-download-converged'","'business-cross-device-recall'"])assert(sweep.includes(value),value);
+  const modelStages=["-Name 'model-install'",'share_cpu_container(sys.argv[2]',"Confirm-CloudRegistration $mainCloudAccount $reg","if (-not $reg.Ok)","if (-not $super)","if ($regAddr -ne $Server)","-Name 'model-engine-cpu'","-Name \"model-engine-configure-$configuredEngine\"","-Name 'model-engine-restore-cpu'","-Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--text'"];
+  for(let i=0;i<modelStages.length;i++){
+    assert.equal(sweep.split(modelStages[i]).length,2,modelStages[i]);
+    if(i)assert(sweep.indexOf(modelStages[i-1])<sweep.indexOf(modelStages[i]),modelStages[i]);
+  }
+  const engineCalls=sweep.split('\n').filter(line=>line.includes('Invoke-Om -Name')&&line.includes("'model', 'engine',"));
+  assert.equal(engineCalls.length,3);
+  for(const line of engineCalls){
+    assert.match(line,/-DataDir \$DirA/);
+    assert.doesNotMatch(line,/-HostProfile|--direct/);
+  }
+  assert.match(sweep,/Assert-Smoke 'model-engine-cpu-selected'[^\n]*\nif \(-not \$BusinessOnly\) \{\nforeach \(\$configuredEngine in @\('gpu', 'npu'\)\)/);
   assert.match(sweep,/Test-SmokeProfileRoot \(\[string\]\$st\.Envelope\.summary\.data_dir\) \$DirA/);
   assert.match(sweep,/Test-SmokeProfileRoot \$profileB \$DirB/);
   assert.match(sweep,/GetFullPath\(\$statusProfileB\) -ceq \[IO\.Path\]::GetFullPath\(\$profileB\)/);
