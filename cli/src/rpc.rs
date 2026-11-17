@@ -908,8 +908,8 @@ pub(crate) fn ensure_daemon_locked_with_expectation(
         }
     }
     #[cfg(feature = "client2-host-prototype")]
+    // Desktop launchers also exit after readiness; a resident host must own the plugin pipe.
     if current.is_none()
-        && !respire::env::var("RSRS_CLIENT2_HOST").is_ok_and(|value| value == "1")
         && crate::autostart::lifecycle_boot_token().is_none()
         && !respire_client_host::paths::main_data_dir()
             .join("runtime/autostart/registration.json")
