@@ -187,7 +187,7 @@ class JournalContract(unittest.TestCase):
                     login_continuation_receipt(value, self.id, self.root, self.addr, outcome)
 
     def test_real_fixture_keeps_required_failure_assertions(self):
-        for assertion in ('legacy_original_profile_not_restored', 'legacy_interrupted_credential_not_deleted',
+        for assertion in ('failed_login_original_profile_not_restored', 'failed_login_interrupted_credential_not_deleted',
                           'original_profile_not_restored', 'interrupted_native_credential_not_deleted',
                           'interrupted_native_password_not_deleted', 'fresh_login_replayed_authentication',
                           'unknown_rollback_deleted_credentials', 'unknown_result_released_maintenance',
@@ -195,6 +195,36 @@ class JournalContract(unittest.TestCase):
                           'original_ciphertexts_changed', 'original_source_changed',
                           'login_continuation_maintenance_not_finished'):
             self.assertIn('"' + assertion + '"', SOURCE)
+        self.assertIn('"failed_login_explicit_rollback"', SOURCE)
+        self.assertNotIn('"synthetic_legacy_schema"', SOURCE)
+        self.assertNotIn('"original": list(initial_session)', SOURCE)
+        seed = next(node for node in ast.walk(TREE)
+                    if isinstance(node, ast.FunctionDef) and node.name == 'write_session')
+        from importlib import util
+        spec = util.spec_from_file_location('source_fixture_keys', Path(__file__).with_name('dev-migration-keyring.py'))
+        key_module = util.module_from_spec(spec)
+        spec.loader.exec_module(key_module)
+        with tempfile.TemporaryDirectory() as temporary:
+            keys = key_module.TrackedKeys(Path(temporary))
+            keys.credential_backend = 'secret_service'
+            stored = {}
+            keys._read = Mock(side_effect=lambda service, slot: stored.get((service, slot)))
+            keys._put = Mock(side_effect=lambda service, slot, value: stored.__setitem__((service, slot), value))
+            aliases = set()
+            scope = dict(json=json, addr=self.addr, secrets=__import__('secrets'), legacy=Mock(PREFIX='rsrs:'),
+                         session=Path(temporary) / 'session.json', keys=keys, code='synthetic-current-super',
+                         old_super='synthetic-original-super', native_aliases=aliases)
+            exec(compile(ast.Module(body=[seed], type_ignores=[]), '<actual-source-session>', 'exec'), scope)
+            for version in (2, 4):
+                value = json.loads(scope['write_session']({'version': version, 'wrapped_urk': 'rsrs:fixture'}))
+                alias = value['keyring_account']
+                self.assertIn(alias, aliases)
+                self.assertEqual(value['keyring_backend'], 'secret_service')
+                keys._put.assert_any_call('rsrs', 'super:' + alias,
+                    'synthetic-current-super' if version == 4 else 'synthetic-original-super')
+                keys._put.assert_any_call('rsrs', 'pass:' + alias, 'synthetic-password')
+                self.assertFalse(any(field in value for field in ('super', 'pass', 'secret', 'secret_key')))
+            self.assertEqual(len(aliases), 2)
         self.assertIn('start_new_session=True', SOURCE)
         self.assertLess(SOURCE.index('= interrupt_owned_control(child)'),
                         SOURCE.index('release.set()', SOURCE.index('= interrupt_owned_control(child)')))

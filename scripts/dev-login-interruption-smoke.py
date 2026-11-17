@@ -35,7 +35,7 @@ if "--gui-recovery-server" not in sys.argv:
 
 # Only fixed fixture assertions may become diagnostic strings. Never serialize
 # arbitrary exception text, subprocess output, paths or account material.
-FAILURE_CODES = frozenset(['cli_expectation_failed', 'API_config_changed', 'DEV4_recovery_failed', 'SIGINT_fixture_requires_linux_pidfd', 'binary_hash_mismatch', 'binary_version_mismatch', 'ciphertext_fixture_missing', 'cleanup_control_helper_still_running', 'cleanup_process_identity_changed', 'cleanup_process_lifetime_unproven', 'cleanup_untracked_group_member', 'commit_barrier_not_reached', 'credential_journal_outside_fixture', 'credential_not_bound_to_fixture_transaction', 'data_key_changed', 'durable_recovery_missing', 'explicit_retry_login_count_changed', 'fresh_fixture_required', 'fresh_login_replaced_maintenance_owner', 'fresh_login_replaced_original_operation', 'fresh_login_replayed_authentication', 'full_library_namespace_not_migrated', 'inconsistent_factors_modified_state', 'inconsistent_profile_overwritten', 'interrupted_control_helper_still_running', 'interrupted_group_still_running', 'interrupted_native_credential_not_deleted', 'interrupted_native_password_not_deleted', 'interrupted_operation_advanced', 'interrupted_phase_not_proven', 'interruption_already_completed', 'interruption_child_not_owned', 'interruption_control_helper_not_bound', 'interruption_group_changed', 'interruption_group_has_unbound_member', 'interruption_session_not_owned', 'invalid_publication_barrier', 'invalid_recovery_action', 'legacy_credential_collision', 'legacy_fixture_requires_clean_journal', 'legacy_interrupted_credential_not_deleted', 'legacy_original_ciphertexts_changed', 'legacy_original_profile_not_restored', 'legacy_recovery_not_retired', 'migrated_fixture_witness_invalid', 'migration_effects_not_exactly_once', 'native_alias_missing', 'native_backend_not_used', 'native_credential_not_written', 'native_fixture_cleanup_failed', 'operation_journal_schema_missing', 'operation_recovery_not_retired', 'original_account_identity_changed', 'original_candidate_changed_during_completion', 'original_ciphertexts_changed', 'original_factors_not_recovered', 'original_login_password_changed', 'original_operation_binding_changed', 'original_operation_invalid', 'original_operation_missing', 'original_operation_not_committed', 'original_operation_not_unique', 'original_password_not_written', 'original_plaintext_not_recovered', 'original_profile_not_discovered', 'original_profile_not_migrated', 'original_profile_not_restored', 'original_profile_selection_failed', 'original_recovery_image_changed', 'original_result_not_repeatable', 'original_rollback_not_confirmed', 'original_source_changed', 'original_terminal_receipt_missing', 'original_vault_factors_changed', 'owned_child_not_interrupted', 'owned_runtime_cleanup_failed', 'password_update_not_authorized', 'publication_checkpoint_not_proven', 'publication_window_not_proven', 'repeated_result_changed_material', 'result_replayed_authentication', 'rollback_receipt_not_retained', 'rollback_replayed_authentication', 'server_transfer_changed_source', 'server_transfer_copy_missing', 'server_transfer_count_failed', 'server_transfer_not_reencrypted', 'server_transfer_remote_duplicated', 'server_transfer_retry_duplicated', 'server_transfer_reused_source', 'server_transfer_sync_warning_missing', 'transfer_push_not_authorized', 'unexpected_private_credential', 'unknown_result_changed_material', 'unknown_result_released_maintenance', 'unknown_result_replayed_effect', 'unknown_rollback_changed_material', 'unknown_rollback_deleted_credentials', 'unowned_fixture_alias', 'unowned_fixture_operation_alias', 'wrong_recovery_modified_state'])
+FAILURE_CODES = frozenset(['cli_expectation_failed', 'API_config_changed', 'DEV4_recovery_failed', 'SIGINT_fixture_requires_linux_pidfd', 'binary_hash_mismatch', 'binary_version_mismatch', 'ciphertext_fixture_missing', 'cleanup_control_helper_still_running', 'cleanup_process_identity_changed', 'cleanup_process_lifetime_unproven', 'cleanup_untracked_group_member', 'commit_barrier_not_reached', 'credential_journal_outside_fixture', 'credential_not_bound_to_fixture_transaction', 'data_key_changed', 'durable_recovery_missing', 'explicit_retry_login_count_changed', 'fresh_fixture_required', 'fresh_login_replaced_maintenance_owner', 'fresh_login_replaced_original_operation', 'fresh_login_replayed_authentication', 'full_library_namespace_not_migrated', 'inconsistent_factors_modified_state', 'inconsistent_profile_overwritten', 'interrupted_control_helper_still_running', 'interrupted_group_still_running', 'interrupted_native_credential_not_deleted', 'interrupted_native_password_not_deleted', 'interrupted_operation_advanced', 'interrupted_phase_not_proven', 'interruption_already_completed', 'interruption_child_not_owned', 'interruption_control_helper_not_bound', 'interruption_group_changed', 'interruption_group_has_unbound_member', 'interruption_session_not_owned', 'invalid_publication_barrier', 'invalid_recovery_action', 'failed_login_requires_clean_journal', 'failed_login_interrupted_credential_not_deleted', 'failed_login_original_ciphertexts_changed', 'failed_login_original_profile_not_restored', 'failed_login_recovery_binding_invalid', 'migrated_fixture_witness_invalid', 'migration_effects_not_exactly_once', 'native_alias_missing', 'native_backend_not_used', 'native_credential_not_written', 'native_fixture_cleanup_failed', 'operation_journal_schema_missing', 'operation_recovery_not_retired', 'original_account_identity_changed', 'original_candidate_changed_during_completion', 'original_ciphertexts_changed', 'original_factors_not_recovered', 'original_login_password_changed', 'original_operation_binding_changed', 'original_operation_invalid', 'original_operation_missing', 'original_operation_not_committed', 'original_operation_not_unique', 'original_password_not_written', 'original_plaintext_not_recovered', 'original_profile_not_discovered', 'original_profile_not_migrated', 'original_profile_not_restored', 'original_profile_selection_failed', 'original_recovery_image_changed', 'original_result_not_repeatable', 'original_rollback_not_confirmed', 'original_source_changed', 'original_terminal_receipt_missing', 'original_vault_factors_changed', 'owned_child_not_interrupted', 'owned_runtime_cleanup_failed', 'password_update_not_authorized', 'publication_checkpoint_not_proven', 'publication_window_not_proven', 'repeated_result_changed_material', 'result_replayed_authentication', 'rollback_receipt_not_retained', 'rollback_replayed_authentication', 'server_transfer_changed_source', 'server_transfer_copy_missing', 'server_transfer_count_failed', 'server_transfer_not_reencrypted', 'server_transfer_remote_duplicated', 'server_transfer_retry_duplicated', 'server_transfer_reused_source', 'server_transfer_sync_warning_missing', 'transfer_push_not_authorized', 'unexpected_private_credential', 'unknown_result_changed_material', 'unknown_result_released_maintenance', 'unknown_result_replayed_effect', 'unknown_rollback_changed_material', 'unknown_rollback_deleted_credentials', 'unowned_fixture_alias', 'unowned_fixture_operation_alias', 'wrong_recovery_modified_state'])
 
 
 FAILURE_CODES = FAILURE_CODES | frozenset({
@@ -43,6 +43,8 @@ FAILURE_CODES = FAILURE_CODES | frozenset({
     "login_continuation_transport_mismatch", "login_continuation_envelope_mismatch",
     "login_continuation_query_failed", "login_continuation_admission_effects_mismatch",
     "login_continuation_maintenance_not_finished",
+    "original_operation_binding_changed_idempotency_key", "original_operation_binding_changed_profile",
+    "original_operation_binding_changed_root", "original_operation_binding_changed_alias",
     "login_continuation_target_escaped", "unowned_fixture_login_custody",
     "key_continuation_identity_mismatch", "key_continuation_inputs_mismatch",
     "key_continuation_effects_mismatch", "key_continuation_material_changed",
@@ -297,9 +299,10 @@ def original_operation(journal, root, barrier, addr):
     records = [row for row in journal["operations"] if row["operation_id"] == operation_id]
     require(len(records) == 1, "original_operation_not_unique")
     record = records[0]
-    require(record["idempotency_key"] == operation_id and record["profile"] == str(root.resolve())
-            and record["root"] == str(root.resolve()) and active["alias"] == record["alias"],
-            "original_operation_binding_changed")
+    require(record["idempotency_key"] == operation_id, "original_operation_binding_changed_idempotency_key")
+    require(record["profile"] == str(root.resolve()), "original_operation_binding_changed_profile")
+    require(record["root"] == str(root.resolve()), "original_operation_binding_changed_root")
+    require(active["alias"] == record["alias"], "original_operation_binding_changed_alias")
     account = record["account"]
     login = account["login"]
     candidate = json.loads(bytes(record["candidate"]))
@@ -845,6 +848,12 @@ def main():
                      **{k: v for k, v in vault.items() if k != "version"}}
             if vault["wrapped_urk"].startswith(legacy.PREFIX):
                 value["crypto_namespace"] = legacy.PREFIX
+            if keys:
+                alias = "legacy-" + secrets.token_hex(8)
+                keys.put("rsrs", "super:" + alias, code if vault["version"] == 4 else old_super)
+                keys.put("rsrs", "pass:" + alias, "synthetic-password")
+                value.update(keyring_account=alias, keyring_backend=keys.credential_backend)
+                native_aliases.add(alias)
             session.write_text(json.dumps(value))
             session.chmod(0o600)
             return session.read_bytes()
@@ -895,42 +904,27 @@ def main():
             original_rows = ciphertexts()
             require(len(original_rows) == 1, "ciphertext_fixture_missing")
             cli("--runtime-internal", "--stop")
-            # A separate, authentic pre-operation Recovery schema exercises legacy
-            # automatic recovery. Never strip operation_id from a live v2 journal.
+            # Check rollback from the current host state; historical compatibility is database-only.
+            initial_session, config_bytes = session.read_bytes(), config.read_bytes()
             recovery_path = root / ".login-recovery.json"
-            require(not recovery_path.exists(), "legacy_fixture_requires_clean_journal")
-            legacy_alias = "login-" + secrets.token_hex(16)
-            native_aliases.add(legacy_alias)
-            candidate = dict(json.loads(initial_session), token="synthetic-interrupted-token",
-                             keyring_account=legacy_alias)
-            legacy_record = {"directory": str(root.resolve()), "original": list(initial_session),
-                             "config": list(config_bytes), "alias": legacy_alias,
-                             "backends": [], "pass_backends": [], "directory_existed": True}
-            if keys:
-                for slot, secret in (("super", code), ("pass", "synthetic-password")):
-                    attributes = keys.attributes("rsrs", slot + ":" + legacy_alias)
-                    require(not list(keys.collection.search_items(attributes)), "legacy_credential_collision")
-                    keys.collection.create_item("Synthetic legacy interruption", attributes,
-                                                secret.encode(), replace=False)
-                    legacy_record["backends" if slot == "super" else "pass_backends"] = ["secret_service"]
-                candidate["keyring_backend"] = "secret_service"
-            session.write_text(json.dumps(candidate))
-            config.write_text(json.dumps(dict(json.loads(config_bytes), custom="interrupted")))
-            recovery_path.write_text(json.dumps(legacy_record))
-            recovery_path.chmod(0o600)
+            require(not recovery_path.exists(), "failed_login_requires_clean_journal")
             rejected = json.loads(cli("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
                 "--pass=synthetic-password", "--super=wrong", success=False).stdout)
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
-                    "legacy_original_profile_not_restored")
-            # The new failed login retains its own operation; resolve that operation
-            # explicitly after proving the original legacy recovery has retired.
+                    "failed_login_original_profile_not_restored")
+            # Resolve only this failed login's original operation; do not replay authentication.
+            report["failed_login_diagnostic"] = safe_cli_diagnostic(json.dumps(rejected).encode(), b"")
+            require(recovery_path.is_file(), "failed_login_recovery_binding_invalid")
             journal = json.loads(recovery_path.read_bytes())
             active = journal.get("active") or {}
             operation_id = rejected.get("details", {}).get("operation_id")
             require(rejected.get("summary", {}).get("reason") == "account_outcome_unknown"
                     and any(error.endswith("; login_kind=vault_unlock_rejected") for error in rejected.get("errors", []))
-                    and active.get("operation_id") == operation_id and active.get("alias") != legacy_alias,
-                    "legacy_recovery_not_retired")
+                    and active.get("operation_id") == operation_id
+                    and re.fullmatch(r"login-[a-f0-9]{32}", active.get("alias") or ""),
+                    "failed_login_recovery_binding_invalid")
+            rejected_alias = active["alias"]
+            native_aliases.add(rejected_alias)
             records = [row for row in journal["operations"] if row["operation_id"] == operation_id]
             require(len(records) == 1 and records[0]["profile"] == str(root.resolve())
                     and records[0]["account"]["user"] == "synthetic" and records[0]["account"]["addr"] == addr,
@@ -948,15 +942,15 @@ def main():
             require(len(journal["operations"]) == 1, "original_operation_not_unique")
             terminal_operation(journal, rejected_record, "rolled_back")
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
-                    "legacy_original_profile_not_restored")
+                    "failed_login_original_profile_not_restored")
             if keys:
                 for slot in ("super", "pass"):
-                    require(not list(keys.collection.search_items(keys.attributes("rsrs", slot + ":" + legacy_alias))),
-                            "legacy_interrupted_credential_not_deleted")
-            require(ciphertexts() == original_rows, "legacy_original_ciphertexts_changed")
+                    require(not list(keys.collection.search_items(keys.attributes("rsrs", slot + ":" + rejected_alias))),
+                            "failed_login_interrupted_credential_not_deleted")
+            require(ciphertexts() == original_rows, "failed_login_original_ciphertexts_changed")
             cli("--runtime-internal", "--stop")
-            report["cases"]["legacy_pending_automatic_recovery"] = {
-                "passed": True, "synthetic_legacy_schema": True, "original_profile_restored": True,
+            report["cases"]["failed_login_explicit_rollback"] = {
+                "passed": True, "current_journal_schema": True, "original_profile_restored": True,
                 "ciphertext_preserved": True, "credential_mode": "secret_service" if keys else "headless"}
             # Recovery must unlock the legacy candidate, not the initial v4 fixture.
             env["RSRS_SUPER"] = old_super
@@ -977,8 +971,17 @@ def main():
                     command_env["RSRS_SUPER"] = old_super
                 child = subprocess.Popen([str(args.binary), *migration], env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 require(reached.wait(120), "commit_barrier_not_reached")
-                alias = json.loads(session.read_bytes()).get("keyring_account")
+                # Native credential names belong to the host custody record, not Runtime's recovery alias.
+                active = json.loads(recovery_path.read_bytes())["active"]
+                custody = json.loads((root / "runtime/autostart" / ("account-login-" + active["operation_id"] + ".json")).read_bytes())
+                alias = custody["account"]
+                require(custody["operation_id"] == active["operation_id"]
+                        and alias == "login-" + uuid.UUID(active["operation_id"]).hex
+                        and Path(custody["root"]).resolve() == root.resolve()
+                        and Path(custody["source"]).resolve() == root.resolve(),
+                        "unowned_fixture_login_custody")
                 if keys:
+                    require(custody["backend"] == "secret_service", "native_backend_not_used")
                     require(re.fullmatch(r"login-[a-f0-9]{32}", alias or "") is not None, "native_alias_missing")
                     native_aliases.add(alias)
                 require(json.loads(session.read_bytes())["wrapped_urk"].startswith(legacy.PREFIX)
