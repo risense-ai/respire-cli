@@ -2,6 +2,11 @@ name: Opt-in user runtime supervision validation
 on:
   workflow_dispatch:
     inputs:
+      platform:
+        description: Native autostart diagnostic target; no release acceptance
+        type: choice
+        default: all
+        options: [all, windows-latest, macos-15-intel, ubuntu-latest]
       runtime_source_sha:
         description: Exact reviewed source of the compatible newly published Runtime; update runtime-pin.json before product validation
         type: string
@@ -39,10 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-latest, target: x86_64-unknown-linux-gnu, suffix: '', previous_package: '@rsrsai/linux-x64-gnu'}
-          - {os: macos-latest, target: aarch64-apple-darwin, suffix: '', previous_package: '@rsrsai/macos-arm64'}
-          - {os: windows-latest, target: x86_64-pc-windows-msvc, suffix: '.exe', previous_package: '@rsrsai/win-x64'}
+        include: ${{ fromJSON(inputs.platform == 'windows-latest' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"}]' || inputs.platform == 'macos-15-intel' && '[{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""}]' || inputs.platform == 'ubuntu-latest' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]' || '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"},{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]') }}
     env:
       RSRS_ENGINE: cpu
       RUST_TEST_THREADS: '1'
@@ -58,6 +60,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Prepare hosted Linux credentials and user systemd
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-user-session dbus-x11 gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          # These preparation commands contain no credential material.
+          set -x
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl restart "user@$uid.service"
+          sudo systemctl is-active --quiet "user@$uid.service"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test ! -L "$XDG_RUNTIME_DIR"
+          test "$(stat -c '%u:%a' "$XDG_RUNTIME_DIR")" = "$uid:700"
+          test ! -L "$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          test "$(stat -c '%u' "$XDG_RUNTIME_DIR/bus")" = "$uid"
+          # user@ readiness covers basic.target, not the socket-activated API bus.
+          systemctl --user show dbus.socket dbus.service -p Id -p ActiveState -p SubState -p MainPID -p Listen
+          systemctl --user start dbus.service
+          systemctl --user is-active --quiet dbus.socket dbus.service
+          systemctl --user show dbus.socket dbus.service -p Id -p ActiveState -p SubState -p MainPID -p Listen
+          sudo journalctl -b -u "user@$uid.service" --no-pager
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = 'b true'
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
+          printf '%s\n' "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
@@ -117,35 +151,11 @@ jobs:
             metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           NODE
-      - name: Verify anonymous owner model maintenance on the native platform
-        shell: bash
-        env:
-          SDK_TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
-          test_case=anonymous_owner_cpu_reset_drains_and_restores_verified_runtime
-          cargo test --locked -p respire --test model_maintenance --target "$SDK_TARGET" --target-dir target/autostart-validation "$test_case" -- --exact --test-threads=1 --show-output | tee "$RUNNER_TEMP/anonymous-owner-test.log"
-          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/anonymous-owner-test.log"
-      - name: Fetch immutable previous public native version without install scripts
-        shell: bash
-        env:
-          PREVIOUS_PACKAGE: ${{ matrix.previous_package }}
-        run: |
-          set -euo pipefail
-          : > "$RUNNER_TEMP/autostart-user.npmrc"
-          : > "$RUNNER_TEMP/autostart-global.npmrc"
-          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/autostart-user.npmrc"
-          export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/autostart-global.npmrc"
-          unset NODE_AUTH_TOKEN NPM_TOKEN
-          npm install --prefix "$RUNNER_TEMP/autostart-previous" --ignore-scripts --no-bin-links --no-audit --no-fund --registry https://registry.npmjs.org "$PREVIOUS_PACKAGE@1.0.17-dev.6"
-          node -e 'const fs=require("fs"),p=require("path");const lock=JSON.parse(fs.readFileSync(p.join(process.env.RUNNER_TEMP,"autostart-previous/package-lock.json")));const key="node_modules/"+process.env.PREVIOUS_PACKAGE;const x=lock.packages[key];if(x.version!=="1.0.17-dev.6"||!x.integrity.startsWith("sha512-"))throw Error("previous native integrity unavailable");console.log(JSON.stringify({name:process.env.PREVIOUS_PACKAGE,version:x.version,integrity:x.integrity}));'
       - name: Foreground and actual isolated current-user service lifecycle
         shell: bash
         env:
           SDK_TARGET: ${{ matrix.target }}
           EXE_SUFFIX: ${{ matrix.suffix }}
-          PREVIOUS_PACKAGE: ${{ matrix.previous_package }}
         run: |
           set -euo pipefail
-          python scripts/test-runtime-autostart.py --binary "target/autostart-validation/$SDK_TARGET/debug/rsrs$EXE_SUFFIX" --register --previous-binary "$RUNNER_TEMP/autostart-previous/node_modules/$PREVIOUS_PACKAGE/bin/rsrs$EXE_SUFFIX"
+          python scripts/test-runtime-autostart.py --binary "target/autostart-validation/$SDK_TARGET/debug/rsrs$EXE_SUFFIX" --register

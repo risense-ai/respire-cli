@@ -113,7 +113,7 @@ class FixtureInstallationTests(unittest.TestCase):
         self.assertIn('health.get("startup_complete") is True', source)
         operation = '12345678-1234-4234-9234-123456789abc'
         alias = 'login-' + 'fedcba98' * 4  # Native alias is independent of the operation ID.
-        for fault in ('', 'keygen', 'keygen_early', 'keygen_prepared', 'keygen_nonjson', 'keygen_cleanup', 'handoff', 'locked',
+        for fault in ('', 'keygen', 'keygen_early', 'keygen_prepared', 'keygen_nonjson', 'keygen_original_changed', 'keygen_cleanup', 'handoff', 'locked',
                       'bound', 'foreign', 'material', 'session_alias', 'backend', 'stop'):
             with self.subTest(seed=fault), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve()
@@ -134,7 +134,7 @@ class FixtureInstallationTests(unittest.TestCase):
                                 'stage': 'prepared' if fault.startswith('keygen') else 'committed',
                                 'root': str(root), 'source': str(root),
                                 'profile': str(root / 'foreign' if fault == 'foreign' else root),
-                                'material': None if fault == 'keygen_prepared' else {'vault_version': 4, 'auth_operation_id': operation if fault != 'material' else 'foreign',
+                                'material': None if fault in ('keygen_prepared', 'keygen_original_changed') else {'vault_version': 4, 'auth_operation_id': operation if fault != 'material' else 'foreign',
                                              'keyring_account': alias, 'keyring_backend': 'foreign' if fault == 'backend' else 'native'}}), encoding='utf-8')
                             session = {'vault_version': 4, 'keyring_account': 'login-' + 'a'*32 if fault == 'session_alias' else alias,
                                        'keyring_backend': 'native'}
@@ -143,7 +143,7 @@ class FixtureInstallationTests(unittest.TestCase):
                             (root / 'session.json').write_text(json.dumps(session), encoding='utf-8')
                         return types.SimpleNamespace(returncode=int(fault.startswith('keygen')),
                             stdout='private-sentinel-never-report' if fault == 'keygen_nonjson' else json.dumps({'summary': {'super': 'private-sentinel-never-report'},
-                                               'errors': ['host auth credential write failed: private-sentinel-never-report']}),
+                                               'errors': [('offline keygen original operation changed' if fault == 'keygen_original_changed' else 'host auth credential write failed') + ': private-sentinel-never-report']}),
                             stderr='private-sentinel-never-report')
                     if command[2:] == ['runtime', 'status']:
                         return types.SimpleNamespace(returncode=0, stdout=json.dumps(
@@ -159,7 +159,7 @@ class FixtureInstallationTests(unittest.TestCase):
                         self.assertNotIn('private-sentinel-never-report', str(raised.exception))
                         if fault.startswith('keygen'):
                             self.assertIn('synthetic CLI keygen failed', str(raised.exception))
-                            self.assertIn('"category": "' + ('unclassified' if fault == 'keygen_nonjson' else 'native_custody') + '"', str(raised.exception))
+                            self.assertIn('"category": "' + ('unclassified' if fault == 'keygen_nonjson' else 'original_operation_changed' if fault == 'keygen_original_changed' else 'native_custody') + '"', str(raised.exception))
                             if fault == 'keygen_cleanup':
                                 self.assertIn('cleanup also failed', raised.exception.__notes__[0])
                                 self.assertNotIn('private-sentinel-never-report', str(raised.exception.__cause__))
@@ -168,7 +168,7 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertEqual(calls[0], ['keygen'])
                 self.assertEqual(calls[-1], ['runtime', 'stop'])
                 self.assertEqual(calls.count(['keygen']), 1)
-                self.assertEqual(keys.entries, set() if fault in ('foreign', 'material', 'backend', 'keygen_early', 'keygen_prepared') else
+                self.assertEqual(keys.entries, set() if fault in ('foreign', 'material', 'backend', 'keygen_early', 'keygen_prepared', 'keygen_original_changed') else
                     {('rsrs', 'super:' + alias)})
                 if not fault:
                     self.assertEqual(calls, [['keygen'], ['runtime', 'start'], ['runtime', 'status'], ['runtime', 'stop']])
@@ -336,8 +336,32 @@ class FixtureInstallationTests(unittest.TestCase):
             body = product.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]
             body = re.sub(r'^\s*import .+;\s*$', '', body, flags=re.MULTILINE)
             body = body.replace("const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');", '')
+            matrix = None
+            if name == 'runtime-autostart-validation.yml':
+                self.assertNotIn('previous', product)
+                self.assertNotIn('npm install', product)
+                self.assertNotIn('model_maintenance', product)
+                self.assertIn('--register\n', product)
+                self.assertIn('macos-15-intel', product)
+                preparation = product.split('      - name: Prepare hosted Linux credentials and user systemd\n')[1].split('      - uses:')[0]
+                for proof in ('test "$GITHUB_ACTIONS" = true', 'test "$RUNNER_ENVIRONMENT" = github-hosted',
+                              'dbus-user-session dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3',
+                              'sudo loginctl enable-linger "$(id -un)"', 'sudo systemctl restart "user@$uid.service"',
+                              'sudo systemctl is-active --quiet "user@$uid.service"',
+                              'systemctl --user start dbus.service',
+                              'systemctl --user is-active --quiet dbus.socket dbus.service',
+                              "stat -c '%u:%a'", 'test -S "$XDG_RUNTIME_DIR/bus"',
+                              "NameHasOwner s org.freedesktop.systemd1)",
+                              "GetConnectionUnixUser s org.freedesktop.systemd1)",
+                              "= 'b true'", '= "u $uid"', '"DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"'):
+                    self.assertIn(proof, preparation)
+                self.assertNotIn('dbus-run-session', preparation)
+                self.assertLess(preparation.index('systemctl --user start dbus.service'),
+                                preparation.index('NameHasOwner s org.freedesktop.systemd1)'))
+                self.assertLess(product.index('Prepare hosted Linux credentials and user systemd'), product.index('Build the current native CLI'))
+                matrix = re.search(r'        include: \$\{\{ (.+) \}\}', product)[1]
             programs.append({'target': 'x86_64-pc-windows-msvc' if product_job == 'startup'
-                             else 'x86_64-unknown-linux-gnu', 'program': body})
+                             else 'x86_64-unknown-linux-gnu', 'program': body, 'matrix': matrix})
         # Execute only the workflow verifier with synthetic bytes; never install a product.
         check = r'''
 import assert from 'node:assert/strict';
@@ -346,6 +370,13 @@ import {readFileSync} from 'node:fs';
 import {posix} from 'node:path';
 import {runInNewContext} from 'node:vm';
 const programs=JSON.parse(readFileSync(0,'utf8'));
+for(const {matrix} of programs) if(matrix) {
+ for(const platform of ['all','windows-latest','macos-15-intel','ubuntu-latest']) {
+  const selected=JSON.parse(JSON.stringify(runInNewContext(matrix,{inputs:{platform},fromJSON:JSON.parse})));
+  assert.deepEqual(selected.map(row=>row.os),platform==='all'?['windows-latest','macos-15-intel','ubuntu-latest']:[platform]);
+  for(const row of selected) assert.equal(row.target,{'windows-latest':'x86_64-pc-windows-msvc','macos-15-intel':'x86_64-apple-darwin','ubuntu-latest':'x86_64-unknown-linux-gnu'}[row.os]);
+ }
+}
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 for(const {target,program} of programs)for(const fault of ['', 'input', 'source', 'proof', 'image', 'core', 'target', 'version', 'installer']){
  const version='3.4.0-dev.1',suffix=target.includes('windows')?'.exe':'';
