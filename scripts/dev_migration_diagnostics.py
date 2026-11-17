@@ -54,7 +54,7 @@ def migration_execution_state(fixture_root, env, arguments, envelope):
             return resolved
 
         home = owned(env["HOME"])
-        root = owned(env["RSRS_DATA_DIR"])
+        root = owned(env.get("RSRS_DATA_DIR") or home / ".rsrs")
         source = arguments[arguments.index("--source") + 1]
         account = arguments[arguments.index("--account") + 1]
         if not re.fullmatch(r"[0-9a-f]{64}", source) or not re.fullmatch(r"[A-Za-z0-9_-]+", account):
