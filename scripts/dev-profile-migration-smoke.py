@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
-from native_fixture_process import scoped_rpc_request, verify_rpc_receipt
+from native_fixture_process import canonical_scope_path, scoped_rpc_request, verify_rpc_receipt
 
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
@@ -59,6 +59,17 @@ class Smoke(support.Smoke):
     def reserve_account(self, user):
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + user)
+
+    def profile(self, env):
+        # Compare both paths in Rust's canonical form, including Windows verbatim prefixes.
+        root = Path(canonical_scope_path(env["RSRS_DATA_DIR"]))
+        config_path = root / "client.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        selected = config.get("data_dir", str(root))
+        require(isinstance(selected, str) and bool(selected), "login_profile_selection_invalid")
+        profile = Path(canonical_scope_path(selected))
+        require(profile.is_relative_to(root), "login_profile_selection_outside_fixture")
+        return profile
 
     def registration_diagnostics(self, env, text):
         result = {"journal_status": "not_found"}
@@ -298,9 +309,18 @@ class Smoke(support.Smoke):
         profile = fixture["destination"]
         config_path = profile / "client.json"
         original = config_path.read_bytes() if config_path.exists() else None
-        # Consume the migration's actual configuration. Do not repair its path
-        # spelling here: runtime verification must exercise the published result.
+        # A migrated config can select a sibling account; explicitly select this
+        # profile for its isolated consumer check, then restore the original bytes.
+        config = json.loads(original) if original is not None else {}
+        root = Path(canonical_scope_path(Path(default["HOME"]) / ".rsrs"))
+        selected = config.get("data_dir", str(profile))
+        require(isinstance(selected, str) and bool(selected), "login_profile_selection_invalid")
+        require(Path(canonical_scope_path(profile)).is_relative_to(root)
+            and Path(canonical_scope_path(selected)).is_relative_to(root),
+            "login_profile_selection_outside_fixture")
+        config["data_dir"] = str(profile)
         try:
+            config_path.write_text(json.dumps(config), encoding="utf-8")
             env = dict(default, RSRS_DATA_DIR=str(profile))
             support.install_published_runtime(self.args.binary, env)
             yield env
