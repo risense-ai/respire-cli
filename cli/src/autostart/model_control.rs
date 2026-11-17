@@ -592,10 +592,19 @@ fn validate_plan_response(
             "model control response profile mismatch"
         );
     }
-    anyhow::ensure!(
-        response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none(),
-        "private Runtime model plan was rejected"
-    );
+    if !(response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none()) {
+        let stage = match response.code.as_deref() {
+            Some("invalid_request") => "invalid_request",
+            Some("protocol_version_mismatch") => "protocol_version_mismatch",
+            Some("unauthorized") => "launch_authorization",
+            Some("scope_mismatch") => "control_binding",
+            Some("model_plan_unavailable") => "model_requirements",
+            Some("control_unavailable") => "control_worker",
+            Some("control_outcome_unknown") => "control_parent_revoked",
+            _ => "unrecognized_rejection",
+        };
+        anyhow::bail!("private Runtime model plan was rejected: stage={stage}");
+    }
     let envelope = response
         .envelope
         .context("model control result is missing")?;

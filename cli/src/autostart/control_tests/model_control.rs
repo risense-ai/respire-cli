@@ -528,6 +528,29 @@ fn model_plan_responses_require_the_original_peer_and_private_readiness() -> Res
             .context("invalid response must be rejected")?;
             assert!(!error.to_string().contains("synthetic-peer-diagnostic"));
         }
+        for (code, stage) in [
+            ("invalid_request", "invalid_request"),
+            ("protocol_version_mismatch", "protocol_version_mismatch"),
+            ("unauthorized", "launch_authorization"),
+            ("scope_mismatch", "control_binding"),
+            ("model_plan_unavailable", "model_requirements"),
+            ("control_unavailable", "control_worker"),
+            ("control_outcome_unknown", "control_parent_revoked"),
+            ("synthetic-peer-diagnostic", "unrecognized_rejection"),
+        ] {
+            let mut rejected = baseline.clone();
+            rejected["ok"] = json!(false);
+            rejected["exit"] = json!(2);
+            rejected["code"] = json!(code);
+            rejected["error"] = json!("synthetic-peer-diagnostic");
+            let error = validate_plan_response(serde_json::from_value(rejected.clone())?,
+                &request, &profile, 42, command).err().context("rejection must fail")?;
+            assert_eq!(error.to_string(), format!("private Runtime model plan was rejected: stage={stage}"));
+            rejected["pid"] = json!(43);
+            let error = validate_plan_response(serde_json::from_value(rejected)?,
+                &request, &profile, 42, command).err().context("foreign peer must fail")?;
+            assert_eq!(error.to_string(), "model control response identity mismatch");
+        }
         let mut pending = baseline.clone();
         pending["code"] = json!("auth_recovery_pending");
         assert!(validate_plan_response(
