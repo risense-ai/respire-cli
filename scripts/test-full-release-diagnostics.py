@@ -20,6 +20,107 @@ SECRET = 'secret-token-password-user-server-/private/path-123'
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_legacy_failure_evidence_before_stop(self):
+        spec = importlib.util.spec_from_file_location('legacy_evidence',
+            Path(__file__).with_name('dev-legacy-vault-smoke.py'))
+        legacy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(legacy)
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = legacy.Smoke.__new__(legacy.Smoke)
+            smoke.root = Path(directory)
+            smoke.args = types.SimpleNamespace(binary='owned-cli')
+            report_path = smoke.root / 'legacy-vault-coverage.json'
+            for stage in ('historical_reverse_peer_push', 'historical_reverse_source_pull',
+                    'historical_reverse_source_read', SECRET):
+                for failure in ('exit', 'json', 'envelope', 'timeout'):
+                    for stop in (0, -6, 'timeout'):
+                        smoke.report = {'stage': stage}
+                        output = subprocess.CompletedProcess([], -6 if failure == 'exit' else 0,
+                            b'bad-json' if failure == 'json' else
+                            json.dumps({'status': 'error', 'errors': [SECRET]}).encode(), SECRET.encode())
+                        def run(command, **kwargs):
+                            if '--stop' not in command:
+                                if failure == 'timeout':
+                                    raise subprocess.TimeoutExpired(SECRET, 180, stderr=SECRET)
+                                return output
+                            # This must already be durable before cleanup starts.
+                            evidence = json.loads(report_path.read_text())['runtime_failure_evidence']
+                            self.assertEqual(evidence, dict(
+                                stage=stage if stage != SECRET else 'other',
+                                binding='unbound', reason='no_verified_original_owner',
+                                identity_verified=False, process_handle_available=False,
+                                liveness='unknown', exit_code_available=False, persistence='saved'))
+                            self.assertNotIn(SECRET, json.dumps(evidence))
+                            if stop == 'timeout':
+                                raise subprocess.TimeoutExpired(SECRET, 60, stderr=SECRET)
+                            return subprocess.CompletedProcess([], stop, b'', SECRET.encode())
+                        expected = {'exit': 'cli_failed_sync', 'json': 'invalid_cli_json_sync',
+                            'envelope': 'cli_error_sync'}
+                        with patch.object(legacy.subprocess, 'run', side_effect=run) as calls:
+                            if failure == 'timeout':
+                                with self.assertRaises(subprocess.TimeoutExpired):
+                                    smoke.cli({}, 'sync')
+                            else:
+                                with self.assertRaisesRegex(RuntimeError, expected[failure]):
+                                    smoke.cli({}, 'sync')
+                            self.assertEqual(calls.call_count, 2)
+                        self.assertNotIn('exit_code', smoke.report['runtime_failure_evidence'])
+                        if failure == 'exit':
+                            self.assertEqual(smoke.report['cli_failure'],
+                                {'exit_code': -6, 'reason': 'process_exit'})
+                        self.assertEqual(smoke.report['runtime_stop']['passed'], stop == 0)
+                        safe_report = {key: value for key, value in smoke.report.items() if key != 'stage'}
+                        self.assertNotIn(SECRET, json.dumps(safe_report))
+            smoke.report = {}
+            with patch.object(smoke, 'save', side_effect=OSError(SECRET)), \
+                    patch.object(legacy.sys, 'stderr') as stderr:
+                smoke.record_runtime_failure()
+            self.assertEqual(smoke.report['runtime_failure_evidence']['persistence'], 'unavailable')
+            self.assertNotIn(SECRET, str(stderr.write.call_args_list))
+            smoke.report = {}
+            with patch.object(smoke, 'save', side_effect=OSError(SECRET)), \
+                    patch.object(legacy.sys, 'stderr') as stderr, \
+                    patch.object(legacy.subprocess, 'run', side_effect=[
+                        subprocess.CompletedProcess([], -6, SECRET.encode(), SECRET.encode()),
+                        subprocess.TimeoutExpired(SECRET, 60)]):
+                with self.assertRaisesRegex(RuntimeError, '^cli_failed_sync$'):
+                    smoke.cli({}, 'sync')
+            self.assertEqual(smoke.report['runtime_failure_evidence']['persistence'], 'unavailable')
+            self.assertNotIn(SECRET, json.dumps(smoke.report))
+            self.assertNotIn(SECRET, str(stderr.write.call_args_list))
+            smoke.report = {}
+            with patch.object(legacy.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 0, b'{"status":"ok"}', b''),
+                    subprocess.CompletedProcess([], 0, b'', b'')]):
+                self.assertEqual(smoke.cli({}, 'sync'), {'status': 'ok'})
+            self.assertNotIn('runtime_failure_evidence', smoke.report)
+
+    def test_legacy_reverse_stage_order(self):
+        tree = ast.parse(Path(__file__).with_name('dev-legacy-vault-smoke.py').read_text(encoding='utf-8'))
+        smoke = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Smoke')
+        sync = next(node for node in smoke.body if isinstance(node, ast.FunctionDef)
+            and node.name == 'historical_database_sync')
+        expected = iter((('historical_reverse_peer_push', 'peer', 'sync'),
+            ('historical_reverse_source_pull', 'env', 'sync'),
+            ('historical_reverse_source_read', 'env', None)))
+        observed = []
+        for index, node in enumerate(sync.body):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant) \
+                    or node.value.value not in ('historical_reverse_peer_push',
+                        'historical_reverse_source_pull', 'historical_reverse_source_read'):
+                continue
+            stage, environment, command = next(expected)
+            self.assertEqual(node.value.value, stage)
+            self.assertEqual(ast.unparse(sync.body[index + 1]), 'self.save()')
+            call = next(item for item in ast.walk(sync.body[index + 2])
+                if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+                and item.func.attr == ('cli' if command else 'read_entry'))
+            self.assertEqual(ast.unparse(call.args[0]), environment)
+            if command:
+                self.assertEqual(call.args[1].value, command)
+            observed.append(stage)
+        self.assertEqual(len(observed), 3)
+
     def test_exit_redaction(self):
         tree = ast.parse(Path(__file__).with_name('dev-ai-inject-smoke.py').read_text(encoding='utf-8'))
         smoke = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Smoke')

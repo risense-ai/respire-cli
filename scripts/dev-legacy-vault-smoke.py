@@ -164,6 +164,7 @@ class Smoke:
         return diagnostic[:1500] or "no structured error"
 
     def cli(self, env, *args, timeout=180, prompts=None, host_request=None):
+        business_failed = False
         try:
             if host_request is not None:
                 output = subprocess.run([str(self.args.binary), "--json", "--host-rpc-stdio"],
@@ -172,30 +173,61 @@ class Smoke:
                 argv = [str(self.args.binary), "--direct", "--json", *args]
                 output = run_hidden(argv, prompts=prompts, cwd=self.root, env=env, timeout=timeout) if prompts is not None else subprocess.run(
                     argv, cwd=self.root, env=env, capture_output=True, timeout=timeout)
+            if output.returncode != 0:
+                self.report["cli_failure"] = {"exit_code": output.returncode,
+                    "reason": "process_exit"}
+                raise RuntimeError("cli_failed_" + args[0])
+            try:
+                value = json.loads(output.stdout)
+            except (ValueError, UnicodeError):
+                raise RuntimeError("invalid_cli_json_" + args[0]) from None
+            if host_request is not None:
+                require(isinstance(value, dict) and value.get("v") == 1 and value.get("id") == host_request["id"]
+                    and value.get("exit") == 0 and value.get("ok") is True
+                    and isinstance(value.get("envelope"), dict), "legacy_login_rpc_transport_mismatch")
+                value = value["envelope"]
+                require(value.get("status") == "ok", "legacy_login_rpc_not_committed")
+            require(not value.get("errors") and value.get("status") not in ("error", "failed"), "cli_error_" + args[0])
+            return value
+        except Exception:
+            business_failed = True
+            self.record_runtime_failure()
+            raise
         finally:
             # Login and automatic indexing can start this fixture's runtime.
             # Release it before subsequent direct database consumers.
-            stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
-                cwd=self.root, env=env, capture_output=True, timeout=60)
-            require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
-            self.last_runtime_stop = stopped.returncode
-        if output.returncode != 0:
-            self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
-                "stage": self.report.get("stage"), "error": self.redacted_cli_error(env, output)}
-            self.save()
-            raise RuntimeError("cli_failed_" + args[0])
+            try:
+                self.report["runtime_stop"] = {"passed": False}
+                stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                    cwd=self.root, env=env, capture_output=True, timeout=60)
+                self.report["runtime_stop"] = {"exit_code": stopped.returncode,
+                    "passed": stopped.returncode in (0, 2)}
+                require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
+                self.last_runtime_stop = stopped.returncode
+            except Exception:
+                if not business_failed:
+                    raise
+                # Keep the first business exception; expose cleanup failure separately.
+                self.report.setdefault("runtime_stop", {"passed": False})["passed"] = False
+
+    def record_runtime_failure(self):
+        if "runtime_failure_evidence" in self.report:
+            return
+        stage = self.report.get("stage")
+        # This fixture holds no verified Runtime owner or original process handle.
+        # An endpoint/PID lookup here cannot bind the owner of the failed request.
+        self.report["runtime_failure_evidence"] = {
+            "stage": stage if stage in ("historical_reverse_peer_push",
+                "historical_reverse_source_pull", "historical_reverse_source_read") else "other",
+            "binding": "unbound", "reason": "no_verified_original_owner",
+            "identity_verified": False, "process_handle_available": False,
+            "liveness": "unknown", "exit_code_available": False,
+            "persistence": "saved"}
         try:
-            value = json.loads(output.stdout)
-        except (ValueError, UnicodeError):
-            raise RuntimeError("invalid_cli_json_" + args[0]) from None
-        if host_request is not None:
-            require(isinstance(value, dict) and value.get("v") == 1 and value.get("id") == host_request["id"]
-                and value.get("exit") == 0 and value.get("ok") is True
-                and isinstance(value.get("envelope"), dict), "legacy_login_rpc_transport_mismatch")
-            value = value["envelope"]
-            require(value.get("status") == "ok", "legacy_login_rpc_not_committed")
-        require(not value.get("errors") and value.get("status") not in ("error", "failed"), "cli_error_" + args[0])
-        return value
+            self.save()
+        except Exception:
+            self.report["runtime_failure_evidence"]["persistence"] = "unavailable"
+            print('{"runtime_failure_evidence":"unavailable"}', file=sys.stderr)
 
     def password_login(self, env, user, password, version, original_super, account_secret=None, secret_key=None):
         """Authorize through hidden TTY prompts or the existing v3 stdin host RPC."""
@@ -646,8 +678,14 @@ class Smoke:
         marker_text = "Historical reverse synchronization " + secrets.token_hex(16)
         marker = self.cli(peer, "remember", marker_text, "--title", "historical-reverse-marker",
             "--importance", "important", "--force")["summary"]["id"]
+        self.report["stage"] = "historical_reverse_peer_push"
+        self.save()
         require(self.cli(peer, "sync").get("status") == "ok", "historical_reverse_push_not_completed")
+        self.report["stage"] = "historical_reverse_source_pull"
+        self.save()
         require(self.cli(env, "sync").get("status") == "ok", "historical_source_pull_not_completed")
+        self.report["stage"] = "historical_reverse_source_read"
+        self.save()
         self.read_entry(env, marker, marker_text)
         after, _ = rows()
         current = {row[0]: row for row in after}
@@ -993,6 +1031,7 @@ def main():
         smoke.run()
     except Exception as error:
         smoke.report.update(status="failed", failure=str(error) if isinstance(error, RuntimeError) else type(error).__name__)
+        smoke.record_runtime_failure()
     finally:
         smoke.cleanup()
         if smoke.keys is not None:
