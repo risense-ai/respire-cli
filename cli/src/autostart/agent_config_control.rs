@@ -171,6 +171,43 @@ struct StartupCoreConfig {
     control: CoreConfigTransaction,
 }
 
+/// A confirmed receipt permits warm RPCs without acquiring lifecycle ownership.
+pub(crate) fn startup_core_config_ready(owner: &crate::net_rpc::Health) -> Result<bool> {
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(std::path::Path::new(&owner.data_dir).canonicalize()? == profile
+        && std::path::Path::new(&owner.installation_root).canonicalize()? == root,
+        "startup core configuration owner changed");
+    let scope = crate::net_rpc::request_scope(owner)?;
+    let scope_digest = crate::autostart::hash(&serde_json::to_vec(&(&profile, &scope))?);
+    let path = root.join("runtime/autostart/core-config-applications")
+        .join(format!("{scope_digest}.json"));
+    respire_client_host::config::normalize_control_path(&path)?;
+    let saved: StartupCoreConfig = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(saved.profile == profile && saved.control.scope.as_ref() == Some(&scope),
+        "startup core journal differs from its owner scope");
+    let Some(response) = saved.control.response.as_ref().filter(|response| response.ok) else {
+        return Ok(false);
+    };
+    anyhow::ensure!(saved.control.apply_sent
+        && response.v == 1 && response.exit == 0
+        && response.id == saved.operation_id
+        && response.scope == saved.control.scope
+        && response.operation_id.as_deref() == Some(saved.operation_id.as_str())
+        && response.idempotency_key.as_deref() == Some(saved.operation_id.as_str()),
+        "startup core receipt operation mismatch");
+    core_state(response, "applied", Some(&saved.control.candidate), Some(1))?;
+    anyhow::ensure!(response.envelope.as_ref().context("startup core envelope missing")?.summary["effective"]
+        == saved.control.validated.as_ref().context("startup core validation missing")?["effective"],
+        "startup core application differs from validation");
+    Ok(true)
+}
+
 /// Caller holds installation takeover. Never replace an online setter's revision.
 pub(crate) fn apply_startup_core_config(owner: &crate::net_rpc::Health,
     mut maintenance: Option<&mut super::lifecycle::Maintenance>) -> Result<()> {

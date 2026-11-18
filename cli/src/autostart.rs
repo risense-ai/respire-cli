@@ -33,7 +33,7 @@ pub(crate) use supervise::{control_logout, control_session_revoke, IdentityWrite
 pub(crate) use supervise::{control_space_invite, control_space_join, control_space_kick};
 pub(crate) use supervise::{control_account_remove, control_space_remove, run_space_config_control};
 pub(crate) use supervise::control_prepare_model;
-pub(crate) use supervise::apply_startup_core_config;
+pub(crate) use supervise::{apply_startup_core_config, startup_core_config_ready};
 pub(crate) use supervise::{
     control_install_engines, control_reset_cpu, control_uninstall_m3,
 };
