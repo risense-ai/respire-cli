@@ -838,6 +838,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
+          git archive "$GITHUB_SHA" npm/scripts/verify-packages.mjs | tar -x
           node npm/scripts/verify-packages.mjs release-assets --assets-only
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
           node npm/scripts/pack.mjs --root target/ci

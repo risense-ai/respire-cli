@@ -250,6 +250,7 @@ test('promotion reuses only exact imported scoped tarballs and never repacks pub
   const publisher=workflow.split('\n  publish:')[1];
   assert.match(publisher,/needs.prepared-import.result == 'success'/);
   assert.match(publisher,/name: imported-npm-packages/);
+  assert.match(publisher,/git archive "\$GITHUB_SHA" npm\/scripts\/verify-packages\.mjs \| tar -x/);
   assert.match(publisher,/--reuse-packs npm\/release-packages --export-packs npm\/publication-packages/);
   assert.doesNotMatch(publisher,/--pack npm\/publication-packages|REUSE_VALIDATED_PACKS/);
   assert.match(publisher,/--publish --accepted-only --verified-packs npm\/publication-packages --tag/);
