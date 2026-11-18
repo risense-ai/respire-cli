@@ -550,14 +550,15 @@ print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps,
                  'selected': sorted(select_upgrade_sources(sources, target, report['profile']))}))
 `], {cwd:new URL('../../scripts/',import.meta.url), input:JSON.stringify(report), encoding:'utf8', windowsHide:true}));
 }
-export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2} = {}) {
+export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners} = {}) {
   requireValue(sourcePattern.test(context.sha || '') && positiveID(context.run_id) && positiveID(context.run_attempt), 'Invalid full run identity');
   const processes = [], reports = [], historicalUpgrades = [];
   function job(predicate, label) {
     const matches = jobs.filter(predicate);
     requireValue(matches.length === 1 && matches[0].status === 'completed' && matches[0].conclusion === 'success'
-      && matches[0].run_id === context.run_id && matches[0].run_attempt === context.run_attempt
-      && matches[0].head_sha === context.sha, 'Missing successful exact-attempt full job: ' + label);
+      && matches[0].run_id === (evidenceOwners?.[matches[0].name] || context).run_id
+      && matches[0].run_attempt === (evidenceOwners?.[matches[0].name] || context).run_attempt
+      && matches[0].head_sha === (evidenceOwners?.[matches[0].name] || context).sha, 'Missing successful exact-attempt full job: ' + label);
   }
   function read(artifact, name) {
     const folder = join(directory,artifact);
@@ -691,7 +692,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   const expectedPackages=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
   const packageNames=[...expectedPackages.targets.map(t=>t.pkg),expectedPackages.npmScope];
   requireValue(packageNames.length===targets.length+1 && packageNames.every(name=>packages.packages?.filter(p=>p.name===name).length===1) && (candidate ? packages.git_sha===spec.cli.source_sha && packages.version===spec.cli.version
-    && packages.producer?.repository===spec.cli.repository && Number(packages.producer.run_id)===context.run_id && Number(packages.producer.run_attempt)===context.run_attempt && packages.producer.sha===context.sha && packages.producer.job==='npm-dry-run' : packages.artifact_source==='published-assets' && packages.harness_sha===context.sha && packages.manifest_sha256===manifestHash
+    && packages.producer?.repository===spec.cli.repository && Number(packages.producer.run_id)===spec.cli.producer.run_id && Number(packages.producer.run_attempt)===spec.cli.producer.run_attempt && packages.producer.sha===spec.cli.source_sha && packages.producer.job==='npm-dry-run' : packages.artifact_source==='published-assets' && packages.harness_sha===context.sha && packages.manifest_sha256===manifestHash
     && packages.product_sources?.cli===spec.cli.source_sha && packages.product_sources?.runtime===spec.runtime.source_sha
     && packages.run_id===context.run_id && packages.run_attempt===context.run_attempt)
     && packages.packages?.length===targets.length+1 && new Set(packages.packages.map(p=>p.name)).size===targets.length+1
@@ -700,13 +701,14 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   const gui=read('client2-published-online-x86_64-pc-windows-msvc','report.json');
   validateFullGUI(gui,spec,manifestHash,{candidate:Boolean(candidate),client2});
   job(j => j.name === 'api-smoke','API');
+  const apiOwner=evidenceOwners?.['api-smoke'] || context;
   const apiIdentity=read('dev-api-coverage','published-api-identity.json');
-  requireValue(apiIdentity.harness_sha===context.sha && apiIdentity.manifest_sha256===manifestHash
-    && apiIdentity.run_id===context.run_id && apiIdentity.run_attempt===context.run_attempt, 'API report run binding differs');
+  requireValue(apiIdentity.harness_sha===apiOwner.sha && apiIdentity.manifest_sha256===manifestHash
+    && apiIdentity.run_id===apiOwner.run_id && apiIdentity.run_attempt===apiOwner.run_attempt, 'API report run binding differs');
   for (const name of ['dev-api-coverage.json','dev-github-api-coverage.json']) {
     const api = read('dev-api-coverage',name);
     requireValue(api.complete === true && !api.error
-      && (name!=='dev-api-coverage.json' || api.cli_workflow_sha===context.sha)
+      && (name!=='dev-api-coverage.json' || api.cli_workflow_sha===apiOwner.sha)
       && apiIdentity.reports?.[name]===reports.at(-1).sha256, 'API coverage incomplete or stale');
   }
   return {schema:2,scope:'database-in-place-upgrade',
@@ -773,7 +775,8 @@ function extractBuildArtifact() {
   const binary = `${manifest.binaryName}-${target}${extension}`, runtime = `${manifest.binaryName}-${target}-runtime.tar.gz`;
   const hash = file => createHash('sha256').update(readFileSync(join(source, file))).digest('hex');
   const frontend = frontendLayout(manifest);
-  validateBuildMetadata(metadata, manifest, target, {sha, version},
+  validateBuildMetadata(metadata, manifest, target, {sha, version,
+    ...(process.env.CLI_PRODUCER_RUN_ID ? {run_id:process.env.CLI_PRODUCER_RUN_ID,run_attempt:process.env.CLI_PRODUCER_ATTEMPT} : {})},
     {file:binary, size:statSync(join(source, binary)).size, sha256:hash(binary)},
     frontend ? undefined : {file:runtime, sha256:hash(runtime)});
   if (frontend && (existsSync(join(source, runtime)) || existsSync(join(destination, 'core-runtime.json'))

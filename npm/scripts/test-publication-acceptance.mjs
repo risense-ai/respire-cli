@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,cpSync,rmSync,existsSync} from 'node:fs';
-import {spawnSync} from 'node:child_process';
+import {spawnSync,execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -68,6 +68,43 @@ test('accepted receipts require all exact package ACKs and cannot masquerade as 
   for(const mutate of [r=>r.acceptances.pop(),r=>r.acceptances.push(r.acceptances[0]),r=>r.acceptances[0].version='0.0.0',r=>r.acceptances[0].signal='SIGTERM',r=>r.acceptances[0].exit_code=1,r=>r.acceptances[0].evidence='submitted',r=>r.install={},r=>r.assets.pop(),r=>r.binaries[0].sha256='f'.repeat(64)]){
     const r=copy(f.scoped);mutate(r);assert.throws(()=>validateAcceptedScoped(r,m));
   }
+  // Exercise the actual old alias caller with only the workflow's reader overlay.
+  const folder=mkdtempSync(path.join(tmpdir(),'alias-recovery-reader-'));
+  try{
+    const root=fileURLToPath(new URL('../../',import.meta.url));
+    const ci=readFileSync(path.join(root,'.github/workflows/ci.yml'),'utf8').split('\n  contract-checks:')[1].split('\n  native-fixture-contracts:')[0];
+    assert.match(ci,/uses: actions\/checkout@v4\s+with:\s+(?:#[^\n]*\n\s+)?fetch-depth: 0/);
+    const product='3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f';
+    const git=(...args)=>execFileSync('git',args,{cwd:root});
+    const archive=path.join(folder,'source.tar');
+    writeFileSync(archive,git('archive',product,'npm'));
+    execFileSync('tar',['-xf',archive,'-C',folder]);
+    const caller=path.join(folder,'npm/scripts/publication-acceptance.mjs');
+    const callerBytes=readFileSync(caller),packageBytes=readFileSync(path.join(folder,'npm/artifact-manifest.json'));
+    const receipt=copy(f.scoped),origin={...receipt.source,workflow:'.github/workflows/release-recovery3930.yml',run_id:'701',run_attempt:1,
+      sha:product,workflow_head_sha:'d'.repeat(40),producer:{...receipt.source,sha:product,run_id:'44276673815',run_attempt:1}};
+    receipt.source.sha=product;
+    receipt.validation_origin={kind:'prepared-import',artifact:{id:'1',name:'prepared-import-100-1',size:100,digest:'sha256:'+hash},receipt_sha256:hash,
+      origin:{source:origin,artifact:{id:'2',name:'release-prepared-701-1',size:100,digest:'sha256:'+hash},receipt_sha256:hash}};
+    const run=r=>spawnSync(process.execPath,['--input-type=module','-e',
+      'import {validateAcceptedScoped} from "./npm/scripts/publication-acceptance.mjs"; validateAcceptedScoped('+JSON.stringify(r)+','+JSON.stringify(m)+');'],{cwd:folder,encoding:'utf8'});
+    const old=run(receipt);assert.notEqual(old.status,0);assert.match(old.stderr,/Invalid exact-source DEV preparation/);
+    const workflow=readFileSync(new URL('../../.github/workflows/npm-alias.yml',import.meta.url),'utf8');
+    const integrated=workflow.split('\n  publish-integrated:')[1].split('\n  # Explicit recovery')[0];
+    assert.match(integrated,/ref: \$\{\{ needs.await-scoped.outputs.sha \}\}\s+fetch-depth: 0/);
+    const overlay=integrated.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{([^}]+)\}\.mjs \| tar -x/);
+    assert.ok(overlay,'Alias must load its exact workflow SHA reader before publication');
+    assert(integrated.indexOf(overlay[0])<integrated.indexOf('publish-alias-accepted'));
+    // Archive the working reader paths so this check also runs before committing.
+    const paths=overlay[1].split(',').map(name=>'npm/scripts/'+name+'.mjs');
+    for(const file of paths)writeFileSync(path.join(folder,file),readFileSync(path.join(root,file)));
+    const fixed=run(receipt);assert.equal(fixed.status,0,fixed.stderr);
+    for(const mutate of [r=>r.validation_origin.origin.source.producer.sha='f'.repeat(40),r=>r.validation_origin.origin.source.producer.run_attempt=0,
+      r=>r.validation_origin.origin.source.sha='f'.repeat(40),r=>r.validation_origin.origin.artifact.name='release-prepared-701-2']){
+      const wrong=copy(receipt);mutate(wrong);assert.notEqual(run(wrong).status,0);
+    }
+    assert.deepEqual(readFileSync(caller),callerBytes);assert.deepEqual(readFileSync(path.join(folder,'npm/artifact-manifest.json')),packageBytes);
+  }finally{rmSync(folder,{recursive:true,force:true});}
 });
 
 test('alias ACK binds local dependency, exact source attempt and completed publisher job, without waiting for whole child workflow',()=>{
