@@ -341,43 +341,48 @@ def main():
                             raise
                         print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
                     finally:
-                        if args.keyless_foreground_diagnostic or (not expected_ready and primary_error is not None):
-                            # Export only fixed markers and primitive state, never raw logs/journals.
-                            log.flush()
-                            log.seek(0)
-                            text = log.read()
-                            markers = (
-                                "background core owner exited", "background core owner changed",
-                                "core config owner exited", "core config owner is unavailable",
-                                "core config owner changed", "core config response missing envelope",
-                                "agent_config_outcome_unknown", "core_config_rejected",
-                                "core config response binding mismatch", "core config request rejected",
-                                "core config response missing", "core config response state mismatch",
-                                "runtime_draining", "runtime_stopping", "runtime_unavailable",
-                                "core config read failed", "core config validate failed", "core config apply failed",
-                                "Connection refused", "Connection reset", "connection closed",
-                                "Broken pipe", "timed out", "cannot reap foreground Runtime",
-                                "Runtime drain thread panicked", "No such file or directory",
-                                "Permission denied", "database is locked", "database is busy",
-                            )
-                            journals = []
-                            for path in sorted((root / "runtime/autostart/core-config-applications").glob("*.json")):
-                                assert path.is_file() and not path.is_symlink(), "invalid diagnostic journal"
-                                control = json.loads(path.read_text(encoding="utf-8"))["control"]
-                                response = control.get("response")
-                                journals.append({"apply_sent": control.get("apply_sent") is True,
-                                                 "response_present": response is not None,
-                                                 "response_ok": isinstance(response, dict) and response.get("ok") is True})
-                            report = {"schema": 1, "diagnostic_only": True, "full_passed": False,
-                                      "keyless": expected_ready is False,
-                                      "stop_returncode": stop_returncode,
-                                      "foreground_returncode": child.poll(),
-                                      "log_characters": len(text),
-                                      "error_markers": [marker for marker in markers if marker in text],
-                                      "startup_journals": journals}
-                            print("isolated keyless foreground evidence", json.dumps(report), file=sys.stderr, flush=True)
-                            if args.keyless_foreground_diagnostic:
-                                args.keyless_foreground_diagnostic.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                        try:
+                            if args.keyless_foreground_diagnostic or (not expected_ready and primary_error is not None):
+                                # Export only fixed markers and primitive state, never raw logs/journals.
+                                log.flush()
+                                log.seek(0)
+                                text = log.read()
+                                markers = (
+                                    "background core owner exited", "background core owner changed",
+                                    "core config owner exited", "core config owner is unavailable",
+                                    "core config owner changed", "core config response missing envelope",
+                                    "agent_config_outcome_unknown", "core_config_rejected",
+                                    "core config response binding mismatch", "core config request rejected",
+                                    "core config response missing", "core config response state mismatch",
+                                    "runtime_draining", "runtime_stopping", "runtime_unavailable",
+                                    "core config read failed", "core config validate failed", "core config apply failed",
+                                    "Connection refused", "Connection reset", "connection closed",
+                                    "Broken pipe", "timed out", "cannot reap foreground Runtime",
+                                    "Runtime drain thread panicked", "No such file or directory",
+                                    "Permission denied", "database is locked", "database is busy",
+                                )
+                                journals = []
+                                for path in sorted((root / "runtime/autostart/core-config-applications").glob("*.json")):
+                                    assert path.is_file() and not path.is_symlink(), "invalid diagnostic journal"
+                                    control = json.loads(path.read_text(encoding="utf-8"))["control"]
+                                    response = control.get("response")
+                                    journals.append({"apply_sent": control.get("apply_sent") is True,
+                                                     "response_present": response is not None,
+                                                     "response_ok": isinstance(response, dict) and response.get("ok") is True})
+                                report = {"schema": 1, "diagnostic_only": True, "full_passed": False,
+                                          "keyless": expected_ready is False,
+                                          "stop_returncode": stop_returncode,
+                                          "foreground_returncode": child.poll(),
+                                          "log_characters": len(text),
+                                          "error_markers": [marker for marker in markers if marker in text],
+                                          "startup_journals": journals}
+                                if args.keyless_foreground_diagnostic:
+                                    args.keyless_foreground_diagnostic.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                                print("isolated keyless foreground evidence", json.dumps(report), file=sys.stderr, flush=True)
+                        except Exception:
+                            if primary_error is None:
+                                raise
+                            primary_error.add_note("keyless_foreground_evidence_failed")
             return health
 
         foreground(False)
