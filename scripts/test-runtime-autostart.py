@@ -341,7 +341,7 @@ def main():
                             raise
                         print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
                     finally:
-                        if args.keyless_foreground_diagnostic:
+                        if args.keyless_foreground_diagnostic or (not expected_ready and primary_error is not None):
                             # Export only fixed markers and primitive state, never raw logs/journals.
                             log.flush()
                             log.seek(0)
@@ -375,7 +375,9 @@ def main():
                                       "log_characters": len(text),
                                       "error_markers": [marker for marker in markers if marker in text],
                                       "startup_journals": journals}
-                            args.keyless_foreground_diagnostic.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                            print("isolated keyless foreground evidence", json.dumps(report), file=sys.stderr, flush=True)
+                            if args.keyless_foreground_diagnostic:
+                                args.keyless_foreground_diagnostic.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
             return health
 
         foreground(False)
@@ -1138,7 +1140,8 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
         if keys is not None:
             cleanup = keys.cleanup()
             assert cleanup.get("passed") is True and not cleanup.get("remaining_entries"), "synthetic native credential cleanup failed; fixture retained"
-    shutil.rmtree(temporary)
+        if sys.exc_info()[0] is None:
+            shutil.rmtree(temporary)
 
 
 if __name__ == "__main__":

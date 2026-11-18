@@ -1,118 +1,161 @@
-name: Runtime autostart validation
+name: Opt-in user runtime supervision validation
 on:
   workflow_dispatch:
     inputs:
-      cli_candidate:
-        type: string
-        required: true
-      cli_candidate_sha256:
-        type: string
-        required: true
-      cli_artifact_id:
-        type: string
-        required: true
-      cli_artifact_digest:
+      platform:
+        description: Native autostart diagnostic target; no release acceptance
+        type: choice
+        default: all
+        options: [all, windows-latest, macos-15-intel, ubuntu-latest]
+      runtime_source_sha:
+        description: Exact reviewed source of the compatible newly published Runtime; update runtime-pin.json before product validation
         type: string
         required: true
 permissions:
   contents: read
   actions: read
-concurrency:
-  group: mac-foreground-exit-diagnostic-${{ github.ref }}
-  cancel-in-progress: false
 jobs:
-  keyless-foreground:
-    runs-on: macos-15-intel
-    timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
+  source-checks:
+    name: Offline fixture preflight
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - name: Verify fixture installation and explicit Runtime provenance contract
+        run: python scripts/test-native-runtime-install.py
+      - name: Record source-only validation scope
+        run: echo 'Source and fixture checks only. Native product validation follows on explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
+
+  user-runtime:
+    name: Published Runtime supervision (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: source-checks
+    cache-mode: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'windows-latest' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"}]' || inputs.platform == 'macos-15-intel' && '[{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""}]' || inputs.platform == 'ubuntu-latest' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]' || '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"},{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]') }}
+    env:
+      RSRS_ENGINE: cpu
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Verify original CLI19 bytes and official Runtime24 using existing consumers
-        shell: bash
-        env:
-          CLI_CANDIDATE: ${{ inputs.cli_candidate }}
-          CLI_CANDIDATE_HASH: ${{ inputs.cli_candidate_sha256 }}
-          CLI_ARTIFACT_ID: ${{ inputs.cli_artifact_id }}
-          CLI_ARTIFACT_DIGEST: ${{ inputs.cli_artifact_digest }}
-        run: |
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {createHash} from 'node:crypto';
-          import {readFileSync,writeFileSync,mkdirSync,openSync,closeSync} from 'node:fs';
-          import {join} from 'node:path';
-          import {execFileSync} from 'node:child_process';
-          import {validateCandidate,candidateHash} from './npm/scripts/candidate-artifact.mjs';
-          import {publishedAssetNames,inspectPublishedRelease,inspectRuntimeProducer,downloadPublishedAsset,consumePublishedTarget} from './npm/scripts/extract-artifact.mjs';
-          const e=process.env, sha=b=>createHash('sha256').update(b).digest('hex');
-          const api=p=>JSON.parse(execFileSync('gh',['api',p],{encoding:'utf8'}));
-          assert.equal(sha(e.CLI_CANDIDATE),e.CLI_CANDIDATE_HASH);
-          const raw=JSON.parse(e.CLI_CANDIDATE),source=raw.source;
-          const candidate=validateCandidate(raw,{CLI_SHA:source.sha,CLI_VERSION:'2.0.0-dev.19',GITHUB_SHA:source.sha,GITHUB_RUN_ID:String(source.run_id),GITHUB_RUN_ATTEMPT:String(source.run_attempt)});
-          assert.equal(candidate.runtime.version,'2.0.0-dev.24');
-          assert.equal(source.sha,'d48dfe86160f1351d901bc1b0125b20c99fc6b39');assert.equal(source.run_id,44215431976);assert.equal(source.run_attempt,1);
-          const run=api(`repos/risense-ai/respire-cli/actions/runs/${source.run_id}`);
-          const wf=api('repos/risense-ai/respire-cli/actions/workflows/release.yml');
-          assert.equal(run.repository.full_name,'risense-ai/respire-cli');assert.equal(run.head_repository.full_name,'risense-ai/respire-cli');
-          assert.equal(run.workflow_id,wf.id);assert.equal(run.path,'.github/workflows/release.yml');
-          assert.equal(run.event,'workflow_dispatch');assert.equal(run.head_branch,'main');assert.equal(run.head_sha,source.sha);
-          assert.equal(run.run_attempt,source.run_attempt);
-          // This diagnostic can run alongside full acceptance; publication still requires the full producer to pass.
-          const target='x86_64-apple-darwin';
-          const jobPages=JSON.parse(execFileSync('gh',['api','--paginate','--slurp',`repos/risense-ai/respire-cli/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=100`],{encoding:'utf8'}));
-          const jobs=jobPages.flatMap(page=>page.jobs).filter(job=>job.name===`validate / Release (${target})`);
-          assert.equal(jobs.length,1,'Require one exact Windows build job in the selected attempt');
-          const job=jobs[0];
-          assert.equal(job.run_id,source.run_id);assert.equal(job.run_attempt,source.run_attempt);assert.equal(job.head_sha,source.sha);
-          assert.equal(job.status,'completed');assert.equal(job.conclusion,'success');
-          for(const path of ['runtime-pin.json','npm/artifact-manifest.json']) {
-            const body=api(`repos/risense-ai/respire-cli/contents/${path}?ref=${source.sha}`);
-            assert.deepEqual(JSON.parse(Buffer.from(body.content,'base64')),JSON.parse(readFileSync(path)),'Harness consumer contract differs from selected CLI source');
-          }
-          assert.match(e.CLI_ARTIFACT_ID,/^[1-9][0-9]*$/);assert.match(e.CLI_ARTIFACT_DIGEST,/^sha256:[a-f0-9]{64}$/);
-          const artifact=api(`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}`);
-          assert.equal(artifact.name,`cli-release-${target}`);assert.equal(artifact.expired,false);
-          assert.equal(artifact.workflow_run.id,source.run_id);assert.equal(artifact.workflow_run.head_sha,source.sha);assert.equal(artifact.digest,e.CLI_ARTIFACT_DIGEST);
-          assert.ok(Date.parse(artifact.created_at)>=Date.parse(job.started_at)&&Date.parse(artifact.created_at)<=Date.parse(job.completed_at),'Artifact must be uploaded within the successful selected-attempt build job');
-          const root=join(e.RUNNER_TEMP,'core-query-assets');mkdirSync(root);mkdirSync(join(root,'cli'));mkdirSync(join(root,'runtime'));
-          const zip=join(root,'cli.zip'), fd=openSync(zip,'wx');
-          try{execFileSync('gh',['api',`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}/zip`],{stdio:['ignore',fd,'inherit']});}finally{closeSync(fd);}
-          assert.equal('sha256:'+sha(readFileSync(zip)),artifact.digest);assert.equal(readFileSync(zip).length,artifact.size_in_bytes);
-          const names=publishedAssetNames('cli',target);
-          execFileSync('python',['-c',"import json,sys,zipfile,stat; z=zipfile.ZipFile(sys.argv[1]); es=z.infolist(); names=json.loads(sys.argv[3]); assert len(es)==len(names) and {e.filename for e in es}==set(names) and all(not stat.S_ISLNK(e.external_attr>>16) for e in es); z.extractall(sys.argv[2])",zip,join(root,'cli'),JSON.stringify(names)]);
-          const assets=names.map(name=>{const bytes=readFileSync(join(root,'cli',name));return {name,size:bytes.length,sha256:sha(bytes)};});
-          const spec={runtime:candidate.runtime,cli:{repository:source.repository,source_sha:source.sha,version:source.version,producer:{run_id:source.run_id,run_attempt:source.run_attempt},assets}};
-          const options={token:e.GH_TOKEN,candidate:true};
-          await inspectPublishedRelease(spec.runtime,options);await inspectRuntimeProducer(spec.runtime,target,options);
-          for(const name of publishedAssetNames('runtime',target))await downloadPublishedAsset(spec.runtime,spec.runtime.assets.find(a=>a.name===name),join(root,'runtime'),options);
-          const consumed=await consumePublishedTarget(spec,target,root,join(root,'consumed'),candidateHash(candidate),options);
-          const proof={schema:1,mode:'mac-foreground-exit-diagnostic-inputs',diagnostic_only:true,full_passed:false,harness_sha:e.GITHUB_SHA,
-            cli_candidate:candidate,
-            cli_artifact:{id:artifact.id,digest:artifact.digest},cli_build_job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,head_sha:job.head_sha,name:job.name,status:job.status,conclusion:job.conclusion,started_at:job.started_at,completed_at:job.completed_at},cli_sha256:consumed.identity.cli_binary_sha256,
-            runtime_archive_sha256:consumed.identity.runtime_bundle_sha256,runtime_binary_sha256:consumed.identity.runtime_binary_sha256};
-          writeFileSync(join(root,'input-proof.json'),JSON.stringify(proof,null,2));
-          NODE
-      - name: Run only isolated keyless foreground and owned stop
+          package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare hosted Linux credentials and user systemd
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
-          archive="$(python -c 'import json,os; from pathlib import Path; p=Path(os.environ["RUNNER_TEMP"])/"core-query-assets/runtime"; print(p/json.loads((p/"runtime-build-x86_64-apple-darwin.json").read_text())["archive_file"])')"
-          python scripts/test-runtime-autostart.py --binary "$RUNNER_TEMP/core-query-assets/consumed/rsrs" --runtime-archive "$archive" --runtime-version 2.0.0-dev.24 --keyless-foreground-diagnostic "$RUNNER_TEMP/keyless-foreground.json"
-      - uses: actions/upload-artifact@v4
-        if: always()
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-user-session dbus-x11 gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          # These preparation commands contain no credential material.
+          set -x
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl restart "user@$uid.service"
+          sudo systemctl is-active --quiet "user@$uid.service"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test ! -L "$XDG_RUNTIME_DIR"
+          test "$(stat -c '%u:%a' "$XDG_RUNTIME_DIR")" = "$uid:700"
+          test ! -L "$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          test "$(stat -c '%u' "$XDG_RUNTIME_DIR/bus")" = "$uid"
+          # user@ readiness covers basic.target, not the socket-activated API bus.
+          systemctl --user show dbus.socket dbus.service -p Id -p ActiveState -p SubState -p MainPID -p Listen
+          systemctl --user start dbus.service
+          systemctl --user is-active --quiet dbus.socket dbus.service
+          systemctl --user show dbus.socket dbus.service -p Id -p ActiveState -p SubState -p MainPID -p Listen
+          sudo journalctl -b -u "user@$uid.service" --no-pager
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = 'b true'
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
+          printf '%s\n' "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          name: mac-keyless-foreground-diagnostic-${{ github.run_attempt }}
-          retention-days: 1
-          path: |
-            ${{ runner.temp }}/core-query-assets/input-proof.json
-            ${{ runner.temp }}/keyless-foreground.json
-          if-no-files-found: error
+          targets: ${{ matrix.target }}
+      - name: Build the current native CLI for explicit product validation
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
+      - name: Prepare and authenticate the explicitly reviewed published Runtime
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+          EXE_SUFFIX: ${{ matrix.suffix }}
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+          EXPECTED_RUNTIME_SOURCE_SHA: ${{ inputs.runtime_source_sha }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          assert.match(process.env.EXPECTED_RUNTIME_SOURCE_SHA ?? '', /^[a-f0-9]{40}$/, 'Select the reviewed newly published Runtime source explicitly');
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
+          const cli = resolve('target/autostart-validation', process.env.SDK_TARGET, 'debug', `rsrs${process.env.EXE_SUFFIX}`);
+          const env = {...process.env, RSRS_DATA_DIR: root};
+          // Keep the test environment intact; only the official installer may download.
+          delete env.RSRS_CORE_TEST_MODE;
+          const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
+          const result = await installPinnedRuntime(cli, {env}, process.env.SDK_TARGET);
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
+          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+          assert.equal(selected.version, pin.required);
+          assert.ok(selected.release?.metadata_json, 'Official Runtime release proof is required');
+          assert.equal(hash(selected.release.metadata_json), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.schema_version, 2);
+          assert.equal(metadata.runtime_version, pin.required);
+          assert.equal(metadata.triple ?? metadata.target_triple, process.env.SDK_TARGET);
+          assert.equal(metadata.source_commit, process.env.EXPECTED_RUNTIME_SOURCE_SHA);
+          assert.equal(metadata.binary_sha256, selected.sha256);
+          const runtime = join(root, 'bin', 'runtime', pin.required, `rsrs-runtime${process.env.EXE_SUFFIX}`);
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          assert.equal(hash(readFileSync(runtime)), selected.sha256);
+          assert.equal(hash(readFileSync(join(root, 'bin', 'runtime', pin.required, 'core-runtime.json'))),
+            metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          NODE
+      - name: Foreground and actual isolated current-user service lifecycle
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+          EXE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          python scripts/test-runtime-autostart.py --binary "target/autostart-validation/$SDK_TARGET/debug/rsrs$EXE_SUFFIX" --register
