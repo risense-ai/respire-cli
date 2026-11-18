@@ -242,4 +242,40 @@ foreach ($image in @('workspace.png','core-selection.png')) {
 foreach ($private in @('native-binding.json','core-query-proxy-ready.json','core-query-gui/**','core-query-gui/*')) {
     if ($workflow.Contains($private)) { throw 'Diagnostic upload includes private fixture control files' }
 }
+@'
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const workflow=fs.readFileSync(process.argv[2],'utf8');
+const guard=workflow.slice(workflow.indexOf('const run=api('),workflow.indexOf("for(const path of ['runtime-pin.json'"))+
+  workflow.slice(workflow.indexOf('assert.match(e.CLI_ARTIFACT_ID'),workflow.indexOf("const root=join(e.RUNNER_TEMP,'core-query-assets')"));
+assert.ok(guard.includes('const job=jobs[0]')&&guard.includes('Date.parse(artifact.created_at)'));
+const source={run_id:1,run_attempt:2,sha:'a'.repeat(40)},repo={full_name:'risense-ai/respire-cli'};
+const e={CLI_ARTIFACT_ID:'3',CLI_ARTIFACT_DIGEST:'sha256:'+'b'.repeat(64)};
+const base={run:{repository:repo,head_repository:repo,workflow_id:4,path:'.github/workflows/release.yml',event:'workflow_dispatch',head_branch:'main',head_sha:source.sha,run_attempt:2,status:'in_progress',conclusion:null},
+  job:{id:5,name:'validate / Release (x86_64-pc-windows-msvc)',run_id:1,run_attempt:2,head_sha:source.sha,status:'completed',conclusion:'success',started_at:'2026-11-18T01:00:00Z',completed_at:'2026-11-18T01:10:00Z'},
+  artifact:{name:'cli-release-x86_64-pc-windows-msvc',expired:false,workflow_run:{id:1,head_sha:source.sha},digest:e.CLI_ARTIFACT_DIGEST,created_at:'2026-11-18T01:09:00Z'}};
+function check(change=()=>{},jobCount=1){
+  const state=structuredClone(base);change(state);
+  vm.runInNewContext(guard,{assert,source,e,api(path){
+    if(path==='repos/risense-ai/respire-cli/actions/runs/1')return state.run;
+    if(path==='repos/risense-ai/respire-cli/actions/workflows/release.yml')return {id:4};
+    assert.equal(path,'repos/risense-ai/respire-cli/actions/artifacts/3');return state.artifact;
+  },execFileSync(command,args){
+    assert.equal(command,'gh');assert.deepEqual(Array.from(args),['api','--paginate','--slurp','repos/risense-ai/respire-cli/actions/runs/1/attempts/2/jobs?per_page=100']);
+    return JSON.stringify([{jobs:[{name:'unrelated'}]},{jobs:Array(jobCount).fill(state.job)}]);
+  }});
+}
+check();check(s=>{s.run.status='completed';s.run.conclusion='success'});
+for(const change of [
+  s=>s.run.head_repository={full_name:'fork/repo'},s=>s.run.repository={full_name:'fork/repo'},
+  s=>s.run.workflow_id=9,s=>s.run.path='other.yml',s=>s.run.event='pull_request',s=>s.run.head_branch='feature',s=>s.run.head_sha='c'.repeat(40),s=>s.run.run_attempt=1,
+  s=>s.job.run_id=9,s=>s.job.run_attempt=1,s=>s.job.head_sha='c'.repeat(40),s=>s.job.name='other',
+  s=>s.job.status='in_progress',s=>s.job.conclusion='failure',s=>s.job.conclusion='skipped',
+  s=>s.artifact.name='other',s=>s.artifact.expired=true,s=>s.artifact.workflow_run.id=9,
+  s=>s.artifact.workflow_run.head_sha='c'.repeat(40),s=>s.artifact.digest='sha256:'+'c'.repeat(64),
+  s=>s.artifact.created_at='2026-11-18T00:59:59Z',s=>s.artifact.created_at='2026-11-18T01:10:01Z',s=>s.artifact.created_at='invalid'
+])assert.throws(()=>check(change));
+assert.throws(()=>check(()=>{},0));assert.throws(()=>check(()=>{},2));
+console.log('PASS: diagnostic accepts a successful exact-attempt Windows build while full runs; rejects untrusted producers, jobs and artifacts');
+'@ | node - (Join-Path $PSScriptRoot '../.github/workflows/client2-core-query-diagnostic.yml')
+if ($LASTEXITCODE -ne 0) { throw 'Diagnostic platform build producer checks failed' }
 Write-Host 'PASS: real result forward/read/loss ordering and private control/public proof separation (static fixture checks only)'
