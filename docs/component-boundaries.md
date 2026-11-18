@@ -1,11 +1,11 @@
 # 组件职责与发布验收边界
 
-本文件记录 Core、Runtime、CLI、Client2 的目标职责。修改日期：2026-11-17。
+本文件记录 Core、Runtime、CLI、Client2 的目标职责。修改日期：2026-11-18。
 它同时列出尚未完成的拆分，不能用目标约定证明当前实现已经完成。
 
 ## 当前基线
 
-- 当前已发布基线为 Runtime `v2.0.0-dev.24`，源提交 `7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b`。八个平台的发布构建和原生检查全部通过，CLI 与 Client2 的新 DEV 仍待完成。
+- 当前已发布基线为 [Runtime v2.0.0-dev.24](https://github.com/risense-ai/respire-runtime/releases/tag/v2.0.0-dev.24)，源提交 `7e8ae8dc55f832dd2e22d5e6031a37c4c7905d3b`。宿主已发布 [CLI v2.0.0-dev.19](https://github.com/risense-ai/respire-cli/releases/tag/v2.0.0-dev.19) 和 [Client2 v2.0.0-dev.17](https://github.com/risense-ai/respire-client2/releases/tag/v2.0.0-dev.17)。
 - CLI、Client2 独立发布，通过协议和所需能力配合，不要求版本号或提交号一致。
 - 此次 Runtime 修改仅限核心配置候选验证、运行态应用及真实状态回执；不修改 Core SDK 或数据库格式，不将宿主职责迁回 Runtime。
 - 超出上述授权范围的基线缺陷，仍先提供复现、最小修改方案和影响，由用户决定。
@@ -80,7 +80,13 @@ CLI 的配置读取。`--client-only` 限制副作用，不改变命令的归属
 数据库格式未变的 DEV 不增加 DEV→DEV 组合。不要求旧 CLI 调用新 Runtime，
 也不把旧会话、旧凭据位置或派生索引的保留作为历史兼容条件。
 
-## 当前实现与待完成项
+## 本次发布的验收证据
+
+- CLI 发布前验收覆盖八个平台、适用的旧正式版及数据库变更 DEV 检查点。通过报告记录原密钥、数据完整性、待同步数据、记忆读写和双向同步。发布任务复用这些报告绑定的原始产物。 [完整验收](https://github.com/risense-ai/respire-cli/actions/runs/44323060567) · [CLI 发布](https://github.com/risense-ai/respire-cli/actions/runs/44330428369)
+- Windows x64 的 Client2 dev.17 验证了首次启动、正常停止、重启后自动传钥和旧记录读回；真实 WebView 还验证了核心配置在回复中断后按原操作查询。 [传钥验收](https://github.com/risense-ai/respire-client2/actions/runs/44284528043) · [WebView 验收](https://github.com/risense-ai/respire-cli/actions/runs/44277731375/attempts/2)
+- Windows x64 的全新配置用公开 Client2 和默认在线渠道安装了 CLI dev.19 与 Runtime dev.24，并逐项核对安装文件。该用例只验安装，启动行为由上面的传钥用例验证。 [公开默认安装](https://github.com/risense-ai/respire-client2/actions/runs/44334942943)
+
+## 初次拆分记录
 
 以下为本文件建立时的状态，最终以对应源码、PR 和真实产物验收为准：
 
