@@ -158,7 +158,9 @@ test('default npm children overlap, retain tarballs until close, and drain failu
         assert.equal(args[0],'publish');const tarball=args[1],name=fs.readFileSync(tarball,'utf8'),key=id(name);
         assert(fs.existsSync(path.join(root,'intent-'+key)),'submission intent must precede child startup');
         if(name==='@rsrsai/cli')for(let i=0;i<7;i++)assert(fs.existsSync(path.join(root,'finished-'+id('@rsrsai/platform-'+i))),'umbrella started before platform completion');
-        fs.writeFileSync(path.join(root,'started-'+key),JSON.stringify({tarball,pid:process.pid}));
+        const started=path.join(root,'started-'+key),record=path.join(root,'record-'+key);
+        fs.writeFileSync(record,JSON.stringify({tarball,pid:process.pid}));
+        fs.renameSync(record,started);
         const timer=setInterval(()=>{
           if(!fs.existsSync(path.join(root,'release-all'))&&!fs.existsSync(path.join(root,'release-'+key)))return;
           clearInterval(timer);assert.equal(fs.readFileSync(tarball,'utf8'),name,'tarball removed while child was running');
