@@ -208,9 +208,11 @@ fn stage_file(
     dest: &Path,
     origins: &[String],
 ) -> Result<bool> {
-    std::fs::create_dir_all(dest)
-        .with_context(|| format!("failed to create {}", dest.display()))?;
-    if file_valid(&dest.join(file.relative), file.sha256, Some(file.size))? {
+    let target = dest.join(file.relative);
+    let parent = target.parent().context("Granite file has no destination directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    if file_valid(&target, file.sha256, Some(file.size))? {
         return Ok(true);
     }
     let tmp = dest.join(format!(".download-granite-{}", pin.revision));
@@ -237,7 +239,7 @@ fn stage_file(
         "granite staged file size or checksum mismatch: {}",
         file.relative
     );
-    replace_file(&staged, &dest.join(file.relative))?;
+    replace_file(&staged, &target)?;
     Ok(false)
 }
 
