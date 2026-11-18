@@ -95,22 +95,6 @@ class TrackedKeys:
         require(value is not None, "fixture_credential_missing")
         return value
 
-    def prepare_historical_v4_super(self, session, code):
-        # Fixture-only current identity, not evidence of a product recovery transaction.
-        alias = session.get("keyring_account")
-        require(session.get("vault_version") == 4 and session.get("user") == session.get("addr") == ""
-                and session.get("keyring_backend") == self.credential_backend
-                and self.credential_backend in ("native", "secret_service")
-                and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias)
-                and not {"auth_operation_id", "pass", "super", "secret", "secret_key", "token"}.intersection(session)
-                and isinstance(code, str) and bool(code), "historical_fixture_identity_invalid")
-        entry = ("rsrs", "super:" + alias)
-        require(entry not in self.entries and self._read(*entry) is None,
-                "historical_fixture_slot_not_fresh")
-        self.entries.add(entry)
-        self._put(*entry, code)
-        require(self.read(*entry) == code, "historical_fixture_slot_readback_mismatch")
-
     def track_created_login(self, session, user, super_password, login_password, *, recovery_operation=None,
                             recovery_verifier=None):
         # Claim only the exact alias returned by this owned fixture's successful

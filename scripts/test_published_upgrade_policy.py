@@ -211,10 +211,6 @@ class UpgradeProfileTest(unittest.TestCase):
                             runtime_installed_after_legacy_data=False,
                             runtime_binary_sha256=runtime_digest, runtime_version=runtime_version,
                             runtime_identity_receipts=[{"pid": 1234, "instance_id": "fake-child-only"}])
-                    if standalone:
-                        checks[0]['post_upgrade_sync']['identity_preparation'] = dict(actor='fixture',
-                            format='current-v4', original_urk_preserved=True, new_slot_verified=True,
-                            host_key_readback=True, recovery_transaction_required=False)
                     if checks_transform is not None:
                         checks = checks_transform(checks)
                     (result / "real-account-return-verification.json").write_text(
@@ -459,13 +455,6 @@ class UpgradeProfileTest(unittest.TestCase):
                     self.assert_rejected_checks(lambda checks: [{**checks[0], name: value}], True)
 
     def test_standalone_requires_database_scope_and_runtime_evidence(self):
-        for preparation in (None, {}, dict(actor='product', format='current-v4'),
-                dict(actor='fixture', format='current-v4', original_urk_preserved=True,
-                    new_slot_verified=True, host_key_readback=True, recovery_transaction_required=True)):
-            self.assert_rejected_checks(lambda checks: [{**checks[0], 'post_upgrade_sync': {
-                **checks[0]['post_upgrade_sync'], 'identity_preparation': preparation}}], True)
-        self.assert_rejected_checks(lambda checks: [{**checks[0], 'post_upgrade_sync': {
-            **checks[0]['post_upgrade_sync'], 'recovery_operation': 'invented'}}], True)
         for field in ('original_urk_preserved', 'existing_keys_registered', 'source_push', 'independent_pull_decrypted',
                       'reverse_marker_source_pull', 'original_active_preserved', 'tombstones_propagated', 'pending_work_acknowledged'):
             self.assert_rejected_checks(lambda checks: [{**checks[0], 'post_upgrade_sync': {

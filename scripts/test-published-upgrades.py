@@ -168,13 +168,6 @@ def verify_upgrade(source):
         assert isinstance(sync,dict) and all(sync.get(field) is True for field in ('original_urk_preserved',
             'existing_keys_registered','source_push','independent_pull_decrypted','reverse_marker_source_pull',
             'original_active_preserved','tombstones_propagated','pending_work_acknowledged')), 'historical bidirectional sync evidence incomplete'
-        preparation=sync.get('identity_preparation')
-        assert isinstance(preparation,dict) and preparation.get('actor')=='fixture' \
-            and preparation.get('format')=='current-v4' \
-            and all(preparation.get(field) is True for field in
-                ('original_urk_preserved','new_slot_verified','host_key_readback')) \
-            and preparation.get('recovery_transaction_required') is False \
-            and 'recovery_operation' not in sync, 'historical current identity fixture preparation missing'
         assert isinstance(check.get('cloud_cleanup'),dict) and check['cloud_cleanup'].get('passed') is True \
             and check['cloud_cleanup'].get('remaining_users')==[], 'historical sync cloud cleanup unconfirmed'
         assert check.get('runtime_mode')=='standalone_runtime','standalone Runtime mode missing'

@@ -16,6 +16,7 @@ import sqlite3
 from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -170,10 +171,21 @@ class Smoke:
         if keys is None or not hasattr(keys, "daemon"):
             return
         daemon = keys.daemon
+        started = time.monotonic_ns()
         code = daemon.poll() if daemon is not None else None
+        stderr_path = getattr(keys, "daemon_stderr", None)
+        try:
+            stderr_empty = stderr_path.stat().st_size == 0 if stderr_path is not None else None
+        except OSError:
+            stderr_empty = None
         self.report.setdefault("provider_observation", {})[when] = {
             "original_handle_available": daemon is not None,
-            "running": daemon is not None and code is None, "exit_code": code}
+            "running": daemon is not None and code is None, "exit_code": code,
+            "stderr_empty": stderr_empty, "stage": self.report["stage"] if self.report["stage"] in (
+                "historical_same_key_recovery", "historical_existing_keys_register", "historical_source_push",
+                "historical_reverse_peer_push", "historical_reverse_source_pull", "historical_reverse_source_read")
+                else "historical_other",
+            "sample_started_ns": started, "sample_completed_ns": time.monotonic_ns()}
 
     def cli(self, env, *args, timeout=180, prompts=None, host_request=None):
         business_failed = False
@@ -232,6 +244,7 @@ class Smoke:
             # Login and automatic indexing can start this fixture's runtime.
             # Release it before subsequent direct database consumers.
             try:
+                self.historical_provider_state("stop_before")
                 self.report["runtime_stop"] = {"passed": False}
                 stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
                     cwd=self.root, env=env, capture_output=True, timeout=60)
@@ -623,39 +636,37 @@ class Smoke:
             require((memory_id, decrypt_content(expected_urk, ciphertext, nonce), dirty, deleted) == expected[memory_id],
                     "historical_sync_original_key_mismatch")
         self.diagnostic_secrets.update((code, expected_urk.hex()))
-        self.report["stage"] = "historical_fixture_current_v4"
+        # Current public recovery establishes a valid unbound identity around the known original URK.
+        # It is preparation by the current host, not legacy authentication compatibility evidence.
+        self.report["identity_preparation"] = {"actor": "current-host", "method": "auth.recover",
+            "synthetic_current_v4_wrap": True, "legacy_authentication_compatibility": False}
+        self.report["stage"] = "historical_same_key_recovery"
         self.save()
-        # The original DB/key were verified above. Authentication history is outside this scope.
+        self.cli(env, "logout", "--full")
+        require(not (source / "session.json").exists() and rows() == before, "historical_logout_changed_database")
         salt, nonce = secrets.token_hex(16), secrets.token_bytes(12)
         wrapped = PREFIX + AESGCM(v4_kek(code, salt, PREFIX)).encrypt(nonce, expected_urk, None).hex()
         self.diagnostic_secrets.update((salt, nonce.hex(), wrapped))
-        candidate = {"user": "", "addr": "", "vault_version": 4, "kdf_salt": salt,
-            "wrapped_urk": wrapped, "urk_nonce": nonce.hex(),
-            "keyring_account": "login-" + secrets.token_hex(16),
-            "keyring_backend": self.keys.credential_backend}
-        require(not any(prefix + suffix in env for prefix in ("RSRS_", "ONEMEMORY_", "RESPIRE_")
-            for suffix in ("SUPER", "PASS", "SECRET", "KDF_SALT", "WRAPPED_URK", "URK_NONCE")),
-            "historical_fixture_factor_override_forbidden")
-        self.historical_provider_state("before")
+        request = {"v": 1, "id": "historical-recover-" + uuid.uuid4().hex, "method": "auth.recover",
+            "params": {"addr": "", "user": "", "super": code,
+                "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce.hex()}}
         try:
-            if sys.platform.startswith("linux"):
-                self.keys.verify_owner()
-            self.keys.prepare_historical_v4_super(candidate, code)
+            recovered = self.cli(env, "fivekeys", host_request=request)["summary"]
         finally:
-            self.historical_provider_state("after")
-        (source / "session.json").write_text(json.dumps(candidate), encoding="utf-8")
-        (source / "session.json").chmod(0o600)
-        require(rows() == before and AESGCM(v4_kek(code, salt, wrapped)).decrypt(
-            nonce, encrypted_bytes(wrapped), None) == expected_urk, "historical_fixture_changed_database_or_urk")
-        self.report["historical_identity_preparation"] = {"actor": "fixture", "format": "current-v4",
-            "original_urk_preserved": True, "new_slot_verified": True, "recovery_transaction_required": False}
-        self.report["stage"] = "historical_fixture_host_key_readback"
-        self.save()
-        # Use the real CLI and persistent provider, without factor environment overrides.
-        for memory_id, plaintext, _, deleted in expected.values():
-            if not deleted:
-                self.read_entry(env, memory_id, json.loads(plaintext)["content"])
-        require(self.session(env) == candidate and rows() == before, "historical_fixture_host_readback_changed_state")
+            # A public recovery may commit before its output/stop check fails.
+            candidate = self.session(env)
+            operation = candidate.get("auth_operation_id")
+            if all(candidate.get(field) == value for field, value in
+                    (("wrapped_urk", wrapped), ("kdf_salt", salt), ("urk_nonce", nonce.hex()))) \
+                    and isinstance(operation, str):
+                native_verifier = ({"recovery_verifier": lambda expected:
+                    self.verify_recovery_control(env, source, operation, expected)} if sys.platform == "darwin" else {})
+                self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation, **native_verifier)
+        require(recovered.get("outcome") == "committed" and same_scope_path(recovered.get("source_profile"), source)
+            and recovered.get("operation_id") == operation and candidate.get("user") == ""
+            and candidate.get("addr") == "" and rows() == before, "historical_recovery_not_committed_in_place")
+        require(AESGCM(v4_kek(code, salt, wrapped)).decrypt(nonce, encrypted_bytes(candidate["wrapped_urk"]), None)
+            == expected_urk, "historical_recovery_changed_urk")
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.diagnostic_secrets.add(password)
         account = {"user": user, "token": None, "confirmed": False}
@@ -674,9 +685,7 @@ class Smoke:
             if session.get("user") == user and session.get("addr") == UPSTREAM and session.get("token"):
                 account.update(token=session["token"], confirmed=True)
                 self.diagnostic_secrets.add(session["token"])
-                self.keys.track_created_login(session, user, None, password)
-                require(self.keys.read("rsrs", "super:" + candidate["keyring_account"]) == code,
-                        "historical_fixture_super_changed")
+                self.keys.track_created_login(session, user, code, password, recovery_operation=operation)
         require(registered.get("ok") is True and registered.get("user") == user
             and registered.get("addr") == UPSTREAM, "historical_registration_terminal_identity_mismatch")
         receipt = self.registration_receipt(env, source, user, previous_operations)
@@ -752,8 +761,7 @@ class Smoke:
         require(all(final_session.get(field) == session.get(field) for field in
             ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend")),
             "historical_sync_changed_source_wrap")
-        return {"profile": str(source), "original_urk_preserved": True,
-            "identity_preparation": dict(self.report["historical_identity_preparation"], host_key_readback=True),
+        return {"profile": str(source), "original_urk_preserved": True, "recovery_operation": operation,
             "existing_keys_registered": True, "source_push": True, "independent_pull_decrypted": True,
             "reverse_marker_source_pull": True, "original_active_preserved": True,
             "tombstones_propagated": True, "pending_work_acknowledged": True}
