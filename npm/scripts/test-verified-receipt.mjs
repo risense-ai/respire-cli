@@ -11,8 +11,9 @@ function archive(entries){
   const folder=mkdtempSync(join(tmpdir(),'receipt-zip-test-'));
   try{
     const path=join(folder,'sample.zip');
-    const result=spawnSync('python3',['-c','import json,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],"w",compression=zipfile.ZIP_DEFLATED) as z:\n for name,text in json.loads(sys.argv[2]): z.writestr(name,text)',path,JSON.stringify(entries)],
-      {env:{PATH:process.env.PATH,HOME:folder,TMPDIR:folder},encoding:'utf8',timeout:10000});
+    const python=process.platform==='win32'?'python':'python3';
+    const result=spawnSync(python,['-c','import json,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1],"w",compression=zipfile.ZIP_DEFLATED) as z:\n for name,text in json.load(sys.stdin): z.writestr(name,text)',path],
+      {input:JSON.stringify(entries),env:{PATH:process.env.PATH,HOME:folder,TMPDIR:folder},encoding:'utf8',timeout:10000});
     assert.equal(result.status,0,result.stderr);return readFileSync(path);
   }finally{rmSync(folder,{recursive:true,force:true});}
 }
@@ -29,6 +30,9 @@ test('receipt JSON is decoded only after independently matching the actual ZIP b
   assert.deepEqual(read(bytes),{kind:'synthetic',count:4});
   const changed=Buffer.from(bytes);changed[changed.length-1]^=1;
   assert.throws(()=>read(changed,metadata(bytes)),/ZIP differs/);
+  const large={evidence:'x'.repeat(1350000)};
+  assert.deepEqual(read(archive([['release-prepared.json',JSON.stringify(large)]])),large);
+  assert.throws(()=>read(archive([['prepared-import.json',JSON.stringify(large)]]),undefined,'prepared-import.json'),{code:'ENOBUFS'});
 });
 test('foreign run/SHA, expired, oversized, missing digest and unsafe IDs fail before any download',()=>{
   const bytes=archive([['release-prepared.json','{}']]);

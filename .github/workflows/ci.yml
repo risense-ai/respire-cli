@@ -250,7 +250,7 @@ jobs:
       - run: node --test scripts/test-cli-coverage-policy.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
       - name: Verify publication transactions and immutable artifact contracts offline
-        run: node --test npm/scripts/test-release-publication.mjs npm/scripts/test-publication-acceptance.mjs npm/scripts/test-release-regression-contract.mjs npm/scripts/test-parallel-publication.mjs npm/scripts/test-release-preparation.mjs npm/scripts/test-prepared-import.mjs npm/scripts/test-publication-fence.mjs npm/scripts/test-next-dev-version.mjs
+        run: node --test npm/scripts/test-release-publication.mjs npm/scripts/test-publication-acceptance.mjs npm/scripts/test-release-regression-contract.mjs npm/scripts/test-parallel-publication.mjs npm/scripts/test-release-preparation.mjs npm/scripts/test-prepared-import.mjs npm/scripts/test-verified-receipt.mjs npm/scripts/test-publication-fence.mjs npm/scripts/test-next-dev-version.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-api-contract.py
       - run: python3 scripts/test-dev-model-fixture.py

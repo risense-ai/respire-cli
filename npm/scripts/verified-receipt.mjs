@@ -5,7 +5,7 @@ import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
-const REPO='risense-ai/respire-cli',MAX_ZIP=128*1024,MAX_JSON=1024*1024;
+const REPO='risense-ai/respire-cli',MAX_ZIP=128*1024,MAX_JSON=1024*1024,MAX_PREPARATION_JSON=2*1024*1024;
 const positive=v=>/^[1-9]\d*$/.test(String(v))&&Number.isSafeInteger(Number(v));
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
 const files=['release-prepared.json','prepared-import.json','prepared-consumer.json'];
@@ -36,7 +36,8 @@ export function readVerifiedReceipt(metadata,file,{repository=REPO,runId,headSha
     const zip=join(folder,'receipt.zip');writeFileSync(zip,bytes);
     const names=execFileSync('unzip',['-Z1',zip],{encoding:'utf8',timeout:10000,maxBuffer:4096}).trim().split(/\r?\n/);
     requireValue(names.length===1&&names[0]===file,'Unexpected receipt ZIP inventory');
-    const json=execFileSync('unzip',['-p',zip,file],{encoding:'utf8',timeout:10000,maxBuffer:MAX_JSON});
+    const maxBuffer=file==='release-prepared.json'?MAX_PREPARATION_JSON:MAX_JSON;
+    const json=execFileSync('unzip',['-p',zip,file],{encoding:'utf8',timeout:10000,maxBuffer});
     return JSON.parse(json);
   }finally{rmSync(folder,{recursive:true,force:true});}
 }
