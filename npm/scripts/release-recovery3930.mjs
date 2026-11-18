@@ -7,7 +7,8 @@ import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {api,pages,output} from './release-publication.mjs';
 import {validateCandidate,completeCandidate} from './candidate-artifact.mjs';
-import {preparationInputs,preparedAssets,preparedPacks,createPreparation} from './release-preparation.mjs';
+import {preparationInputs,preparedAssets,preparedPacks,createPreparation,validatePreparationHistory} from './release-preparation.mjs';
+import {readFence} from './publication-fence.mjs';
 
 export const recoveryWorkflow='.github/workflows/release-recovery3930.yml';
 export const windowsTarget='x86_64-pc-windows-msvc';
@@ -55,7 +56,8 @@ export function recoveryScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
   const allowed=new Set([recoveryWorkflow,'.github/workflows/release-native-validation.yml','.github/workflows/release.yml','.github/workflows/npm-alias.yml','.github/workflows/ci.yml',
     'npm/scripts/release-recovery3930.mjs','npm/scripts/release-preparation.mjs','npm/scripts/candidate-artifact.mjs',
     'npm/scripts/extract-artifact.mjs','npm/scripts/test-release-preparation.mjs',
-    'npm/scripts/test-release-regression-contract.mjs','npm/scripts/test-publication-acceptance.mjs','scripts/test-native-runtime-install.py']);
+    'npm/scripts/test-release-regression-contract.mjs','npm/scripts/test-publication-acceptance.mjs',
+    'npm/scripts/publication-acceptance.mjs','scripts/test-native-runtime-install.py']);
   execFileSync('git',['merge-base','--is-ancestor',producerSHA,consumerSHA],{cwd});
   const changed=execFileSync('git',['diff','--name-only',producerSHA,consumerSHA],{cwd,encoding:'utf8'}).trim().split(/\r?\n/).filter(Boolean);
   assert.ok(changed.every(file=>allowed.has(file)),'Product, fixture or unrelated CI source changed since producer');
@@ -210,6 +212,80 @@ function readCandidate(context,root){
 }
 function requestedProducer(){
   return {repository:REPO,workflow:'.github/workflows/release.yml',run_id:BUILD_RUN,run_attempt:1,sha:PRODUCT,version:'2.0.0-dev.19'};
+}
+// Release notes preserve this attestation after temporary Actions artifacts expire.
+const publicPrefix='<!-- rsrs-cli3930-recovery:';
+export function recoveryPublicationBody(body,imported,publisher){
+  const receipt=imported.receipt.preparation;
+  assert.deepEqual(receipt.source.producer,requestedProducer());
+  validatePreparationHistory(receipt,imported.history);
+  assert.equal(receipt.validation_profile,'full');assert.equal(receipt.full_result.full_passed,true);
+  assert.equal(publisher.sha,PRODUCT);assert.equal(publisher.version,receipt.source.version);
+  const fence=readFence(body);
+  assert.equal(String(fence?.run_id),String(publisher.run_id));assert.equal(fence.source_sha,PRODUCT);assert.equal(fence.phase,'fenced');
+  assert.equal(fence.version,publisher.version);
+  const proof={schema:1,source:receipt.source,publisher,assets:receipt.assets,
+    manifest_sha256:receipt.full_result.manifest_sha256,full_result_sha256:hash(JSON.stringify(receipt.full_result)),
+    scripts:receipt.full_result.continuation.scripts};
+  assert.ok(!body.includes(publicPrefix),'Recovery publication attestation already exists');
+  return body.trimEnd()+'\n\n'+publicPrefix+Buffer.from(JSON.stringify(proof)).toString('base64url')+' -->\n';
+}
+export async function inspectRecoveryPublication(part,release,producerRun,assets,manifest,read){
+  assert.equal(part.repository,REPO);assert.equal(part.source_sha,PRODUCT);assert.equal(part.version,'2.0.0-dev.19');
+  assert.deepEqual(part.producer,{run_id:Number(BUILD_RUN),run_attempt:1});
+  const matches=[...(release.body||'').matchAll(/<!-- rsrs-cli3930-recovery:([A-Za-z0-9_-]+) -->/g)];
+  assert.equal(matches.length,1,'Missing or duplicate durable recovery attestation');
+  assert.equal((release.body||'').split(publicPrefix).length,2);
+  const bytes=Buffer.from(matches[0][1],'base64url');assert.equal(bytes.toString('base64url'),matches[0][1]);
+  const proof=JSON.parse(bytes),source=proof.source,publisher=proof.publisher;
+  const fence=readFence(release.body);
+  assert.equal(String(fence?.run_id),String(publisher.run_id));assert.equal(fence.source_sha,PRODUCT);
+  assert.equal(fence.version,part.version);assert.equal(fence.phase,'fenced');
+  assert.equal(proof.schema,1);assert.deepEqual(source.producer,requestedProducer());
+  assert.equal(source.sha,PRODUCT);assert.equal(source.version,part.version);assert.equal(source.repository,REPO);
+  assert.equal(source.workflow,recoveryWorkflow);assert.match(proof.manifest_sha256,/^[a-f0-9]{64}$/);assert.match(proof.full_result_sha256,/^[a-f0-9]{64}$/);
+  assert.equal(proof.scripts.producer_sha,PRODUCT);assert.equal(proof.scripts.consumer_sha,source.workflow_head_sha);
+  for(const key of ['native_steps_sha256','cloud_steps_sha256','unchanged_tree_sha256'])assert.match(proof.scripts[key],/^[a-f0-9]{64}$/);
+  const consumer=await read(`actions/runs/${source.run_id}/attempts/${source.run_attempt}`);
+  validateRecoveryRuns(producerRun,consumer,source.producer,source);
+  assert.equal(consumer.status,'completed');assert.equal(consumer.conclusion,'success');
+  const jobs=async s=>{
+    const result=[];
+    for(let page=1;;page++){
+      const response=await read(`actions/runs/${s.run_id}/attempts/${s.run_attempt}/jobs?per_page=100&page=${page}`);
+      assert.ok(Array.isArray(response.jobs)&&response.jobs.length<=100);result.push(...response.jobs);
+      if(response.jobs.length<100)return result;
+    }
+  };
+  const original=await jobs(source.producer),current=await jobs(source);
+  recoveryJobs(original,current,source.producer,source,manifest);
+  const receiptJobs=current.filter(j=>j.name==='preparation-receipt');assert.equal(receiptJobs.length,1);
+  assert.equal(receiptJobs[0].status,'completed');assert.equal(receiptJobs[0].conclusion,'success');
+  assert.equal(publisher.repository,REPO);assert.equal(publisher.workflow,'.github/workflows/release.yml');
+  assert.equal(publisher.sha,PRODUCT);assert.equal(publisher.version,part.version);assert.equal(publisher.release_id,part.release_id);
+  assert.ok(positive(publisher.run_id)&&positive(publisher.run_attempt));assert.notEqual(String(publisher.run_id),String(source.run_id));assert.notEqual(String(publisher.run_id),BUILD_RUN);
+  assert.match(publisher.workflow_head_sha,/^[a-f0-9]{40}$/);
+  const publication=await read(`actions/runs/${publisher.run_id}/attempts/${publisher.run_attempt}`);
+  assert.equal(publication.id,Number(publisher.run_id));assert.equal(publication.run_attempt,Number(publisher.run_attempt));
+  assert.equal(publication.head_sha,publisher.workflow_head_sha);assert.equal(publication.head_branch,'main');assert.equal(publication.event,'workflow_dispatch');
+  assert.equal(publication.head_repository?.full_name,REPO);assert.equal(publication.path,publisher.workflow);
+  assert.equal(publication.status,'completed');assert.equal(publication.conclusion,'success');
+  const publishedJobs=await jobs(publisher);
+  for(const name of ['prepared-import','publication-ready','publish']){
+    const found=publishedJobs.filter(j=>j.name===name);assert.equal(found.length,1);
+    assert.equal(found[0].status,'completed');assert.equal(found[0].conclusion,'success');
+  }
+  const start=Date.parse(publication.created_at),published=Date.parse(release.published_at),end=Date.parse(publishedJobs.find(j=>j.name==='publish').completed_at);
+  const prepared=Date.parse(receiptJobs[0].completed_at);
+  assert.ok([start,published,end,prepared].every(Number.isFinite)&&prepared<=start&&start<=published&&published<=end,'Recovery/publication clocks do not bind the Release');
+  assert.deepEqual(proof.assets.map(a=>a.file).sort(),manifest.targets.flatMap(t=>[`cli-build-${t.triple}.json`,`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`]).sort());
+  for(const a of proof.assets){
+    const found=assets.filter(b=>b.name===a.file);assert.equal(found.length,1);
+    assert.ok(positive(a.size));assert.match(a.sha256,/^[a-f0-9]{64}$/);
+    assert.equal(found[0].size,a.size);assert.equal(found[0].digest,'sha256:'+a.sha256);
+  }
+  return {consumer:{run_id:source.run_id,run_attempt:source.run_attempt,sha:source.workflow_head_sha},publisher,
+    manifest_sha256:proof.manifest_sha256,full_result_sha256:proof.full_result_sha256};
 }
 export function planContinuation(root){
   const producer=requestedProducer(),source=currentSource(producer),context=recoveryContext(source,{planning:true});

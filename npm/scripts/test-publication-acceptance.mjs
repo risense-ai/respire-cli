@@ -79,7 +79,7 @@ test('accepted receipts require all exact package ACKs and cannot masquerade as 
     const archive=path.join(folder,'source.tar');
     writeFileSync(archive,git('archive',product,'npm'));
     execFileSync('tar',['-xf',archive,'-C',folder]);
-    const caller=path.join(folder,'npm/scripts/publication-acceptance.mjs');
+    const caller=path.join(folder,'npm/scripts/release-publication.mjs');
     const callerBytes=readFileSync(caller),packageBytes=readFileSync(path.join(folder,'npm/artifact-manifest.json'));
     const receipt=copy(f.scoped),origin={...receipt.source,workflow:'.github/workflows/release-recovery3930.yml',run_id:'701',run_attempt:1,
       sha:product,workflow_head_sha:'d'.repeat(40),producer:{...receipt.source,sha:product,run_id:'44276673815',run_attempt:1}};

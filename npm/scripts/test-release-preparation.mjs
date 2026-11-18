@@ -7,11 +7,12 @@ import {createHash} from 'node:crypto';
 import {spawnSync,execFileSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {publishedFullFixture} from './full-report-fixture.mjs';
-import {publishedAssetNames} from './extract-artifact.mjs';
+import {publishedAssetNames,inspectPublishedRelease} from './extract-artifact.mjs';
 import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun} from './release-preparation.mjs';
 import {completeCandidate} from './candidate-artifact.mjs';
+import {fenceBody} from './publication-fence.mjs';
 import {recoveryWorkflow,windowsTarget,validateRecoveryRuns,recoveryJobs,recoveryArtifact,recoveryArtifacts,
-  downloadRecoveryArtifact,validateRecoveryEvidence,recoveryScripts,cloudScope} from './release-recovery3930.mjs';
+  downloadRecoveryArtifact,validateRecoveryEvidence,recoveryScripts,cloudScope,recoveryPublicationBody} from './release-recovery3930.mjs';
 
 const sha='3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f',hash='b'.repeat(64),version='2.0.0-dev.19';
 const targets=[['x86_64-unknown-linux-gnu','linux-x64-gnu'],['x86_64-unknown-linux-musl','linux-x64'],['aarch64-apple-darwin','macos-arm64'],['x86_64-pc-windows-msvc','win-x64']];
@@ -163,7 +164,7 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
   assert.match(release,/prepared_binary_run: \$\{\{ steps.prepared.outputs.prepared_binary_run \}\}/);
   assert.equal((release.match(/run-id: \$\{\{ needs.plan.outputs.prepared_binary_run \}\}/g)||[]).length,2);
-  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact\}.mjs \| tar -x/g)||[]).length,4);
+  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance\}.mjs \| tar -x/g)||[]).length,4);
   const continuation=readFileSync(new URL('../../.github/workflows/release-recovery3930.yml',import.meta.url),'utf8');
   assert.match(continuation,/uses: \.\/.github\/workflows\/release-native-validation.yml/);
   assert.match(continuation,/validation_profile: full/);
@@ -175,7 +176,7 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.doesNotMatch(publisher,/--pack npm\/publication-packages/);
 });
 
-test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',()=>{
+test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',async()=>{
   const directory=mkdtempSync(join(tmpdir(),'preparation-process-'));
   try{
     const assets=join(directory,'assets'),packs=join(directory,'packs'),reports=join(directory,'reports');
@@ -302,6 +303,55 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
     ctx.run={...run,status:'completed',conclusion:'success'};
     Object.assign(ctx.jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});
     assert.equal(validatePreparation(proof,ctx),proof);
+    const publisher={repository:source.repository,workflow:source.workflow,run_id:'801',run_attempt:1,sha,version,release_id:901,workflow_head_sha:'e'.repeat(40)};
+    const fencedNotes=fenceBody('Existing release notes',{schema:2,kind:'npm-version-fence',repository:source.repository,version,source_sha:sha,
+      run_id:'801',first_attempt:1,created_at:time(4),phase:'fenced',package_names:proof.packs.map(p=>p.name),
+      scoped_packages:proof.packs.map(p=>({name:p.name,version,integrity:'sha512-'+createHash('sha512').update(p.name).digest('base64'),shasum:'c'.repeat(40)}))});
+    const body=recoveryPublicationBody(fencedNotes,{receipt:{preparation:proof},history:ctx},publisher);
+    const publicPart={repository:source.repository,release_id:901,version,source_sha:sha,producer:{run_id:44276673815,run_attempt:1},
+      assets:proof.assets.map((a,i)=>({id:i+1,name:a.file,size:a.size,sha256:a.sha256}))};
+    const published={id:901,tag_name:'v'+version,draft:false,published_at:time(5),body};
+    const publicAssets=publicPart.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}));
+    const publisherRun={id:801,run_attempt:1,head_sha:publisher.workflow_head_sha,head_branch:'main',event:'workflow_dispatch',
+      head_repository:{full_name:source.repository},path:source.workflow,status:'completed',conclusion:'success',created_at:time(4)};
+    const publicState={published,publicAssets,producerRun:{...producerRun,repository:{full_name:source.repository}},consumerRun:ctx.run,publisherRun,original:ctx.original,current:ctx.current,
+      publicationJobs:['prepared-import','publication-ready','publish'].map(name=>({name,status:'completed',conclusion:'success',completed_at:time(6)}))};
+    const fetchPublished=s=>async url=>{
+      const p=new URL(url).pathname+new URL(url).search;let value;
+      if(p.endsWith('/releases/901'))value=s.published;
+      else if(p.includes('/git/ref/tags/'))value={object:{type:'commit',sha}};
+      else if(p.includes('/releases/901/assets?'))value=s.publicAssets;
+      else if(p.includes('/contents/npm/artifact-manifest.json?')){
+        const bytes=Buffer.from(JSON.stringify(manifest));value={type:'file',encoding:'base64',size:bytes.length,content:bytes.toString('base64'),
+          sha:createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`),bytes])).digest('hex')};
+      }else if(p.includes('/actions/runs/44276673815/attempts/1/jobs?'))value={jobs:s.original};
+      else if(p.endsWith('/actions/runs/44276673815/attempts/1'))value=s.producerRun;
+      else if(p.includes('/actions/runs/701/attempts/1/jobs?'))value={jobs:s.current};
+      else if(p.endsWith('/actions/runs/701/attempts/1'))value=s.consumerRun;
+      else if(p.includes('/actions/runs/801/attempts/1/jobs?'))value={jobs:s.publicationJobs};
+      else if(p.endsWith('/actions/runs/801/attempts/1'))value=s.publisherRun;
+      else throw Error('Unexpected public recovery request: '+p);
+      return {status:200,json:async()=>value};
+    };
+    const verified=await inspectPublishedRelease(publicPart,{fetcher:fetchPublished(publicState)});
+    assert.deepEqual(verified.producer,publicPart.producer);assert.equal(verified.recovery.consumer.run_id,'701');
+    for(const mutate of [s=>s.published.body='',s=>s.publicAssets[0].digest='sha256:'+hash,
+      s=>s.consumerRun.status='in_progress',s=>s.consumerRun.conclusion='failure',s=>s.consumerRun.run_attempt++,
+      s=>s.original[0].conclusion='failure',s=>s.current[0].conclusion='failure',s=>s.publisherRun.head_branch='other',
+      s=>s.publisherRun.status='in_progress',s=>s.publicationJobs[0].conclusion='failure',s=>s.publisherRun.created_at=time(2),
+      s=>s.publicationJobs.at(-1).completed_at=time(4),s=>s.published.body=s.published.body.replace('rsrs-npm-write-fence:','foreign-fence:')]){
+      const s=structuredClone(publicState);mutate(s);await assert.rejects(inspectPublishedRelease(publicPart,{fetcher:fetchPublished(s)}));
+    }
+    for(const change of [p=>p.producer.run_id++,p=>p.producer.run_attempt++,p=>p.source_sha='f'.repeat(40),p=>p.assets[0].sha256='f'.repeat(64)]){
+      const p=structuredClone(publicPart);change(p);await assert.rejects(inspectPublishedRelease(p,{fetcher:fetchPublished(publicState)}));
+    }
+    for(const change of [p=>p.source.producer.run_attempt++,p=>p.source.producer.sha='f'.repeat(40),p=>p.assets[0].sha256='f'.repeat(64),
+      p=>p.publisher.run_id='802',p=>p.source.workflow_head_sha='f'.repeat(40)]){
+      const s=structuredClone(publicState),match=s.published.body.match(/<!-- rsrs-cli3930-recovery:([A-Za-z0-9_-]+) -->/);
+      const p=JSON.parse(Buffer.from(match[1],'base64url'));change(p);
+      s.published.body=s.published.body.replace(match[1],Buffer.from(JSON.stringify(p)).toString('base64url'));
+      await assert.rejects(inspectPublishedRelease(publicPart,{fetcher:fetchPublished(s)}));
+    }
     for(const mutate of [c=>c.original.find(j=>j.name==='api-smoke').run_attempt++,c=>c.current[0].head_sha='f'.repeat(40),
       c=>c.original.find(j=>j.name.startsWith('cloud-sweep')).conclusion='failure',c=>c.current[0].status='in_progress',
       c=>c.original.find(j=>j.name.startsWith('validate / Release')).run_id=999]){

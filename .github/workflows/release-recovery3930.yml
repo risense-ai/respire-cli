@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - name: Load current reviewed orchestration only
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance}.mjs npm/scripts/
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -93,7 +93,7 @@ jobs:
           persist-credentials: false
       - name: Load reviewed orchestration only
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance}.mjs npm/scripts/
       - name: Require native Windows ARM64 hardware
         if: matrix.target == 'aarch64-pc-windows-msvc'
         shell: pwsh
@@ -262,7 +262,7 @@ jobs:
           persist-credentials: false
       - name: Load current reviewed orchestration only
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance}.mjs npm/scripts/
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
