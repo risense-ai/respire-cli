@@ -12,6 +12,7 @@ import {assertReleaseAssets} from './release-publication.mjs';
 import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun} from './release-preparation.mjs';
 import {completeCandidate} from './candidate-artifact.mjs';
 import {fenceBody} from './publication-fence.mjs';
+import {bindMuslReportOrigins,muslOldHashes,validateMuslReportProof,inspectMuslComposition,muslPreparationWorkflow,muslDiagnostic} from './release-recovery3930.mjs';
 import {recoveryWorkflow,windowsTarget,validateRecoveryRuns,recoveryJobs,recoveryArtifact,recoveryArtifacts,
   downloadRecoveryArtifact,validateRecoveryEvidence,recoveryScripts,cloudScope,recoveryPublicationBody,recoveryPublicationEvidence,recoveryProofName} from './release-recovery3930.mjs';
 
@@ -157,9 +158,10 @@ test('actual synthetic npm packs must match the full exact-version local pack in
     assert.equal(preparedPacks(folder,source,manifest).length,5);
     writeFileSync(join(folder,packages[0].file),'tampered');assert.throws(()=>preparedPacks(folder,source,manifest));
   }finally{rmSync(folder,{recursive:true,force:true});}
+
 });
 
-test('Release attests all full candidate consumers and publishes only verified imported bytes',()=>{
+test('Release attests all full candidate consumers and publishes only verified imported bytes',async()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(release,/needs: \[plan, validate, native-regression, cloud-sweep, api-smoke\]/);
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
@@ -175,6 +177,110 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.match(publisher,/needs.publication-ready.result == 'success'/);
   assert.match(publisher,/--reuse-packs npm\/release-packages --export-packs npm\/publication-packages/);
   assert.doesNotMatch(publisher,/--pack npm\/publication-packages/);
+  const folder=mkdtempSync(join(tmpdir(),'musl-report-origins-'));
+  try{
+    const logical='published-upgrades-x86_64-unknown-linux-musl';
+    const tags=['v1.0.7','v1.0.8','v1.0.9','v1.0.11','v1.0.11-dev.1','v1.0.12','v1.0.15','v1.0.16','v1.0.17-dev.6','v1.0.18','v1.0.19','v1.0.20'];
+    const anchor=(id,name,run,conclusion)=>({id,name,digest:'sha256:'+'a'.repeat(64),owner:{run_id:run,run_attempt:1},conclusion});
+    const origins={
+      old:{directory:join(folder,'old'),anchor:anchor('14424335334',logical+'-recovery-44292748654-1',44292748654,'failure')},
+      current:{directory:join(folder,'current'),anchor:anchor('2',logical+'-musl-source-3-1',3,'success')},
+      summary:{directory:join(folder,'summary'),anchor:anchor('4','musl3930-composition-5-1',5,'success')}};
+    origins.old.anchor.digest='sha256:23646cc75cf81d80852f752e7391994dd0751fe296a112707bfce55e458aef31';
+    const reports=[];
+    for(const path of ['published-upgrades.json',...tags.map(tag=>tag+'/results/real-account-return-verification.json')]){
+      const origin=path==='published-upgrades.json'?origins.summary:path.startsWith('v1.0.8/')?origins.current:origins.old;
+      const file=join(origin.directory,path);mkdirSync(join(file,'..'),{recursive:true});
+      const bytes=JSON.stringify({test_only:path});writeFileSync(file,bytes);
+      reports.push({artifact:logical,path,sha256:createHash('sha256').update(bytes).digest('hex')});
+    }
+    const result={reports,historical_upgrades:[{target:'x86_64-unknown-linux-musl',passed:tags,not_applicable:[]}]};
+    const bound=bindMuslReportOrigins(result,origins);
+    assert.equal(bound.reports.filter(r=>r.artifact===origins.old.anchor.name).length,11);
+    assert.equal(bound.reports.filter(r=>r.artifact===origins.current.anchor.name).length,1);
+    assert.equal(bound.reports.filter(r=>r.artifact===origins.summary.anchor.name).length,1);
+    assert.ok(result.reports.every(r=>r.artifact===logical));
+    const wrong=structuredClone(result);wrong.reports[1].sha256='0'.repeat(64);
+    assert.throws(()=>bindMuslReportOrigins(wrong,origins),/absent from its claimed ZIP/);
+    assert.throws(()=>bindMuslReportOrigins(result,{...origins,summary:origins.current}));
+    const missing=structuredClone(result);missing.reports.pop();
+    assert.throws(()=>bindMuslReportOrigins(missing,origins),/twelve sources/);
+    writeFileSync(join(origins.current.directory,'v1.0.8/results/real-account-return-verification.json'),'changed');
+    assert.throws(()=>bindMuslReportOrigins(result,origins),/absent from its claimed ZIP/);
+  }finally{rmSync(folder,{recursive:true,force:true});}
+  const fixed='710e6b13ff588c02157d8d677e59e8f21c16beae',first='d'.repeat(40),validator='e'.repeat(40);
+  const composedSource={...source,workflow:muslPreparationWorkflow,run_id:'13',workflow_head_sha:'c'.repeat(40),producer:source,
+    fixture_commit:fixed,diagnostic:{...muslDiagnostic}};
+  const fixture={commit:fixed,files:{'scripts/test-published-upgrades.py':validator}};
+  const logical='published-upgrades-x86_64-unknown-linux-musl';
+  const sourceRows=[...Object.entries(muslOldHashes),['v1.0.8','a'.repeat(64)]].map(([tag,digest])=>({source:tag,contract:'historical-385',
+    fixture_commit:tag==='v1.0.8'?fixed:first,validator_blob:validator,report_sha256:digest}));
+  const old={name:logical+'-recovery-44292748654-1'},current={name:logical+`-musl-source-${muslDiagnostic.run_id}-1`},summary={name:'musl3930-composition-13-1'};
+  const proof={manifest_sha256:hash,historical_upgrades:[{target:'x86_64-unknown-linux-musl',passed:sourceRows.map(r=>r.source),not_applicable:[]}],
+    reports:[...sourceRows.map(r=>({artifact:r.source==='v1.0.8'?current.name:old.name,path:r.source+'/results/real-account-return-verification.json',sha256:r.report_sha256})),
+      {artifact:summary.name,path:'published-upgrades.json',sha256:hash}],continuation:{artifacts:[old,current,summary],musl:{schema:1,kind:'fixed-musl3930-composition',
+        producer:source,diagnostic:composedSource.diagnostic,harness_sha:composedSource.workflow_head_sha,fixture,runtime_sha256:hash,candidate_sha256:hash,
+        sources:sourceRows,summary_sha256:hash,summary_artifact:summary,source_artifacts:{old,current}}}};
+  validateMuslReportProof(proof,composedSource,fixture,first);
+  for(const mutate of [p=>p.reports[0].artifact=current.name,p=>p.continuation.musl.sources[0].report_sha256='0'.repeat(64),
+    p=>p.continuation.musl.sources.pop(),p=>p.reports.at(-1).artifact=current.name,p=>p.continuation.musl.diagnostic.run_attempt=2]){
+    const bad=structuredClone(proof);mutate(bad);assert.throws(()=>validateMuslReportProof(bad,composedSource,fixture,first));
+  }
+  for(const file of ['dev-legacy-vault-smoke.py','dev-migration-keyring.py','test-published-upgrades.py','test-real-m3-account-switch.py',
+    'test-dev-credential-alias-fixtures.py','test-full-release-diagnostics.py','test_published_upgrade_policy.py'])fixture.files['scripts/'+file]=validator;
+  const required=[...manifest.targets.map(t=>`validate / Release (${t.triple})`),'validate / npm-dry-run','api-smoke',
+    ...manifest.targets.map(t=>`native-regression / Native (${t.triple})`),...manifest.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>`cloud-sweep (runner, ${t.triple})`)];
+  const originalJobs=required.map((name,i)=>({name,id:100+i,status:'completed',conclusion:name==='native-regression / Native (x86_64-unknown-linux-musl)'?'failure':'success',
+    run_id:Number(source.run_id),run_attempt:1,head_sha:source.sha}));
+  const oldNative={name:'native-regression / Native (x86_64-unknown-linux-musl)',id:400,status:'completed',conclusion:'failure',run_id:44292748654,run_attempt:1,head_sha:first,
+    steps:['Verify OS autostart registration from verified release bytes','Install and probe BGE CPU inference'].map(name=>({name,conclusion:'success'}))};
+  const newNative={...oldNative,id:134805531846,conclusion:'success',run_id:Number(muslDiagnostic.run_id),head_sha:composedSource.diagnostic.sha};
+  const compose={name:'compose',id:402,status:'completed',conclusion:'success',run_id:13,run_attempt:1,head_sha:composedSource.workflow_head_sha};
+  for(const [a,j,id] of [[old,oldNative,'14424335334'],[current,newNative,'600'],[summary,compose,'601']])Object.assign(a,
+    {id,job_id:j.id,size:1,digest:'sha256:'+'a'.repeat(64),conclusion:j.conclusion,owner:{run_id:j.run_id,run_attempt:1,sha:j.head_sha}});
+  old.digest='sha256:23646cc75cf81d80852f752e7391994dd0751fe296a112707bfce55e458aef31';
+  const firstRun={status:'completed',conclusion:'failure',path:recoveryWorkflow,head_branch:'main',event:'workflow_dispatch',head_repository:{full_name:source.repository},head_sha:first};
+  const diagnosticRun={...firstRun,id:Number(muslDiagnostic.run_id),run_attempt:1,conclusion:'success',path:'.github/workflows/release-musl3930.yml',head_sha:composedSource.diagnostic.sha};
+  const read=async path=>path==='actions/runs/44292748654/attempts/1'?firstRun:path===`actions/runs/${muslDiagnostic.run_id}/attempts/1`?diagnosticRun:
+    path==='commits/385c3c9'?{sha:first}:path.startsWith('contents/')?{type:'file',sha:validator}:assert.fail('Unexpected read '+path);
+  const readJobs=async owner=>String(owner.run_id)==='44292748654'?[oldNative]:String(owner.run_id)===muslDiagnostic.run_id?[newNative]:assert.fail('Unexpected job owner');
+  await inspectMuslComposition(composedSource,proof,originalJobs,[compose],manifest,read,readJobs);
+  diagnosticRun.status='in_progress';await assert.rejects(inspectMuslComposition(composedSource,proof,originalJobs,[compose],manifest,read,readJobs));diagnosticRun.status='completed';
+  compose.conclusion='cancelled';await assert.rejects(inspectMuslComposition(composedSource,proof,originalJobs,[compose],manifest,read,readJobs));compose.conclusion='success';
+  current.owner.run_attempt=2;await assert.rejects(inspectMuslComposition(composedSource,proof,originalJobs,[compose],manifest,read,readJobs));current.owner.run_attempt=1;
+  const mixed=spawnSync(process.platform==='win32'?'py':'python3',[...(process.platform==='win32'?['-3']:[]),'-c',String.raw`
+import copy,json,pathlib,runpy,tempfile
+m=runpy.run_path('scripts/merge-musl3930-upgrades.py')['merge']
+tags=['v1.0.7','v1.0.8','v1.0.9','v1.0.11','v1.0.11-dev.1','v1.0.12','v1.0.15','v1.0.16','v1.0.17-dev.6','v1.0.18','v1.0.19','v1.0.20']
+policy=runpy.run_path('scripts/published_upgrade_policy.py')['DATABASE_DEV_CHECKPOINTS']
+base={k:True for k in ['passed','real_model','distinct_vault_keys','original_records_preserved','original_sync_work_preserved','urk_preserved','old_records_decrypted','post_upgrade_recall_checked','encrypted_tombstones_preserved','standalone_runtime_evidence','runtime_artifact_reused','normal_reopen_checked','post_upgrade_sync_checked']}
+base.update({k:False for k in ['old_rpc_checked','forced_restart_checked','live_owner_restart_rejected','safe_restart_checked','supervised_worker_checked','in_process_checked','global_engine_preserved']})
+base.update(seed_vault_versions=[1,3],historical_credential_migration_actor='fixture',host_credential_custody={'required':True,'cleanup_passed':True,'verified_accounts':[{'account':'main','vault_version':1,'urk_preserved':True},{'account':'alternate','vault_version':3,'urk_preserved':True}]},native_credential_cleanup={'passed':True,'remaining_entries':[]},upgrade_contract='standalone-v1',legacy_handoff_actor=None,coverage_scope='historical-database',host_checks_delegated_to='resident-concurrency',cloud_cleanup={'passed':True,'remaining_users':[]},runtime_mode='standalone_runtime',runtime_binary_sha256='a'*64,runtime_version='2.0.0-dev.24',runtime_identity_receipts=[{'pid':1}],binary_sha256='b'*64,engine='cpu',sequence=[{'account':a,'model_rows':{'embedder':{'status':'ok'},'model index':{'status':'ok'}}} for a in ['main','alternate','main']])
+base['post_upgrade_sync']={k:True for k in ['original_urk_preserved','existing_keys_registered','source_push','independent_pull_decrypted','reverse_marker_source_pull','original_active_preserved','tombstones_propagated','pending_work_acknowledged']}
+with tempfile.TemporaryDirectory() as d:
+ root=pathlib.Path(d);old=root/'old';new=root/'new';old.mkdir();new.mkdir()
+ summary={'target':'x86_64-unknown-linux-musl','candidate_sha256':'b'*64,'selected_sources':sorted(tags),'published_formal_sources':[t for t in tags if '-dev.' not in t],'database_dev_checkpoints':policy,'additional_draft_baselines':[]}
+ (old/'published-upgrades.json').write_text(json.dumps(summary))
+ (new/'published-upgrades.json').write_text(json.dumps(dict(summary,selected_sources=['v1.0.8'],diagnostic_sources=['v1.0.8'],passed=True,full_coverage=False,all_published_sources_covered=False)))
+ for tag in tags:
+  r=copy.deepcopy(base)
+  if tag in policy:r['database_dev_checkpoint']={'tag':tag,'special_state_seeded':True,'special_state_preserved':True,'verified_accounts':['main','alternate'],'post_sync_special_state_preserved':True,'sync_verified_accounts':['main']}
+  p=old/tag/'results';p.mkdir(parents=True);(p/'real-account-return-verification.json').write_text(json.dumps([r]))
+ r=copy.deepcopy(base)
+ p=new/'v1.0.8'/'results';p.mkdir(parents=True);f=p/'real-account-return-verification.json';f.write_text(json.dumps([r]));original=f.read_bytes()
+ evidence=m(old,new,root/'merged','710e6b13ff588c02157d8d677e59e8f21c16beae','a'*64,'2.0.0-dev.24')
+ assert len(evidence)==12 and all(x['contract']=='historical-385' for x in evidence)
+ assert json.loads((root/'merged/published-upgrades.json').read_text())['sources'][0]['report'].endswith('/results/real-account-return-verification.json')
+ for i,mutation in enumerate(['sync','failed','missing']):
+  if mutation=='sync':bad=copy.deepcopy(r);del bad['post_upgrade_sync']['original_urk_preserved'];f.write_text(json.dumps([bad]))
+  else:f.write_bytes(original)
+  if mutation=='failed':bad=copy.deepcopy(base);bad['passed']=False;(old/'v1.0.7/results/real-account-return-verification.json').write_text(json.dumps([bad]))
+  if mutation=='missing':(old/'v1.0.9/results/real-account-return-verification.json').unlink()
+  try:m(old,new,root/('rejected'+str(i)),'710e6b13ff588c02157d8d677e59e8f21c16beae','a'*64,'2.0.0-dev.24')
+  except AssertionError:pass
+  else:raise AssertionError('Invalid source evidence accepted')
+`],{encoding:'utf8'});
+  assert.equal(mixed.status,0,mixed.stderr);
 });
 
 test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',async()=>{

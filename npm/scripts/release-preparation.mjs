@@ -10,7 +10,7 @@ import {api,pages,output as setOutput} from './release-publication.mjs';
 import {readVerifiedReceipt} from './verified-receipt.mjs';
 import {frontendLayout, releaseAssetNames, validateBuildMetadata} from './verify-binary.mjs';
 import {completeCandidate} from './candidate-artifact.mjs';
-import {recoveryWorkflow,recoveryContext,validateRecoveryEvidence} from './release-recovery3930.mjs';
+import {recoveryWorkflow,muslPreparationWorkflow,recoveryContext,validateRecoveryEvidence} from './release-recovery3930.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
@@ -22,9 +22,12 @@ const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const preparationHead=source=>source.producer?source.workflow_head_sha:source.sha;
 
 export function validatePreparationSource(source){
-  requireValue(source?.repository===REPO&&[WORKFLOW,recoveryWorkflow].includes(source.workflow)&&positive(source.run_id)&&positive(source.run_attempt)&&
+  requireValue(source?.repository===REPO&&[WORKFLOW,recoveryWorkflow,muslPreparationWorkflow].includes(source.workflow)&&positive(source.run_id)&&positive(source.run_attempt)&&
     SHA.test(source.sha||'')&&/^\d+\.\d+\.\d+-dev\.[1-9]\d*$/.test(source.version||''), 'Invalid exact-source DEV preparation');
-  if(source.workflow===recoveryWorkflow){
+  if([recoveryWorkflow,muslPreparationWorkflow].includes(source.workflow)){
+    if(source.workflow===muslPreparationWorkflow)requireValue(source.fixture_commit==='710e6b13ff588c02157d8d677e59e8f21c16beae'&&
+      positive(source.diagnostic?.run_id)&&positive(source.diagnostic?.run_attempt)&&SHA.test(source.diagnostic?.sha||'')&&
+      String(source.diagnostic.run_id)!==String(source.run_id),'Invalid bounded musl diagnostic identity');
     validatePreparationSource(source.producer);
     requireValue(source.producer.workflow===WORKFLOW&&source.producer.sha===source.sha&&source.producer.version===source.version&&
       String(source.producer.run_id)!==String(source.run_id)&&SHA.test(source.workflow_head_sha||''),'Invalid continuation producer/consumer identity');
@@ -255,7 +258,7 @@ export function validatePreparationLink(link,source){
 export function readPreparedRun(runId,sha,version,profile=process.env.VALIDATION_PROFILE){
   requireValue(positive(runId)&&SHA.test(sha||''),'Invalid preparation lookup');
   const initial=api(`repos/${REPO}/actions/runs/${runId}`);
-  requireValue(String(initial.id)===String(runId)&&positive(initial.run_attempt)&&[WORKFLOW,recoveryWorkflow].includes(initial.path)&&
+  requireValue(String(initial.id)===String(runId)&&positive(initial.run_attempt)&&[WORKFLOW,recoveryWorkflow,muslPreparationWorkflow].includes(initial.path)&&
     initial.event==='workflow_dispatch'&&initial.head_branch==='main'&&initial.head_repository?.full_name===REPO&&
     initial.status==='completed'&&initial.conclusion==='success','Only a completed exact-main preparation can be consumed');
   const name=preparationName({run_id:runId,run_attempt:initial.run_attempt});
