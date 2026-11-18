@@ -819,6 +819,7 @@ test('published full joins every existing report and live image identity; copied
       const upgradeFile='v'+source.version+'/results/real-account-return-verification.json';
       for(const change of [r=>delete r.runtime_installed_after_legacy_data,r=>r.runtime_installed_after_legacy_data=false,
         r=>r.runtime_installed_after_legacy_data='true',r=>delete r.legacy_handoff_actor,r=>r.legacy_handoff_actor='product',
+        r=>r.legacy_handoff_actor='fixture',
         r=>r.upgrade_contract='legacy-shim-v1',r=>r.passed=false,r=>r.runtime_binary_sha256='f'.repeat(64)]) {
         const changed=copy(f.upgradedRuntime);change(changed);
         f.put('published-upgrades-'+first,upgradeFile,[changed]);assert.throws(run);

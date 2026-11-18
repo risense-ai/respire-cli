@@ -22,7 +22,7 @@ export function publishedFullFixture(root,{candidate,assets,packsFolder}={}) {
   const identity={source_sha:spec.cli.source_sha,version:spec.cli.version,binary_sha256:spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',targets[0])[1]).sha256};
   const processReceipt={manifest_sha256:manifestHash,bundle_sha256:'b'.repeat(64),image_sha256:'b'.repeat(64),exe:'/isolated/runtime',pid:42,process_start_id:'synthetic-birth',installation_root:'/isolated',data_dir:'/isolated/profile',account_id:'account',instance_id:'instance',generation:1,protocol_v:1};
   const runtime={...identity,passed:true,runtime_mode:'standalone_runtime',standalone_runtime_evidence:true,runtime_binary_sha256:'b'.repeat(64),runtime_version:spec.runtime.version,runtime_identity_receipts:[processReceipt]};
-  const upgradedRuntime={...runtime,upgrade_contract:'standalone-v1',runtime_installed_after_legacy_data:true,legacy_handoff_actor:'fixture'};
+  const upgradedRuntime={...runtime,upgrade_contract:'standalone-v1',runtime_installed_after_legacy_data:true,legacy_handoff_actor:null};
   const policy=JSON.parse(execFileSync(process.platform==='win32'?'py':'python3',
     [...(process.platform==='win32'?['-3']:[]),'-I','-B','-c',`import json,sys
 sys.path.insert(0, '.')

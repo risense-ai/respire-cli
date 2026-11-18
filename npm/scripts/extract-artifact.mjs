@@ -649,7 +649,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
         const check = read('published-upgrades-'+target,version+'/results/real-account-return-verification.json');
         requireValue(Array.isArray(check) && check.length === 1 && check[0].binary_sha256 === native[0].binary_sha256, 'Upgrade process binary differs');
         requireValue(check[0].upgrade_contract === 'standalone-v1' && check[0].runtime_installed_after_legacy_data === true
-          && check[0].legacy_handoff_actor === 'fixture', 'Historical upgrade must download the Runtime after legacy data and retain fixture-owned handoff');
+          && check[0].legacy_handoff_actor === null, 'Historical database upgrade must install Runtime after legacy data without starting a legacy host');
         processes.push(...validatePublishedProcessEvidence(check[0],spec,target,manifestHash));
         passed.push(version);
       }
