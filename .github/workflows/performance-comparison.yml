@@ -273,6 +273,9 @@ jobs:
                   if 'cleanup_errors' in row: result['cleanup_error_count']=len(row['cleanup_errors'])
                   for k in ['cloud_cleanup','native_credential_cleanup','host_credential_custody','post_upgrade_sync','database_dev_checkpoint']:
                       if k in row:
+                          if k == 'database_dev_checkpoint' and row[k] is None:
+                              result[k] = None
+                              continue
                           result[k]={name:value for name,value in row[k].items() if type(value) is bool}
                           for name in ['remaining_users','remaining_entries']:
                               if name in row[k]: result[k][name+'_count']=len(row[k][name])
