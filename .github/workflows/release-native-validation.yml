@@ -187,7 +187,7 @@ jobs:
       - name: Load reviewed orchestration without changing product or business fixtures
         if: inputs.recovery_run != ''
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
       - name: Verify original producer job, ZIP and metadata without replacing its identity
         if: inputs.recovery_run != ''
         env:

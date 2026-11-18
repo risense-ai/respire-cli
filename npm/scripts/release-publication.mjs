@@ -100,14 +100,26 @@ export function validateScopedPayload(receipt, expectedManifest) {
         receipt.assets.some(a => a.name === b.file && a.sha256 === b.sha256)))) throw new Error('Invalid native binary bindings');
   return receipt;
 }
+export function assertReleaseAssets(release, receipt) {
+  const source = receipt.source;
+  const markers=[...(release.body||'').matchAll(/<!-- rsrs-cli3930-recovery:([A-Za-z0-9_-]+) -->/g)];
+  let proof=[];
+  if(markers.length){
+    if(markers.length!==1)throw Error('Duplicate recovery publication attestation');
+    const evidence=JSON.parse(Buffer.from(markers[0][1],'base64url')).evidence;
+    if(source.sha!=='3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f'||source.version!=='2.0.0-dev.19'||evidence?.name!=='cli3930-recovery-proof.json'||!positive(evidence.size)||!HASH.test(evidence.sha256))throw Error('Invalid recovery proof asset');
+    proof=[evidence];
+  }
+  const expectedAssets=[...receipt.assets,...proof];
+  if(release.assets?.length!==expectedAssets.length||!expectedAssets.every(e=>release.assets.some(a=>a.name===e.name&&a.size===e.size&&a.state==='uploaded'&&a.digest===`sha256:${e.sha256}`)))throw Error('Public release assets differ');
+}
 export function assertDraft(release, receipt) {
   const source = receipt.source;
   if (String(release.id) !== String(source.release_id) || release.tag_name !== `v${source.version}` ||
-      release.target_commitish !== source.sha || release.draft !== true || release.prerelease !== (source.channel === 'dev') ||
-      release.assets?.length !== receipt.assets.length || !receipt.assets.every(expected => release.assets.some(actual =>
-        actual.name === expected.name && actual.size === expected.size && actual.state === 'uploaded' && actual.digest === `sha256:${expected.sha256}`))) {
+      release.target_commitish !== source.sha || release.draft !== true || release.prerelease !== (source.channel === 'dev')) {
     throw new Error('Draft release identity/assets changed; publication refused');
   }
+  assertReleaseAssets(release,receipt);
 }
 export function validateAlias(receipt, scoped, run, jobs) {
   if (receipt?.schema !== 1 || receipt.kind !== 'alias-ready' || !equal(receipt.source, scoped.source) ||

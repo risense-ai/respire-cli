@@ -10,7 +10,7 @@ import path from 'node:path';
 import {regressionContract,validateRegressionContract,validationProfile,regressionStatus,regressionCompletedAt,parseTimestamp} from './release-regression-contract.mjs';
 import {validateImportAnchor,assertImportedContents,importPinFromEnv,readImportedPreparation,assertImportSelection,assertImportPin} from './prepared-import.mjs';
 import {preparationPinFromEnv,preparationReceiptJob} from './release-preparation.mjs';
-import {recoveryPublicationBody} from './release-recovery3930.mjs';
+import {recoveryPublicationBody,recoveryPublicationEvidence,recoveryProofName,readPublicationCandidate} from './release-recovery3930.mjs';
 
 import {checkVersionFence,checkReservationFence,bindFenceNotes,persistVersionFence} from './publication-fence.mjs';
 const ALIAS = '.github/workflows/npm-alias.yml';
@@ -321,10 +321,15 @@ function finalizeAccepted() {
   if(preparedImport?.receipt.preparation.source.producer){
     const draft=api(`repos/${s.repository}/releases/${s.release_id}`);
     assertDraft(draft,scoped);
-    const notes=recoveryPublicationBody(draft.body||'',preparedImport,{...s,workflow_head_sha:sourceRun.head_sha});
+    const candidate=readPublicationCandidate(preparedImport);
+    const notes=recoveryPublicationBody(draft.body||'',preparedImport,{...s,workflow_head_sha:sourceRun.head_sha},candidate);
+    writeFileSync(recoveryProofName,recoveryPublicationEvidence(preparedImport,candidate));
+    command('gh',['release','upload',`v${s.version}`,recoveryProofName,'--repo',s.repository],{stdio:'inherit'});
     writeFileSync('recovery-release-notes.md',notes);
     command('gh',['release','edit',`v${s.version}`,'--repo',s.repository,'--notes-file','recovery-release-notes.md'],{stdio:'inherit'});
-    if(api(`repos/${s.repository}/releases/${s.release_id}`).body!==notes)throw Error('Durable recovery attestation write not confirmed');
+    const confirmed=api(`repos/${s.repository}/releases/${s.release_id}`);
+    if(confirmed.body!==notes)throw Error('Durable recovery attestation write not confirmed');
+    assertDraft(confirmed,scoped);
   }
   command('gh',['release','edit',`v${s.version}`,'--repo',s.repository,'--draft=false'],{stdio:'inherit'});
   // Confirm the read response after the write. A transport ambiguity never
