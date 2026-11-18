@@ -216,10 +216,14 @@ class Smoke:
         stage = self.report.get("stage")
         # This fixture holds no verified Runtime owner or original process handle.
         # An endpoint/PID lookup here cannot bind the owner of the failed request.
+        # The preceding pull stops Runtime before returning; a pre-show health
+        # snapshot cannot identify an owner that show may subsequently start.
         self.report["runtime_failure_evidence"] = {
             "stage": stage if stage in ("historical_reverse_peer_push",
                 "historical_reverse_source_pull", "historical_reverse_source_read") else "other",
-            "binding": "unbound", "reason": "no_verified_original_owner",
+            "binding": "unbound", "reason": "show_request_owner_not_captured"
+                if stage == "historical_reverse_source_read" else "no_verified_original_owner",
+            "request_bound": False, "owner_sampled": False,
             "identity_verified": False, "process_handle_available": False,
             "liveness": "unknown", "exit_code_available": False,
             "persistence": "saved"}

@@ -47,7 +47,9 @@ class DiagnosticsTests(unittest.TestCase):
                             evidence = json.loads(report_path.read_text())['runtime_failure_evidence']
                             self.assertEqual(evidence, dict(
                                 stage=stage if stage != SECRET else 'other',
-                                binding='unbound', reason='no_verified_original_owner',
+                                binding='unbound', reason='show_request_owner_not_captured'
+                                    if stage == 'historical_reverse_source_read' else 'no_verified_original_owner',
+                                request_bound=False, owner_sampled=False,
                                 identity_verified=False, process_handle_available=False,
                                 liveness='unknown', exit_code_available=False, persistence='saved'))
                             self.assertNotIn(SECRET, json.dumps(evidence))
@@ -71,6 +73,33 @@ class DiagnosticsTests(unittest.TestCase):
                         self.assertEqual(smoke.report['runtime_stop']['passed'], stop == 0)
                         safe_report = {key: value for key, value in smoke.report.items() if key != 'stage'}
                         self.assertNotIn(SECRET, json.dumps(safe_report))
+            # Source pull has already stopped its owner before the next show.
+            # Neither that stop result nor any pre-request health identifies show's owner.
+            smoke.report = {'stage': 'historical_reverse_source_pull'}
+            with patch.object(legacy.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 0, b'{"status":"ok"}', b''),
+                    subprocess.CompletedProcess([], 0, b'', b''),
+                    subprocess.CompletedProcess([], 1, SECRET.encode(), SECRET.encode()),
+                    subprocess.CompletedProcess([], 0, b'', b'')]) as calls, \
+                    patch.object(legacy.urllib.request, 'urlopen',
+                        side_effect=AssertionError('No health sampling may stand in for request ownership')) as health:
+                smoke.cli({}, 'sync')
+                self.assertEqual(smoke.last_runtime_stop, 0)
+                self.assertNotIn('runtime_failure_evidence', smoke.report)
+                smoke.report['stage'] = 'historical_reverse_source_read'
+                with self.assertRaisesRegex(RuntimeError, '^cli_failed_show$'):
+                    smoke.cli({}, 'show', SECRET)
+                self.assertEqual([call.args[0][1:] for call in calls.call_args_list], [
+                    ['--direct', '--json', 'sync'], ['--runtime-internal', '--stop'],
+                    ['--direct', '--json', 'show', SECRET], ['--runtime-internal', '--stop']])
+                health.assert_not_called()
+            evidence = json.loads(report_path.read_text())['runtime_failure_evidence']
+            self.assertEqual(evidence['reason'], 'show_request_owner_not_captured')
+            self.assertFalse(evidence['request_bound'])
+            self.assertFalse(evidence['owner_sampled'])
+            self.assertEqual(evidence['liveness'], 'unknown')
+            self.assertNotIn('exit_code', evidence)
+            self.assertNotIn(SECRET, json.dumps(smoke.report))
             smoke.report = {}
             with patch.object(smoke, 'save', side_effect=OSError(SECRET)), \
                     patch.object(legacy.sys, 'stderr') as stderr:

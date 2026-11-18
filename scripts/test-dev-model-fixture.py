@@ -233,11 +233,19 @@ class ModelFixtureTests(unittest.TestCase):
             self.assertEqual(run.call_args_list[1].args[0],
                 [str(smoke.args.binary), "--runtime-internal", "--stop"])
             smoke.save.assert_called()
-            diagnostic = smoke.report["cli_failure"]["error"]
-            self.assertIn("No such file (os error 2)", diagnostic)
-            self.assertIn("[redacted]", diagnostic)
+            if filename == "dev-legacy-vault-smoke.py":
+                self.assertEqual(smoke.report["cli_failure"],
+                    {"exit_code": 1, "reason": "process_exit"})
+                self.assertFalse(smoke.report["runtime_failure_evidence"]["request_bound"])
+                self.assertEqual(smoke.report["runtime_failure_evidence"]["liveness"], "unknown")
+                self.assertNotIn("No such file", json.dumps(smoke.report))
+                self.assertNotIn("x" * 100, json.dumps(smoke.report))
+            else:
+                diagnostic = smoke.report["cli_failure"]["error"]
+                self.assertIn("No such file (os error 2)", diagnostic)
+                self.assertIn("[redacted]", diagnostic)
+                self.assertLessEqual(len(diagnostic), 1500)
             self.assertNotIn("private-", json.dumps(smoke.report))
-            self.assertLessEqual(len(diagnostic), 1500)
 
     def test_legacy_reporter_saves_bounded_redacted_failure(self):
         self.check_reporter_failure("dev-legacy-vault-smoke.py")
