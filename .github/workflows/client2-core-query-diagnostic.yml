@@ -97,15 +97,24 @@ jobs:
           assert.equal(run.repository.full_name,'risense-ai/respire-cli');assert.equal(run.head_repository.full_name,'risense-ai/respire-cli');
           assert.equal(run.workflow_id,wf.id);assert.equal(run.path,'.github/workflows/release.yml');
           assert.equal(run.event,'workflow_dispatch');assert.equal(run.head_branch,'main');assert.equal(run.head_sha,source.sha);
-          assert.equal(run.run_attempt,source.run_attempt);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+          assert.equal(run.run_attempt,source.run_attempt);
+          // This diagnostic can run alongside full acceptance; publication still requires the full producer to pass.
+          const target='x86_64-pc-windows-msvc';
+          const jobPages=JSON.parse(execFileSync('gh',['api','--paginate','--slurp',`repos/risense-ai/respire-cli/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=100`],{encoding:'utf8'}));
+          const jobs=jobPages.flatMap(page=>page.jobs).filter(job=>job.name===`validate / Release (${target})`);
+          assert.equal(jobs.length,1,'Require one exact Windows build job in the selected attempt');
+          const job=jobs[0];
+          assert.equal(job.run_id,source.run_id);assert.equal(job.run_attempt,source.run_attempt);assert.equal(job.head_sha,source.sha);
+          assert.equal(job.status,'completed');assert.equal(job.conclusion,'success');
           for(const path of ['runtime-pin.json','npm/artifact-manifest.json']) {
             const body=api(`repos/risense-ai/respire-cli/contents/${path}?ref=${source.sha}`);
             assert.deepEqual(JSON.parse(Buffer.from(body.content,'base64')),JSON.parse(readFileSync(path)),'Harness consumer contract differs from selected CLI source');
           }
           assert.match(e.CLI_ARTIFACT_ID,/^[1-9][0-9]*$/);assert.match(e.CLI_ARTIFACT_DIGEST,/^sha256:[a-f0-9]{64}$/);
-          const target='x86_64-pc-windows-msvc', artifact=api(`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}`);
+          const artifact=api(`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}`);
           assert.equal(artifact.name,`cli-release-${target}`);assert.equal(artifact.expired,false);
           assert.equal(artifact.workflow_run.id,source.run_id);assert.equal(artifact.workflow_run.head_sha,source.sha);assert.equal(artifact.digest,e.CLI_ARTIFACT_DIGEST);
+          assert.ok(Date.parse(artifact.created_at)>=Date.parse(job.started_at)&&Date.parse(artifact.created_at)<=Date.parse(job.completed_at),'Artifact must be uploaded within the successful selected-attempt build job');
           const root=join(e.RUNNER_TEMP,'core-query-assets');mkdirSync(root);mkdirSync(join(root,'cli'));mkdirSync(join(root,'runtime'));
           const zip=join(root,'cli.zip'), fd=openSync(zip,'wx');
           try{execFileSync('gh',['api',`repos/risense-ai/respire-cli/actions/artifacts/${e.CLI_ARTIFACT_ID}/zip`],{stdio:['ignore',fd,'inherit']});}finally{closeSync(fd);}
@@ -121,7 +130,7 @@ jobs:
           const sealed=JSON.parse(readFileSync(join(e.RUNNER_TEMP,'sealed-client2.json')));
           const proof={schema:1,mode:'core-query-diagnostic-inputs',diagnostic_only:true,full_passed:false,harness_sha:e.GITHUB_SHA,
             client2_source:sealed.source,client2_manifest_sha256:sealed.manifest_sha256,client2:sealed,cli_candidate:candidate,
-            cli_artifact:{id:artifact.id,digest:artifact.digest},cli_sha256:consumed.identity.cli_binary_sha256,
+            cli_artifact:{id:artifact.id,digest:artifact.digest},cli_build_job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,head_sha:job.head_sha,name:job.name,status:job.status,conclusion:job.conclusion,started_at:job.started_at,completed_at:job.completed_at},cli_sha256:consumed.identity.cli_binary_sha256,
             runtime_archive_sha256:consumed.identity.runtime_bundle_sha256,runtime_binary_sha256:consumed.identity.runtime_binary_sha256};
           writeFileSync(join(root,'input-proof.json'),JSON.stringify(proof,null,2));
           NODE
