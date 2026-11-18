@@ -1,5 +1,5 @@
 """Exercise actual-artifact upgrades for the selected critical or full gate."""
-import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
+import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile
 from concurrent.futures import ThreadPoolExecutor
 from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability, select_upgrade_sources
 from native_fixture_process import add_runtime_arguments, runtime_inputs
@@ -92,13 +92,15 @@ def verify_upgrade(source):
     if release['draft'] and args.draft_baseline_cache:
         assert not needed,'fixed draft cache missing or corrupt; authenticated download is isolated'
     if needed:
+        download_env=os.environ.copy()
+        download_env['GODEBUG']=(download_env.get('GODEBUG')+',' if download_env.get('GODEBUG') else '')+'http2client=0'
         if release['draft']:
             for name in needed:
                 with (folder/name).open('wb') as output:
                     subprocess.run(['gh','api',f"repos/risense-ai/respire-cli/releases/assets/{assets[name]['id']}",
-                        '-H','Accept: application/octet-stream'],stdout=output,check=True,timeout=180)
+                        '-H','Accept: application/octet-stream'],stdout=output,check=True,timeout=180,env=download_env)
         else:
-            subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
+            subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180,env=download_env)
     for name in names:
         digest=assets[name].get('digest')
         assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name

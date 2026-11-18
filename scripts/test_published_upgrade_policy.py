@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -94,7 +95,8 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def run_fixture(self, profile=None, missing_latest=False, registry=None, empty_checks=False,
                     checks_transform=None, standalone=False, standalone_mode="published-assets",
-                    cache_draft=False, download_only=False, corrupt_draft=False, missing_checkpoint=False, diagnostic_sources=()):
+                    cache_draft=False, download_only=False, corrupt_draft=False, missing_checkpoint=False, diagnostic_sources=(),
+                    download_error=None):
         # Execute the real orchestration with local artifact bytes and a fake upgrade child.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -127,6 +129,8 @@ class UpgradeProfileTest(unittest.TestCase):
                     asset.update(digest="sha256:" + hashlib.sha256(value).hexdigest(), id=len(files))
                     files[(tag, asset["name"])] = value
             def output(command, **kwargs):
+                self.assertNotIn("env", kwargs)
+                self.assertEqual(dict(os.environ), env)
                 if command[0] == "npm":
                     return json.dumps(registry if registry is not None else ["1.0.12", "1.0.18"])
                 if command[-1].endswith("/403872621"):
@@ -135,7 +139,14 @@ class UpgradeProfileTest(unittest.TestCase):
                 return json.dumps(releases)
             upgraded = []
             def run(command, **kwargs):
+                self.assertEqual(dict(os.environ), env)
                 if command[0] == "gh":
+                    self.assertIs(kwargs["check"], True)
+                    self.assertEqual(kwargs["timeout"], 180)
+                    self.assertEqual(kwargs["env"], {**env, "GODEBUG":
+                        (env.get("GODEBUG") + "," if env.get("GODEBUG") else "") + "http2client=0"})
+                    if download_error is not None:
+                        raise download_error
                     if command[1] == "api":
                         asset_id = int(command[2].rsplit("/", 1)[1])
                         kwargs["stdout"].write(next(value for release in releases for asset in release["assets"]
@@ -147,6 +158,7 @@ class UpgradeProfileTest(unittest.TestCase):
                             if source == tag:
                                 (folder / name).write_bytes(value)
                 else:
+                    self.assertNotIn("env", kwargs)
                     self.assertFalse(download_only, "download-only must never execute a product fixture")
                     if standalone:
                         self.assertNotIn('--expect-supervised-worker', command)
@@ -293,8 +305,22 @@ class UpgradeProfileTest(unittest.TestCase):
         failed_upgrades, failed_report = self.run_fixture(cache_draft=True, corrupt_draft=True)
         self.assertNotIn("v1.0.10", failed_upgrades)
         self.assertFalse(failed_report["passed"])
-        downloaded_upgrades, _ = self.run_fixture(download_only=True)
-        self.assertEqual(downloaded_upgrades, [])
+        for godebug in [None, "", "gctrace=1,http2client=1"]:
+            with self.subTest(godebug=godebug), patch.dict(os.environ):
+                if godebug is None:
+                    os.environ.pop("GODEBUG", None)
+                else:
+                    os.environ["GODEBUG"] = godebug
+                self.run_fixture()
+                downloaded_upgrades, _ = self.run_fixture(download_only=True)
+                self.assertEqual(downloaded_upgrades, [])
+                self.assertEqual(os.environ.get("GODEBUG"), godebug)
+        for download_only in [False, True]:
+            for error in [subprocess.CalledProcessError(1, ["gh"]), subprocess.TimeoutExpired(["gh"], 180)]:
+                with self.subTest(download_only=download_only, error=type(error).__name__):
+                    with self.assertRaises(type(error)) as raised:
+                        self.run_fixture(download_only=download_only, download_error=error)
+                    self.assertIs(raised.exception, error)
 
     def test_critical_missing_latest_fails_without_running_older(self):
         upgraded, report = self.run_fixture("critical", missing_latest=True)
