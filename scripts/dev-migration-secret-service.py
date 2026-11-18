@@ -63,6 +63,24 @@ def provider_abort_type(stderr, exit_code):
     return "unknown"
 
 
+def provider_abort_location(stderr, exit_code):
+    if exit_code != -6:
+        return "unknown"
+    # Only the static assertion header is public; directories and expressions stay private.
+    match = re.search(
+        rb"(?m)^(?:Bail out! )?(?:(?:Gkm|Gkd|Egg|GLib|GLib-GObject|GLib-GIO):)?ERROR:"
+        rb"(?:[^\r\n:]+/)?"
+        rb"(?P<file>(?:(?:gkd|gkm|egg)-[a-z][a-z0-9-]*|"
+        rb"g(?:main|thread|variant|object|signal|type|mem|slice|messages|utils|hash|array|list|"
+        rb"slist|closure|error|quark|atomic|strfuncs))\.c):"
+        rb"(?P<line>[1-9][0-9]*):(?P<function>[A-Za-z_][A-Za-z0-9_]*): "
+        rb"assertion failed(?:[: ][^\r\n]*)?\r?$", stderr)
+    if match is None:
+        return "unknown"
+    return {"file": match["file"].decode("ascii"), "line": int(match["line"]),
+            "function": match["function"].decode("ascii")}
+
+
 class SecretServiceKeys(_base.TrackedKeys):
     name = "linux-secret-service"
     credential_backend = "secret_service"
@@ -374,7 +392,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
         report["provider_daemon"] = {"started": daemon_started,
                                      "exit_code_at_cleanup_start": daemon_exit_code,
-                                     "abort_type": "unknown"}
+                                     "abort_type": "unknown", "abort_location": "unknown"}
         report["provider_schema_baseline"] = {
             "scope": "verified_registration_pairs_and_verified_recovered_super_only",
             "registered_entries": len(self.current_target_entries),
@@ -436,8 +454,9 @@ class SecretServiceKeys(_base.TrackedKeys):
                 report["remaining_entries"].append({"code": "fixture_daemon_cleanup_failed"})
         if self.daemon_stderr is not None:
             try:
-                report["provider_daemon"]["abort_type"] = provider_abort_type(
-                    self.daemon_stderr.read_bytes(), daemon_exit_code)
+                stderr = self.daemon_stderr.read_bytes()
+                report["provider_daemon"]["abort_type"] = provider_abort_type(stderr, daemon_exit_code)
+                report["provider_daemon"]["abort_location"] = provider_abort_location(stderr, daemon_exit_code)
             except OSError:
                 report["passed"] = False
                 report["remaining_entries"].append({"code": "fixture_provider_diagnostic_read_failed"})
