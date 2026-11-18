@@ -541,6 +541,7 @@ for binary in BINARIES:
             assert installed is not None, 'database upgrade requires the verified managed or published Runtime artifact'
             args.runtime_binary = installed
             assert {str(profile):snapshot(profile) for profile in [main,alternate]} == legacy_data, 'Runtime installation changed old account data'
+            runtime_installed_after_legacy_data = True
             runtime_artifact_reused = True
         if args.seed_binary:
             # This gate tests historical databases; fixture-owned custody is explicit
