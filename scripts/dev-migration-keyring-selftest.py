@@ -54,6 +54,22 @@ def main():
         manager.configure_env({"HOME": str(second_home)})
         report["cases"]["independent_home_configured"] = {"passed": True}
         roundtrips(manager, report["cases"])
+        if manager.name == "linux-secret-service":
+            manager.verify_owner()
+            backend.require(not list(manager.collection.get_all_items()), "private_business_fixture_not_empty")
+            slots = ["super"] * 20 + ["pass"] * 15 + ["key-control"] * 2 + ["login-control"] * 2
+            for slot in slots:
+                attributes = dict(manager.attributes("rsrs", slot + ":login-" + secrets.token_hex(16)),
+                    **{"xdg:schema": "org.freedesktop.Secret.Generic"})
+                item = manager.collection.create_item("Synthetic owned business credential", attributes,
+                    secrets.token_bytes(32), replace=False)
+                backend.require(item.get_attributes() == attributes, "private_business_fixture_attributes_changed")
+            manager.cleanup_business_entries()
+            report["business_credential_cleanup"] = manager.business_cleanup
+            report["business_credential_classification"] = manager.business_classification
+            backend.require(manager.business_cleanup == {"passed": True, "stage": "complete",
+                "observed_entries": 39, "validated_entries": 39, "deleted_entries": 39, "remaining_entries": 0},
+                "private_business_cleanup_incomplete")
         report["status"] = "passed"
     except Exception as error:
         report.update(status="failed", failure_code=str(error) if isinstance(error, RuntimeError) else type(error).__name__)

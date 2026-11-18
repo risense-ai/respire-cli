@@ -149,7 +149,7 @@ def self_test():
     items = []
     keys.verify_owner = lambda: None
     keys.collection = SimpleNamespace(get_all_items=lambda: list(items))
-    for slot in ("super", "pass", "totp", "key-control"):
+    for slot in ("super", "pass", "totp", "key-control", "login-control"):
         item = SimpleNamespace(get_attributes=lambda slot=slot: {
             "service": "rsrs", "target": "default", "application": "rust-keyring",
             "username": slot + ":login-" + "a" * 32})
@@ -158,8 +158,11 @@ def self_test():
     keys.cleanup_business_entries()
     assert not items
     assert keys.business_cleanup == {"passed": True, "stage": "complete",
-        "observed_entries": 4, "validated_entries": 4, "deleted_entries": 4, "remaining_entries": 0}
+        "observed_entries": 5, "validated_entries": 5, "deleted_entries": 5, "remaining_entries": 0}
     assert keys.business_classification["known_prefix_counts"]["key-control:"] == 1
+    assert keys.business_classification["known_prefix_counts"]["login-control:"] == 1
+    assert keys.business_classification["owned_entries"] == 5
+    assert keys.business_classification["unowned_entries"] == 0
     items.append(SimpleNamespace(get_attributes=lambda: {"service": "unknown"}))
     try:
         keys.cleanup_business_entries()
@@ -171,7 +174,11 @@ def self_test():
     else:
         raise AssertionError("unknown credential accepted")
 
-    for username, service in (("key-control:legacy-" + "a" * 64, "rsrs"),
+    for username, service in (("login-control:legacy-" + "a" * 64, "rsrs"),
+            ("login-control:login-" + "a" * 31, "rsrs"),
+            ("login-control:login-" + "a" * 32 + ".backup", "rsrs"),
+            ("login-control:login-" + "a" * 32, "foreign"),
+            ("key-control:legacy-" + "a" * 64, "rsrs"),
             ("key-control:login-" + "a" * 31, "rsrs"),
             ("key-control:login-" + "a" * 32 + ".backup", "rsrs"),
             ("key-control:login-" + "a" * 32, "foreign")):
@@ -186,6 +193,24 @@ def self_test():
             assert username not in json.dumps(keys.business_cleanup)
         else:
             raise AssertionError("foreign or malformed key-control accepted")
+
+    items.clear()
+    for index in range(39):
+        username = ("unknown:" if index in (27, 38) else "super:") + "login-" + f"{index:032x}"
+        item = SimpleNamespace(get_attributes=lambda username=username: {
+            "service": "rsrs", "target": "default", "application": "rust-keyring", "username": username})
+        item.delete = lambda item=item: items.remove(item)
+        items.append(item)
+    try:
+        keys.cleanup_business_entries()
+    except RuntimeError as error:
+        assert str(error) == "unexpected_private_credential"
+        assert len(items) == 39 and keys.business_cleanup["deleted_entries"] == 0
+        assert keys.business_cleanup["validated_entries"] == 27
+        assert keys.business_classification["owned_entries"] == 37
+        assert keys.business_classification["unowned_entries"] == 2
+    else:
+        raise AssertionError("mixed unknown collection was deleted")
 
     class FakeManager:
         def __init__(self, cleanup_ok=True):
