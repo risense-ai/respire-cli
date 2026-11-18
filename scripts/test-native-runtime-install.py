@@ -30,7 +30,7 @@ class FixtureInstallationTests(unittest.TestCase):
                          [{'os': 'macos-15', 'target': 'aarch64-apple-darwin'}])
         name = 'Verify OS autostart registration from verified release bytes'
         step = workflow.split('      - name: ' + name + '\n')[1].split('\n      - ')[0]
-        self.assertIn("if: inputs.validation_profile == 'full'\n", step)
+        self.assertIn("if: inputs.validation_profile == 'full' && !inputs.musl_source_recovery\n", step)
         self.assertNotIn('inputs.artifact_source', step)  # Candidate and published full use the same verified archive.
         self.assertIn('set -euo pipefail', step)
         self.assertIn('unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN', step)
