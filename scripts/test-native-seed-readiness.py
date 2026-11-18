@@ -69,11 +69,15 @@ class SeedReadinessTests(unittest.TestCase):
         self.assertIn("result['status'] == 'ok'", statements[orphan + 5])
         return state
 
-    def exercise(self, directory, *, historical=False, runtime=True, artifacts='ready', ready_after=2):
+    def exercise(self, directory, *, historical=False, runtime=True, artifacts='ready', ready_after=2,
+                 seed_version='1.0.7', occupied=False):
         main = pathlib.Path(directory) / 'main'
         alternate = pathlib.Path(directory) / 'alternate'
         main.mkdir(); alternate.mkdir()
+        if occupied:
+            (main / 'rsrs.db').touch()
         events = []
+        self.legacy_commands = []
         state = {'profile': None, 'alive': False, 'polls': 0, 'clock': 0}
 
         def select(profile):
@@ -108,6 +112,10 @@ class SeedReadinessTests(unittest.TestCase):
                 self.assertTrue(historical)
                 self.assertIn('--direct', command)
                 events.append(('legacy', state['profile'].name))
+                self.legacy_commands.append((state['profile'].name, tuple(command[3:])))
+                if command[-1] == '--version':
+                    return SimpleNamespace(returncode=0,
+                                           stdout=json.dumps({'summary': {'version': seed_version}}).encode('utf-8'), stderr=b'')
             return SimpleNamespace(returncode=0, stdout=b'{"summary":{"id":"tombstone"}}', stderr=b'')
 
         def sleep(seconds):
@@ -160,10 +168,29 @@ class SeedReadinessTests(unittest.TestCase):
                 self.assertFalse(any(event == 'stop' for event, _ in self.events))
 
     def test_historical_seeding_stays_direct_without_new_readiness_calls(self):
+        for version in ('1.0.7', '1.0.8', '1.0.9', '1.0.21', '1.0.20-dev.1'):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                self.exercise(directory, historical=True, seed_version=version)
+                self.assertEqual([command[:3] for _, command in self.legacy_commands],
+                                 [('--version',), ('model', 'activate', 'm3'), ('remember', 'Real account return fixture main', '--title'),
+                                  ('remember', 'Historical encrypted deletion main', '--title'), ('forget', 'tombstone'),
+                                  ('--version',), ('model', 'activate', 'm3'), ('remember', 'Real account return fixture alternate', '--title'),
+                                  ('remember', 'Historical encrypted deletion alternate', '--title'), ('forget', 'tombstone')])
+        for version in ('1.0.11-dev.1', '1.0.11', '1.0.12', '1.0.15', '1.0.16',
+                        '1.0.17-dev.6', '1.0.18', '1.0.19', '1.0.20'):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                events = self.exercise(directory, historical=True, seed_version=version)
+                self.assertEqual(events, [(event, profile) for profile in ('main', 'alternate')
+                                         for event in ('select', 'legacy', 'legacy', 'legacy', 'legacy')])
+                self.assertFalse(any(command[:2] == ('model', 'activate') for _, command in self.legacy_commands))
+                self.assertTrue(all('--importance' in command and 'important' in command and '--force' in command
+                                    for _, command in self.legacy_commands if command[0] == 'remember'))
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(self.exercise(directory, historical=True),
-                             [(event, profile) for profile in ('main', 'alternate')
-                              for event in ('select', 'legacy', 'legacy', 'legacy', 'legacy')])
+            with self.assertRaisesRegex(AssertionError, 'historical seed profile is not empty'):
+                self.exercise(directory, historical=True, seed_version='1.0.20', occupied=True)
+            self.assertEqual(self.legacy_commands, [('main', ('--version',))])
+        with tempfile.TemporaryDirectory() as directory:
+            self.exercise(directory, historical=True)
             old_host = next(node for node in ast.walk(TREE) if isinstance(node, ast.If)
                             and any(isinstance(child, ast.Assign) and any(
                                 isinstance(target, ast.Name) and target.id == 'web_help'
