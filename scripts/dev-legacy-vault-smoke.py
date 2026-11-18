@@ -40,6 +40,11 @@ def same_scope_path(value, expected):
         and canonical_scope_path(value) == canonical_scope_path(expected))
 
 
+def readonly_database_uri(path):
+    # Path.as_uri treats the Windows verbatim prefix as an SQLite URI authority.
+    return 'file:' + urllib.request.pathname2url(str(path.resolve(strict=True))) + '?mode=ro'
+
+
 def digest(path):
     value = hashlib.sha256()
     with path.open("rb") as stream:
@@ -424,7 +429,7 @@ class Smoke:
         upgraded_env = dict(env, RSRS_DATA_DIR=str(destination))
         install_published_runtime(self.args.binary, upgraded_env)
         self.read_entry(upgraded_env, active, plaintext)
-        with sqlite3.connect((destination / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(destination / "rsrs.db"), uri=True) as db:
             converted = db.execute("SELECT id,ciphertext,nonce,deleted FROM memories WHERE id IN (?,?) ORDER BY id", (active, deleted)).fetchall()
         require(len(converted) == 2 and all(row[1].startswith(PREFIX)
             and (decrypt_content(urk, row[1], row[2]), row[3]) == payloads[row[0]] for row in converted),
@@ -441,11 +446,11 @@ class Smoke:
         self.save()
         require(self.cli(final_env, "sync").get("status") == "ok", "fresh_device_sync_not_completed")
         self.read_entry(final_env, active, plaintext)
-        with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(self.profile(final_env) / "rsrs.db"), uri=True) as db:
             remote = db.execute("SELECT id,ciphertext,nonce,deleted FROM memories WHERE id IN (?,?) ORDER BY id", (active, deleted)).fetchall()
         expected = {row[0]: row for row in converted}
         observed = {row[0]: row for row in remote}
-        with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(self.profile(final_env) / "rsrs.db"), uri=True) as db:
             heads = {memory_id: json.loads(wire) for memory_id, wire in db.execute(
                 "SELECT id,wire FROM sync_remote_heads WHERE id IN (?,?)", (active, deleted))}
         readback = {}
@@ -534,7 +539,7 @@ class Smoke:
         def rows():
             require(self.profile(env).resolve() == source
                 and (database.stat().st_dev, database.stat().st_ino) == identity, "historical_database_replaced")
-            with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            with sqlite3.connect(readonly_database_uri(database), uri=True) as db:
                 require(db.execute("PRAGMA integrity_check").fetchall() == [("ok",)], "historical_database_integrity_failed")
                 return (db.execute("SELECT id,ciphertext,nonce,dirty,deleted FROM memories ORDER BY id").fetchall(),
                         db.execute("SELECT * FROM sync_outbox ORDER BY seq").fetchall())
@@ -624,7 +629,7 @@ class Smoke:
         for memory_id, plaintext, _, deleted in expected.values():
             if not deleted:
                 self.read_entry(peer, memory_id, json.loads(plaintext)["content"])
-        with sqlite3.connect((self.profile(peer) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(self.profile(peer) / "rsrs.db"), uri=True) as db:
             observed = {row[0]: row for row in db.execute("SELECT id,ciphertext,nonce,deleted FROM memories")}
             heads = {memory_id: json.loads(wire) for memory_id, wire in db.execute("SELECT id,wire FROM sync_remote_heads")}
         for memory_id, plaintext, _, deleted in expected.values():
@@ -652,7 +657,7 @@ class Smoke:
                 require(row[1:3] == ("", ""), "historical_source_tombstone_not_canonical")
             else:
                 require(decrypt_content(expected_urk, row[1], row[2]) == plaintext, "historical_source_pull_changed_plaintext")
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(database), uri=True) as db:
             require(db.execute("SELECT count(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] == 0
                 and db.execute("SELECT count(*) FROM memories WHERE dirty<>0").fetchone()[0] == 0,
                 "historical_sync_unacknowledged_work")
@@ -786,7 +791,7 @@ class Smoke:
         require(upgraded["vault_version"] == version and upgraded["wrapped_urk"].startswith(PREFIX),
             "migration_changed_original_factors")
         self.read_entry(upgraded_env, memory_id, plaintext)
-        with sqlite3.connect((destination / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(destination / "rsrs.db"), uri=True) as db:
             converted = db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone()
         require(converted[0].startswith(PREFIX) and converted != (ciphertext, item_nonce)
             and decrypt_content(urk, *converted) == payload, "full_migration_not_reencrypted")
@@ -841,12 +846,12 @@ class Smoke:
             new_plaintext = "Original credentials still permit new encrypted memory writes after authentication salt migration."
             self.cli(final_env, "remember", new_plaintext, "--title", new_title, "--force", "--importance", "important")
             self.cli(final_env, "sync")
-            with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            with sqlite3.connect(readonly_database_uri(self.profile(final_env) / "rsrs.db"), uri=True) as db:
                 written = db.execute("SELECT id,ciphertext,nonce FROM memories WHERE title=? AND deleted=0", (new_title,)).fetchall()
             require(len(written) == 1 and written[0][1].startswith(PREFIX), "post_migration_write_missing")
             self.read_entry(final_env, written[0][0], new_plaintext)
             require(new_plaintext.encode() in decrypt_content(urk, written[0][1], written[0][2]), "post_migration_write_wrong_key")
-        with sqlite3.connect((self.profile(final_env) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        with sqlite3.connect(readonly_database_uri(self.profile(final_env) / "rsrs.db"), uri=True) as db:
             require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone() == converted,
                 "new_device_ciphertext_differs")
         if version == 1:
