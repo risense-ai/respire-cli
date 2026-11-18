@@ -1808,6 +1808,7 @@ fn run(args: Cli) -> Result<()> {
         );
         let _task = respire_commands::model_progress::TaskScope::new(args.model_task_id.clone());
         let report = respire_commands::model_granite::install_granite(model, mirror.as_deref())?;
+        let configuration = report.configuration()?;
         let result = ResultEnvelope::new(
             "model install-granite",
             OutputStatus::Ok,
@@ -1817,11 +1818,12 @@ fn run(args: Cli) -> Result<()> {
                 "model": model,
                 "skipped": report.skipped,
                 "activated": false,
+                "configuration": configuration,
             }),
             vec![OutputItem::new(
                 "model",
                 OutputStatus::Ok,
-                "Granite profile ready; it is not activated until you run rsrs model switch",
+                "Granite files verified. Use the JSON configuration with rsrs model configure, then run rsrs model switch.",
             )],
         );
         return emit_result(result);
