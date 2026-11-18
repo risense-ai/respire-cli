@@ -69,7 +69,7 @@ class DiagnosticsTests(unittest.TestCase):
                         self.assertNotIn('exit_code', smoke.report['runtime_failure_evidence'])
                         if failure == 'exit':
                             self.assertEqual(smoke.report['cli_failure'],
-                                {'exit_code': -6, 'reason': 'process_exit'})
+                                {'exit_code': -6, 'reason': 'process_exit', 'status': 'error'})
                         self.assertEqual(smoke.report['runtime_stop']['passed'], stop == 0)
                         safe_report = {key: value for key, value in smoke.report.items() if key != 'stage'}
                         self.assertNotIn(SECRET, json.dumps(safe_report))
@@ -124,11 +124,65 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertEqual(smoke.cli({}, 'sync'), {'status': 'ok'})
             self.assertNotIn('runtime_failure_evidence', smoke.report)
 
+            smoke.keys = types.SimpleNamespace(daemon=types.SimpleNamespace(poll=lambda: None))
+            for reason, error_type, code in (('runtime_error', 'runtime', -6),
+                    (SECRET, SECRET, SECRET)):
+                smoke.report = {'stage': 'historical_same_key_recovery'}
+                frame = {'envelope': {'status': 'error', 'summary': {'reason': reason},
+                    'details': {'error_type': error_type, 'code': code}, 'errors': [SECRET]}}
+                with patch.object(legacy.subprocess, 'run', side_effect=[
+                        subprocess.CompletedProcess([], 1, json.dumps(frame).encode(), SECRET.encode()),
+                        subprocess.CompletedProcess([], 0, b'', b'')]):
+                    with self.assertRaisesRegex(RuntimeError, '^cli_failed_show$'):
+                        smoke.cli({}, 'show', SECRET)
+                self.assertEqual(smoke.report['cli_failure']['exit_code'], 1)
+                self.assertNotIn(SECRET, json.dumps(smoke.report))
+                self.assertEqual(smoke.report['provider_observation']['before']['running'], True)
+                self.assertEqual(smoke.report['provider_observation']['after']['running'], True)
+                self.assertEqual(smoke.report['cli_failure'].get('code'), -6 if type(code) is int else None)
+            smoke.report = {'stage': 'historical_same_key_recovery'}
+            smoke.keys.daemon.poll = lambda: -6
+            with patch.object(legacy.subprocess, 'run', return_value=
+                    subprocess.CompletedProcess([], 0, b'', b'')) as calls:
+                with self.assertRaisesRegex(RuntimeError, '^historical_provider_owner_exited$'):
+                    smoke.cli({}, 'show', SECRET)
+                self.assertEqual(calls.call_count, 1)  # Cleanup stop only, no business replay.
+            self.assertEqual(smoke.report['provider_observation']['before']['exit_code'], -6)
+            self.assertEqual(smoke.report['provider_observation']['after']['exit_code'], -6)
+            stderr_path = smoke.root / 'provider.stderr'
+            smoke.keys.daemon_stderr = stderr_path
+            for data in (b'', SECRET.encode(), None):
+                if data is None:
+                    stderr_path.unlink()
+                else:
+                    stderr_path.write_bytes(data)
+                smoke.historical_provider_state('stop_before')
+                sample = smoke.report['provider_observation']['stop_before']
+                self.assertEqual(sample['stderr_empty'], None if data is None else not data)
+                self.assertLessEqual(sample['sample_started_ns'], sample['sample_completed_ns'])
+                self.assertEqual(sample['stage'], 'historical_same_key_recovery')
+                self.assertNotIn(SECRET, json.dumps(sample))
+            smoke.report = {'stage': 'historical_same_key_recovery'}
+            smoke.keys.daemon.poll = iter([None, -6, -6, -6]).__next__
+            with patch.object(legacy.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 1, b'{"envelope":{"status":"error"}}', SECRET.encode()),
+                    subprocess.CompletedProcess([], 0, b'', b'')]):
+                with self.assertRaisesRegex(RuntimeError, '^cli_failed_fivekeys$'):
+                    smoke.cli({}, 'fivekeys', host_request={'method': 'auth.recover'})
+            self.assertEqual(smoke.report['cli_failure']['exit_code'], 1)
+            self.assertEqual(smoke.report['provider_observation']['after']['exit_code'], -6)
+            self.assertEqual(smoke.report['provider_observation']['stop_before']['exit_code'], -6)
+
     def test_legacy_reverse_stage_order(self):
         tree = ast.parse(Path(__file__).with_name('dev-legacy-vault-smoke.py').read_text(encoding='utf-8'))
         smoke = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Smoke')
         sync = next(node for node in smoke.body if isinstance(node, ast.FunctionDef)
             and node.name == 'historical_database_sync')
+        historical_source = ast.unparse(sync)
+        self.assertIn("'auth.recover'", historical_source)
+        self.assertIn('recovery_operation=operation', historical_source)
+        self.assertNotIn('prepare_historical_v4_super', historical_source)
+        self.assertNotIn('write_text', historical_source)
         expected = iter((('historical_reverse_peer_push', 'peer', 'sync'),
             ('historical_reverse_source_pull', 'env', 'sync'),
             ('historical_reverse_source_read', 'env', None)))
@@ -149,6 +203,16 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertEqual(call.args[1].value, command)
             observed.append(stage)
         self.assertEqual(len(observed), 3)
+        parent = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text(encoding='utf-8'))
+        guard = next(node for node in ast.walk(parent) if isinstance(node, ast.If)
+            and 'original_provider_not_running_at_cleanup' in ast.unparse(node)
+            and isinstance(node.test, ast.BoolOp) and ast.unparse(node.test).startswith('network_smoke is not None'))
+        guard_code = compile(ast.Module(body=[guard], type_ignores=[]), '<historical-provider-cleanup>', 'exec')
+        for exit_code in (None, -6):
+            reports = [{'native_credential_cleanup': {'passed': True}}]
+            exec(guard_code, dict(network_smoke=object(), reports=reports,
+                provider=dict(started=True, exit_code_at_cleanup_start=exit_code)))
+            self.assertEqual(reports[0]['native_credential_cleanup']['passed'], exit_code is None)
 
     def test_exit_redaction(self):
         tree = ast.parse(Path(__file__).with_name('dev-ai-inject-smoke.py').read_text(encoding='utf-8'))

@@ -16,6 +16,7 @@ import sqlite3
 from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -163,9 +164,35 @@ class Smoke:
         diagnostic = re.sub(r"(?i)\b(?:A3-)?[a-f0-9]{24,}\b", "[redacted]", diagnostic)
         return diagnostic[:1500] or "no structured error"
 
+    def historical_provider_state(self, when):
+        if not self.report.get("stage", "").startswith("historical_"):
+            return
+        keys = getattr(self, "keys", None)
+        if keys is None or not hasattr(keys, "daemon"):
+            return
+        daemon = keys.daemon
+        started = time.monotonic_ns()
+        code = daemon.poll() if daemon is not None else None
+        stderr_path = getattr(keys, "daemon_stderr", None)
+        try:
+            stderr_empty = stderr_path.stat().st_size == 0 if stderr_path is not None else None
+        except OSError:
+            stderr_empty = None
+        self.report.setdefault("provider_observation", {})[when] = {
+            "original_handle_available": daemon is not None,
+            "running": daemon is not None and code is None, "exit_code": code,
+            "stderr_empty": stderr_empty, "stage": self.report["stage"] if self.report["stage"] in (
+                "historical_same_key_recovery", "historical_existing_keys_register", "historical_source_push",
+                "historical_reverse_peer_push", "historical_reverse_source_pull", "historical_reverse_source_read")
+                else "historical_other",
+            "sample_started_ns": started, "sample_completed_ns": time.monotonic_ns()}
+
     def cli(self, env, *args, timeout=180, prompts=None, host_request=None):
         business_failed = False
         try:
+            self.historical_provider_state("before")
+            provider = self.report.get("provider_observation", {}).get("before")
+            require(provider is None or provider["running"], "historical_provider_owner_exited")
             if host_request is not None:
                 output = subprocess.run([str(self.args.binary), "--json", "--host-rpc-stdio"],
                     input=json.dumps(host_request).encode(), cwd=self.root, env=env, capture_output=True, timeout=timeout)
@@ -173,10 +200,29 @@ class Smoke:
                 argv = [str(self.args.binary), "--direct", "--json", *args]
                 output = run_hidden(argv, prompts=prompts, cwd=self.root, env=env, timeout=timeout) if prompts is not None else subprocess.run(
                     argv, cwd=self.root, env=env, capture_output=True, timeout=timeout)
+            self.historical_provider_state("after")
             if output.returncode != 0:
                 self.report["cli_failure"] = {"exit_code": output.returncode,
                     "reason": "process_exit"}
+                try:
+                    frame = json.loads(output.stdout)
+                    envelope = frame.get("envelope", frame) if isinstance(frame, dict) else {}
+                    for field, value, allowed in (
+                        ("status", envelope.get("status"), ("ok", "error", "failed")),
+                        ("structured_reason", envelope.get("summary", {}).get("reason"),
+                         ("runtime_error", "invalid_input", "rpc_error", "request_outcome_unknown")),
+                        ("error_type", envelope.get("details", {}).get("error_type"),
+                         ("runtime", "input", "user", "rpc", "validation", "outcome_unknown"))):
+                        if isinstance(value, str) and value in allowed:
+                            self.report["cli_failure"][field] = value
+                    code = envelope.get("details", {}).get("code")
+                    if type(code) is int:
+                        self.report["cli_failure"]["code"] = code
+                except (ValueError, UnicodeError, AttributeError, TypeError):
+                    self.report["cli_failure"]["structured_error"] = "unavailable"
                 raise RuntimeError("cli_failed_" + args[0])
+            provider = self.report.get("provider_observation", {}).get("after")
+            require(provider is None or provider["running"], "historical_provider_owner_exited")
             try:
                 value = json.loads(output.stdout)
             except (ValueError, UnicodeError):
@@ -191,12 +237,14 @@ class Smoke:
             return value
         except Exception:
             business_failed = True
+            self.historical_provider_state("after")
             self.record_runtime_failure()
             raise
         finally:
             # Login and automatic indexing can start this fixture's runtime.
             # Release it before subsequent direct database consumers.
             try:
+                self.historical_provider_state("stop_before")
                 self.report["runtime_stop"] = {"passed": False}
                 stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
                     cwd=self.root, env=env, capture_output=True, timeout=60)
@@ -588,6 +636,10 @@ class Smoke:
             require((memory_id, decrypt_content(expected_urk, ciphertext, nonce), dirty, deleted) == expected[memory_id],
                     "historical_sync_original_key_mismatch")
         self.diagnostic_secrets.update((code, expected_urk.hex()))
+        # Current public recovery establishes a valid unbound identity around the known original URK.
+        # It is preparation by the current host, not legacy authentication compatibility evidence.
+        self.report["identity_preparation"] = {"actor": "current-host", "method": "auth.recover",
+            "synthetic_current_v4_wrap": True, "legacy_authentication_compatibility": False}
         self.report["stage"] = "historical_same_key_recovery"
         self.save()
         self.cli(env, "logout", "--full")
