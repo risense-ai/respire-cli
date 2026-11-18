@@ -20,9 +20,13 @@ export function validateCandidate(candidate, env=process.env) {
   for(const key of ['run_id','run_attempt'])assert.ok(Number.isSafeInteger(candidate.source[key])&&candidate.source[key]>0);
   assert.equal(candidate.source.sha,env.CLI_SHA);
   assert.equal(candidate.source.version,env.CLI_VERSION);
-  assert.equal(candidate.source.run_id,Number(env.GITHUB_RUN_ID));
-  assert.equal(candidate.source.run_attempt,Number(env.GITHUB_RUN_ATTEMPT));
-  assert.equal(candidate.source.sha,env.GITHUB_SHA,'Candidates must use the exact main harness source');
+  assert.equal(candidate.source.run_id,Number(env.CLI_PRODUCER_RUN_ID || env.GITHUB_RUN_ID));
+  assert.equal(candidate.source.run_attempt,Number(env.CLI_PRODUCER_ATTEMPT || env.GITHUB_RUN_ATTEMPT));
+  if(env.CLI_PRODUCER_RUN_ID){
+    assert.equal(env.GITHUB_REF,'refs/heads/main');
+    assert.equal(env.GITHUB_EVENT_NAME,'workflow_dispatch');
+    assert.match(env.GITHUB_SHA,/^[a-f0-9]{40}$/);
+  }else assert.equal(candidate.source.sha,env.GITHUB_SHA,'Candidates must use the exact main harness source');
   assert.match(candidate.client2.release,/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/);
   assert.match(candidate.client2.source_sha,/^[a-f0-9]{40}$/);
   const runtime=candidate.runtime;
@@ -82,14 +86,15 @@ export async function consumeCandidate(source,destination,target) {
   }
   return receipt;
 }
-export function completeCandidate(candidate,assets,directory,jobs,source) {
-  validateCandidate(candidate);
+export function completeCandidate(candidate,assets,directory,jobs,source,options={}) {
+  validateCandidate(candidate,options.env || process.env);
   assert.equal(candidate.source.sha,source.sha);assert.equal(candidate.source.version,source.version);
-  assert.equal(candidate.source.run_id,Number(source.run_id));assert.equal(candidate.source.run_attempt,Number(source.run_attempt));
+  const producer=source.producer || source;
+  assert.equal(candidate.source.run_id,Number(producer.run_id));assert.equal(candidate.source.run_attempt,Number(producer.run_attempt));
   const spec={runtime:candidate.runtime,cli:{repository:source.repository,source_sha:source.sha,version:source.version,
-    producer:{run_id:Number(source.run_id),run_attempt:Number(source.run_attempt)},assets:assets.map(({file,...a})=>({name:file,...a}))}};
+    producer:{run_id:Number(producer.run_id),run_attempt:Number(producer.run_attempt)},assets:assets.map(({file,...a})=>({name:file,...a}))}};
   const result=validatePublishedFull(spec,targets(),candidateHash(candidate),directory,jobs,
-    {sha:source.sha,run_id:Number(source.run_id),run_attempt:Number(source.run_attempt)},{candidate});
+    {sha:source.workflow_head_sha || source.sha,run_id:Number(source.run_id),run_attempt:Number(source.run_attempt)},{candidate,...options});
   assert.equal(result.full_passed,true);
   return result;
 }

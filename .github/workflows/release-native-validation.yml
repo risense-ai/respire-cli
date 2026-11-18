@@ -28,6 +28,19 @@ on:
       producer_prefix:
         default: ''
         type: string
+      recovery_run:
+        description: Original frozen producer; selects only the complete Windows x64 native scope
+        default: ''
+        type: string
+      recovery_attempt:
+        default: ''
+        type: string
+      recovery_matrix:
+        default: ''
+        type: string
+      recovery_suffix:
+        default: ''
+        type: string
       client2_release:
         description: Explicit public Client2 tag for product upgrade acceptance; empty selects CI candidate evidence
         default: ''
@@ -52,6 +65,9 @@ env:
   REQUEST_PUBLISH: 'false'
   VALIDATION_PROFILE: full
   RELEASE_REF: ${{ inputs.ref }}
+  CLI_PRODUCER_RUN_ID: ${{ inputs.recovery_run }}
+  CLI_PRODUCER_ATTEMPT: ${{ inputs.recovery_attempt }}
+  CLI_VERSION: ${{ inputs.version }}
 
 jobs:
   native:
@@ -62,30 +78,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
+        include: ${{ fromJSON(inputs.recovery_matrix || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"os":"macos-15-intel","target":"x86_64-apple-darwin"},{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","rustflags":"-C target-feature=-crt-static"},{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc","rustflags":"-C target-feature=-crt-static"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Require native Windows ARM64 hardware
         if: matrix.target == 'aarch64-pc-windows-msvc'
@@ -174,10 +173,27 @@ jobs:
           path: validated-cli
           merge-multiple: true
       - uses: actions/download-artifact@v4
-        if: inputs.validation_profile == 'full' && inputs.artifact_source != 'published-assets'
+        if: inputs.validation_profile == 'full' && inputs.artifact_source != 'published-assets' && inputs.recovery_run == ''
         with:
           name: cli-release-${{ matrix.target }}
           path: validated-cli
+      - uses: actions/checkout@v5
+        if: inputs.recovery_run != ''
+        with:
+          ref: ${{ github.sha }}
+          path: .recovery-harness
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Load reviewed orchestration without changing product or business fixtures
+        if: inputs.recovery_run != ''
+        shell: bash
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact}.mjs npm/scripts/
+      - name: Verify original producer job, ZIP and metadata without replacing its identity
+        if: inputs.recovery_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: node npm/scripts/release-recovery3930.mjs native validated-cli
       - uses: actions/download-artifact@v4
         if: inputs.artifact_source == 'published-assets'
         with:
@@ -307,7 +323,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: inputs.artifact_source != 'published-assets' && inputs.validation_profile == 'full'
         with:
-          name: candidate-assets-${{ matrix.target }}
+          name: candidate-assets-${{ matrix.target }}${{ inputs.recovery_suffix }}
           path: target/ci/${{ matrix.target }}/release/candidate-assets-receipt.json
           if-no-files-found: error
           retention-days: 1
@@ -401,7 +417,7 @@ jobs:
         if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-pc-windows-msvc'
         with:
           retention-days: 1
-          name: client2-published-online-${{ matrix.target }}
+          name: client2-published-online-${{ matrix.target }}${{ inputs.recovery_suffix }}
           path: |
             ${{ runner.temp }}/published-client2-gui/report.json
             ${{ runner.temp }}/published-client2-gui/native-gui.json
@@ -499,7 +515,7 @@ jobs:
         if: always() && inputs.validation_profile == 'full'
         with:
           retention-days: 1
-          name: resident-concurrency-${{ matrix.target }}
+          name: resident-concurrency-${{ matrix.target }}${{ inputs.recovery_suffix }}
           path: |
             ${{ runner.temp }}/resident-concurrency/real-account-return-verification.json
             ${{ runner.temp }}/resident-concurrency/resident-stress-metrics.json
@@ -512,7 +528,7 @@ jobs:
         if: always()
         with:
           retention-days: 1
-          name: published-upgrades-${{ matrix.target }}
+          name: published-upgrades-${{ matrix.target }}${{ inputs.recovery_suffix }}
           path: |
             ${{ runner.temp }}/published-upgrades/published-upgrades.json
             ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
@@ -536,7 +552,7 @@ jobs:
         if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
         with:
           retention-days: 1
-          name: gnu-login-interruption
+          name: gnu-login-interruption${{ inputs.recovery_suffix }}
           path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
           if-no-files-found: error
       - name: Allow public input cache saves only for trusted sources
