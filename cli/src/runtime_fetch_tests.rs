@@ -480,15 +480,12 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     anyhow::ensure!(proof.metadata_sha256 == sha256_hex(metadata.to_string().as_bytes()));
     anyhow::ensure!(managed_runtime_path()?.context("managed path missing")? == binary);
     anyhow::ensure!(download_and_install(Some("1.0.21-dev.1"), None)? == binary);
-    // A trusted Runtime archive is not old-host migration authorization.
+    // Reusing the verified Runtime neither depends on nor replaces the old CLI.
     fs::create_dir_all(dir.path().join("bin"))?;
     let legacy = crate::mcp::stable_bin_path();
     fs::write(&legacy, b"old combined CLI")?;
     let before = fs::read(manifest_path())?;
-    let error = download_and_install(Some("1.0.21-dev.1"), None)
-        .err().context("verified Runtime permitted replacement of the old host")?;
-    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
-    anyhow::ensure!(crate::mcp::materialize_bin().is_err());
+    anyhow::ensure!(download_and_install(Some("1.0.21-dev.1"), None)? == binary);
     anyhow::ensure!(fs::read(&legacy)? == b"old combined CLI");
     anyhow::ensure!(fs::read(manifest_path())? == before);
     fs::remove_file(legacy)?;
@@ -696,8 +693,9 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     let library = dir.path().join("rsrs.db");
     fs::write(&session, b"legacy session bytes")?;
     fs::write(&library, b"legacy data bytes")?;
-    let legacy_receipt = dir.path().join("runtime.json");
-    fs::write(&legacy_receipt, b"legacy receipt bytes")?;
+    let endpoint = dir.path().join("runtime/endpoint.json");
+    fs::create_dir(dir.path().join("runtime"))?;
+    fs::write(&endpoint, br#"{"v":1,"pid":0}"#)?;
     let error = download_and_install(None, None)
         .err()
         .context("legacy owner triggered automatic installation")?;
@@ -714,7 +712,7 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     anyhow::ensure!(fs::read(&legacy)? == legacy_bytes);
     anyhow::ensure!(fs::read(&session)? == b"legacy session bytes");
     anyhow::ensure!(fs::read(&library)? == b"legacy data bytes");
-    anyhow::ensure!(fs::read(&legacy_receipt)? == b"legacy receipt bytes");
+    anyhow::ensure!(fs::read(&endpoint)? == br#"{"v":1,"pid":0}"#);
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     Ok(())
 }
@@ -749,7 +747,7 @@ fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> 
 }
 
 #[test]
-fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
+fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
@@ -762,13 +760,15 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
     anyhow::ensure!(automatic_install_preflight(required)?.is_none(),
         "fresh preferences were mistaken for an old installation");
     fs::create_dir(dir.path().join("bin"))?;
-    fs::copy(std::env::current_exe()?, crate::mcp::stable_bin_path())?;
+    let legacy_cli = crate::mcp::stable_bin_path();
+    fs::write(&legacy_cli, b"previous CLI outside any release list")?;
     anyhow::ensure!(automatic_install_preflight(required)?.is_none());
     let error = download_and_install(None, None)
         .err()
         .context("hermetic download was allowed")?;
     anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>());
     anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
+    anyhow::ensure!(fs::read(&legacy_cli)? == b"previous CLI outside any release list");
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     let binary = install_lifecycle_fixture()?;
     let directory = binary.parent().context("fixture directory missing")?;
@@ -781,12 +781,6 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
     anyhow::ensure!(verified_migrated_image(&image.to_string_lossy())? == Some(image.clone()));
     fs::write(legacy.join("lib/provider.bin"), b"tampered")?;
     anyhow::ensure!(verified_migrated_image(&image.to_string_lossy()).is_err());
-    if let Some(previous) = std::env::var_os("RSRS_TEST_PREVIOUS_FRONTEND_BIN") {
-        fs::copy(previous, crate::mcp::stable_bin_path())?;
-        verify_install_host()?;
-        fs::write(crate::mcp::stable_bin_path(), b"unapproved frontend")?;
-        anyhow::ensure!(verify_install_host().is_err());
-    }
     Ok(())
 }
 
@@ -839,7 +833,7 @@ fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Resul
 
 #[test]
 #[ignore = "requires the independently verified official GNU CLI v1.0.20 binary"]
-fn automatic_install_preserves_official_cli_1_0_20() -> Result<()> {
+fn automatic_install_admits_official_cli_1_0_20() -> Result<()> {
     let fixture = PathBuf::from(std::env::var("RSRS_TEST_LEGACY_CLI_BIN")
         .context("set RSRS_TEST_LEGACY_CLI_BIN to the official GNU v1.0.20 binary")?);
     let expected = "c03c131c61819a5f4d132cfe328f7c1da82c2f0b21a9c87d2b8870d1541a4c3e";
@@ -854,9 +848,8 @@ fn automatic_install_preserves_official_cli_1_0_20() -> Result<()> {
     fs::copy(fixture, &legacy)?;
     let error = download_and_install(None, None)
         .err()
-        .context("official legacy CLI triggered automatic installation")?;
-    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
-    anyhow::ensure!(crate::mcp::materialize_bin().is_err());
+        .context("hermetic download was allowed")?;
+    anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
     anyhow::ensure!(sha256_file(&legacy)? == expected);
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     Ok(())

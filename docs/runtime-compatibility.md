@@ -91,14 +91,12 @@ session keys, and SQLite integrity checks before opening the upgraded libraries.
 This proves the stopped-library upgrade and download path, not automatic takeover
 of an old running process.
 
-A trusted Runtime archive does not establish the old host CLI's provenance.
-Replacing different stable CLI bytes therefore remains deferred until an explicit
-host-transition proof is implemented. The error is
-`legacy_runtime_migration_required`, not an upgrade-success result. Explicit,
-verified offline Runtime installation remains available, but it does not authorize
-subsequent replacement of an unbound old host. Fresh autostart installation resolves
-and verifies the managed Runtime before publishing its registration; a failed
-resolution leaves no new registration or maintenance marker.
+An old CLI executable at the managed path does not require a matching version
+or known digest to proceed with installation. Admission still checks for an unsafe
+path or an unbound process or startup record. The new Runtime payload is verified
+before activation. Database compatibility is established when the new Runtime
+opens the library with the original key. Fresh autostart installation verifies the
+managed Runtime before publishing its registration.
 
 Start and restart check existing migration evidence before acquiring the takeover
 lock, then check it again while holding the lock. A statically unbound legacy
@@ -109,11 +107,8 @@ controller may already depend on its identity. These checks do not make migratio
 atomic against writers outside the existing locks, including direct stable-image
 copies; concurrent replacement and full rollback remain separate acceptance work.
 
-This first slice does **not** implement an old-protocol adapter. It can also defer
-otherwise legitimate split-CLI upgrades whose prior host lineage is unavailable.
 Autostart requires a verified managed Runtime; portable or explicit Runtime images
 without retained release proof must be installed deliberately before registration.
-These limits must be resolved before calling the complete migration supported.
 Do not remove authentication, infer account/generation, fake old health/version,
 or silently switch old Client2's direct HTTP calls to the new contract.
 
@@ -126,9 +121,9 @@ The official GNU CLI v1.0.20 fixture has SHA-256
 and verify their exact digest before running:
 
 ```sh
-RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire --bin rsrs runtime_fetch
+RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire --lib runtime_fetch
 RSRS_TEST_LEGACY_CLI_BIN=/absolute/rsrs-v1.0.20 cargo test --locked -p respire \
-  --bin rsrs automatic_install_preserves_official_cli_1_0_20 -- --ignored
+  --lib automatic_install_admits_official_cli_1_0_20 -- --ignored
 python scripts/test-legacy-runtime-preservation.py \
   --legacy-binary /absolute/rsrs-v1.0.20 --candidate /absolute/new-rsrs \
   --report /absolute/preservation-report.json
