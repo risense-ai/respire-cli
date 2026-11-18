@@ -43,7 +43,8 @@ if (reuseDirectory) {
     if(process.argv.includes('--download'))throw Error('Prepared packs must come from the verified import');
     const imported=readImportedPreparation({...source,workflow:'.github/workflows/release.yml',version:manifest.cliVersion},manifest);
     assertImportSelection(imported,process.env.PREPARED_RUN,preparationPinFromEnv());assertImportPin(imported,importPinFromEnv());
-    const original=imported.receipt.preparation.source;
+    const preparation=imported.receipt.preparation.source;
+    const original=preparation.producer || preparation;
     source={repository:original.repository,run_id:String(original.run_id),run_attempt:Number(original.run_attempt),sha:original.sha};
   }
   if (process.argv.includes('--download')) downloadValidatedPacks(reuseDirectory,source);
