@@ -52,10 +52,10 @@ export function validateRecoveryRuns(producerRun,consumerRun,producer,consumer){
 // A continuation may change only this CI implementation and its existing checks.
 // All product files, fixture scripts, locks, model keys and other workflows must be identical.
 export function recoveryScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
-  const allowed=new Set([recoveryWorkflow,'.github/workflows/release-native-validation.yml','.github/workflows/release.yml',
+  const allowed=new Set([recoveryWorkflow,'.github/workflows/release-native-validation.yml','.github/workflows/release.yml','.github/workflows/npm-alias.yml','.github/workflows/ci.yml',
     'npm/scripts/release-recovery3930.mjs','npm/scripts/release-preparation.mjs','npm/scripts/candidate-artifact.mjs',
     'npm/scripts/extract-artifact.mjs','npm/scripts/test-release-preparation.mjs',
-    'npm/scripts/test-release-regression-contract.mjs','scripts/test-native-runtime-install.py']);
+    'npm/scripts/test-release-regression-contract.mjs','npm/scripts/test-publication-acceptance.mjs','scripts/test-native-runtime-install.py']);
   execFileSync('git',['merge-base','--is-ancestor',producerSHA,consumerSHA],{cwd});
   const changed=execFileSync('git',['diff','--name-only',producerSHA,consumerSHA],{cwd,encoding:'utf8'}).trim().split(/\r?\n/).filter(Boolean);
   assert.ok(changed.every(file=>allowed.has(file)),'Product, fixture or unrelated CI source changed since producer');

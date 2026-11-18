@@ -75,6 +75,8 @@ jobs:
           ref: ${{ needs.await-scoped.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Load the current trusted preparation reader for frozen product bytes
+        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact}.mjs | tar -x
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
