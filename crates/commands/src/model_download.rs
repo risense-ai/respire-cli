@@ -1213,7 +1213,7 @@ pub fn validate_mirror(value: &str) -> Result<()> {
     origin_from_mirror(value).map(|_| ())
 }
 
-pub(crate) fn origin_from_mirror(raw: &str) -> Result<String> {
+pub fn origin_from_mirror(raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         anyhow::bail!("--mirror must not be empty");

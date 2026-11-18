@@ -48,6 +48,7 @@ pub mod model_asset_files;
 pub mod model_download;
 #[cfg(feature = "server")]
 pub mod model_install;
+pub mod model_granite;
 pub mod model_progress;
 pub mod net_rpc;
 #[cfg(feature = "server")]
