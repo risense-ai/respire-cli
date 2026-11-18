@@ -7,11 +7,13 @@ import {createHash} from 'node:crypto';
 import {spawnSync,execFileSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {publishedFullFixture} from './full-report-fixture.mjs';
-import {publishedAssetNames} from './extract-artifact.mjs';
+import {publishedAssetNames,inspectPublishedRelease,validateRecoveredRuntime} from './extract-artifact.mjs';
+import {assertReleaseAssets} from './release-publication.mjs';
 import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun} from './release-preparation.mjs';
 import {completeCandidate} from './candidate-artifact.mjs';
+import {fenceBody} from './publication-fence.mjs';
 import {recoveryWorkflow,windowsTarget,validateRecoveryRuns,recoveryJobs,recoveryArtifact,recoveryArtifacts,
-  downloadRecoveryArtifact,validateRecoveryEvidence,recoveryScripts,cloudScope} from './release-recovery3930.mjs';
+  downloadRecoveryArtifact,validateRecoveryEvidence,recoveryScripts,cloudScope,recoveryPublicationBody,recoveryPublicationEvidence,recoveryProofName} from './release-recovery3930.mjs';
 
 const sha='3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f',hash='b'.repeat(64),version='2.0.0-dev.19';
 const targets=[['x86_64-unknown-linux-gnu','linux-x64-gnu'],['x86_64-unknown-linux-musl','linux-x64'],['aarch64-apple-darwin','macos-arm64'],['x86_64-pc-windows-msvc','win-x64']];
@@ -163,7 +165,7 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
   assert.match(release,/prepared_binary_run: \$\{\{ steps.prepared.outputs.prepared_binary_run \}\}/);
   assert.equal((release.match(/run-id: \$\{\{ needs.plan.outputs.prepared_binary_run \}\}/g)||[]).length,2);
-  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact\}.mjs \| tar -x/g)||[]).length,4);
+  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication\}.mjs \| tar -x/g)||[]).length,4);
   const continuation=readFileSync(new URL('../../.github/workflows/release-recovery3930.yml',import.meta.url),'utf8');
   assert.match(continuation,/uses: \.\/.github\/workflows\/release-native-validation.yml/);
   assert.match(continuation,/validation_profile: full/);
@@ -175,7 +177,7 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.doesNotMatch(publisher,/--pack npm\/publication-packages/);
 });
 
-test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',()=>{
+test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',async()=>{
   const directory=mkdtempSync(join(tmpdir(),'preparation-process-'));
   try{
     const assets=join(directory,'assets'),packs=join(directory,'packs'),reports=join(directory,'reports');
@@ -302,6 +304,124 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
     ctx.run={...run,status:'completed',conclusion:'success'};
     Object.assign(ctx.jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});
     assert.equal(validatePreparation(proof,ctx),proof);
+    const publisher={repository:source.repository,workflow:source.workflow,run_id:'801',run_attempt:1,sha,version,release_id:901,workflow_head_sha:'e'.repeat(40)};
+    const fencedNotes=fenceBody('Existing release notes',{schema:2,kind:'npm-version-fence',repository:source.repository,version,source_sha:sha,
+      run_id:'801',first_attempt:1,created_at:time(4),phase:'fenced',package_names:proof.packs.map(p=>p.name),
+      scoped_packages:proof.packs.map(p=>({name:p.name,version,integrity:'sha512-'+createHash('sha512').update(p.name).digest('base64'),shasum:'c'.repeat(40)}))});
+    const imported={receipt:{preparation:proof},history:ctx};
+    const rawReceiptBefore=JSON.stringify(proof);
+    const evidenceBytes=recoveryPublicationEvidence(imported,candidate);
+    const body=recoveryPublicationBody(fencedNotes,imported,publisher,candidate);
+    assert.equal(JSON.stringify(proof),rawReceiptBefore,'Existing schema1 preparation must stay byte-for-byte unchanged');
+    const publicPart={repository:source.repository,release_id:901,version,source_sha:sha,producer:{run_id:44276673815,run_attempt:1},
+      assets:proof.assets.map((a,i)=>({id:i+1,name:a.file,size:a.size,sha256:a.sha256}))};
+    const published={id:901,tag_name:'v'+version,draft:false,published_at:time(5),body};
+    const publicAssets=[...publicPart.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256})),
+      {id:9901,name:recoveryProofName,size:evidenceBytes.length,state:'uploaded',digest:'sha256:'+createHash('sha256').update(evidenceBytes).digest('hex')}];
+    assertReleaseAssets({...published,assets:publicAssets},{source:{sha,version},assets:publicPart.assets});
+    for(const change of [a=>a.pop(),a=>a.push({...a[0],name:'unknown.json'}),a=>a.at(-1).digest='sha256:'+'0'.repeat(64)]){
+      const a=structuredClone(publicAssets);change(a);assert.throws(()=>assertReleaseAssets({...published,assets:a},{source:{sha,version},assets:publicPart.assets}));
+    }
+    const publisherRun={id:801,run_attempt:1,head_sha:publisher.workflow_head_sha,head_branch:'main',event:'workflow_dispatch',
+      head_repository:{full_name:source.repository},path:source.workflow,status:'completed',conclusion:'success',created_at:time(4)};
+    const publicState={published,publicAssets,evidence:evidenceBytes.toString(),producerRun:{...producerRun,repository:{full_name:source.repository}},consumerRun:ctx.run,publisherRun,original:ctx.original,current:ctx.current,
+      publicationJobs:['prepared-import','publication-ready','publish'].map(name=>({name,status:'completed',conclusion:'success',completed_at:time(6)}))};
+    const fetchPublished=s=>async url=>{
+      const p=new URL(url).pathname+new URL(url).search;let value;
+      if(p.endsWith('/releases/901'))value=s.published;
+      else if(p.endsWith('/releases/assets/9901'))return {status:200,arrayBuffer:async()=>Buffer.from(s.evidence)};
+      else if(p.includes('/git/ref/tags/'))value={object:{type:'commit',sha}};
+      else if(p.includes('/releases/901/assets?'))value=s.publicAssets;
+      else if(p.includes('/contents/npm/artifact-manifest.json?')){
+        const bytes=Buffer.from(JSON.stringify(manifest));value={type:'file',encoding:'base64',size:bytes.length,content:bytes.toString('base64'),
+          sha:createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`),bytes])).digest('hex')};
+      }else if(p.includes('/actions/runs/44276673815/attempts/1/jobs?'))value={jobs:s.original};
+      else if(p.endsWith('/actions/runs/44276673815/attempts/1'))value=s.producerRun;
+      else if(p.includes('/actions/runs/701/attempts/1/jobs?'))value={jobs:s.current};
+      else if(p.endsWith('/actions/runs/701/attempts/1'))value=s.consumerRun;
+      else if(p.includes('/actions/runs/801/attempts/1/jobs?'))value={jobs:s.publicationJobs};
+      else if(p.endsWith('/actions/runs/801/attempts/1'))value=s.publisherRun;
+      else throw Error('Unexpected public recovery request: '+p);
+      return {status:200,json:async()=>value};
+    };
+    const verified=await inspectPublishedRelease(publicPart,{fetcher:fetchPublished(publicState)});
+    validateRecoveredRuntime(verified.recovery,candidate.runtime);
+    const wrongRuntime=structuredClone(candidate.runtime);wrongRuntime.assets[0].sha256='0'.repeat(64);assert.throws(()=>validateRecoveredRuntime(verified.recovery,wrongRuntime));
+    assert.deepEqual(verified.producer,publicPart.producer);assert.equal(verified.recovery.consumer.run_id,'701');
+    assert.equal(verified.recovery.full_result_sha256,undefined,'Public proof must not claim the private raw full-result digest');
+    assert.deepEqual(JSON.parse(publicState.evidence).candidate,candidate);
+    const privateCopy=structuredClone(proof);privateCopy.full_result.actual_processes[0].exe='PRIVATE_PATH_SENTINEL';privateCopy.full_result.actual_processes[0].account_id='PRIVATE_ACCOUNT_SENTINEL';
+    privateCopy.full_result.historical_upgrades[0].unknown_private_text='PRIVATE_UNKNOWN_SENTINEL';
+    for(const r of privateCopy.full_result.reports){
+      if(r.artifact.startsWith('resident-concurrency-'))r.path=(r.path==='fixture-process-verification.json'?'native-fixture-bounds/':'resident-concurrency/')+r.path;
+      if(r.artifact.startsWith('release-sweep-')){
+        const nested={'outbox-coverage.json':'outbox/','ai-inject-coverage.json':'ai-inject/','legacy-vault-coverage.json':'legacy-vault/','interruption-coverage.json':'login-interruption/'};
+        r.path='release-supplements/'+(nested[r.path]||'')+r.path;
+      }
+    }
+    const safeBytes=recoveryPublicationEvidence({receipt:{preparation:privateCopy},history:ctx},candidate);
+    assert(!safeBytes.includes(Buffer.from('PRIVATE_')));
+    const unknownPath=structuredClone(proof);unknownPath.full_result.reports[0].path='unrecognized-private-directory/report.json';
+    assert.throws(()=>recoveryPublicationEvidence({receipt:{preparation:unknownPath},history:ctx},candidate),/Non-whitelisted report path/);
+    for(const mutate of [s=>s.published.body='',s=>s.publicAssets[0].digest='sha256:'+hash,
+      s=>s.consumerRun.status='in_progress',s=>s.consumerRun.conclusion='failure',s=>s.consumerRun.run_attempt++,
+      s=>s.original[0].conclusion='failure',s=>s.current[0].conclusion='failure',s=>s.publisherRun.head_branch='other',
+      s=>s.publisherRun.status='in_progress',s=>s.publicationJobs[0].conclusion='failure',s=>s.publisherRun.created_at=time(2),
+      s=>s.publicationJobs.at(-1).completed_at=time(4),s=>s.published.body=s.published.body.replace('rsrs-npm-write-fence:','foreign-fence:')]){
+      const s=structuredClone(publicState);mutate(s);await assert.rejects(inspectPublishedRelease(publicPart,{fetcher:fetchPublished(s)}));
+    }
+    for(const change of [p=>p.producer.run_id++,p=>p.producer.run_attempt++,p=>p.source_sha='f'.repeat(40),p=>p.assets[0].sha256='f'.repeat(64)]){
+      const p=structuredClone(publicPart);change(p);await assert.rejects(inspectPublishedRelease(p,{fetcher:fetchPublished(publicState)}));
+    }
+    for(const change of [p=>p.source.producer.run_attempt++,p=>p.source.producer.sha='f'.repeat(40),p=>p.assets[0].sha256='f'.repeat(64),
+      p=>p.publisher.run_id='802',p=>p.source.workflow_head_sha='f'.repeat(40),p=>p.manifest_sha256='f'.repeat(64),p=>p.acceptance_sha256='f'.repeat(64)]){
+      const s=structuredClone(publicState),match=s.published.body.match(/<!-- rsrs-cli3930-recovery:([A-Za-z0-9_-]+) -->/);
+      const p=JSON.parse(Buffer.from(match[1],'base64url'));change(p);
+      s.published.body=s.published.body.replace(match[1],Buffer.from(JSON.stringify(p)).toString('base64url'));
+      await assert.rejects(inspectPublishedRelease(publicPart,{fetcher:fetchPublished(s)}));
+    }
+    for(const change of [e=>e.candidate.client2.source_sha='0'.repeat(40),e=>e.acceptance.reports[0].sha256='0'.repeat(64)]){
+      const s=structuredClone(publicState),e=JSON.parse(s.evidence);change(e);s.evidence=JSON.stringify(e);
+      await assert.rejects(inspectPublishedRelease(publicPart,{fetcher:fetchPublished(s)}));
+    }
+    // Execute the real inventory entry, including the failed original producer guard.
+    const routes={},record=async(url,options)=>{
+      const r=await fetchPublished(publicState)(url,options),key=url.replace('https://api.github.com/','');
+      routes[key]=r.json?{json:await r.json()}:{binary:Buffer.from(await r.arrayBuffer()).toString('base64')};return r;
+    };
+    await inspectPublishedRelease(publicPart,{fetcher:record});
+    const cliPrefix='repos/'+source.repository,runtime=candidate.runtime,rtPrefix='repos/'+runtime.repository;
+    routes[cliPrefix+'/releases/tags/v'+version]={json:published};routes[cliPrefix+'/commits/v'+version]={json:{sha}};
+    routes[cliPrefix+'/actions/runs/44276673815']={json:publicState.producerRun};
+    routes[cliPrefix+'/releases/901/assets?per_page=100']={json:publicAssets};
+    const rtAssets=runtime.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}));
+    routes[rtPrefix+'/releases/tags/v'+runtime.version]={json:{id:runtime.release_id,tag_name:'v'+runtime.version,draft:false,published_at:time(0)}};
+    routes[rtPrefix+'/releases/'+runtime.release_id]=routes[rtPrefix+'/releases/tags/v'+runtime.version];
+    routes[rtPrefix+'/commits/v'+runtime.version]={json:{sha:runtime.source_sha}};
+    routes[rtPrefix+'/git/ref/tags/v'+runtime.version]={json:{object:{type:'commit',sha:runtime.source_sha}}};
+    routes[rtPrefix+'/actions/runs/'+runtime.producer.run_id]={json:{id:runtime.producer.run_id,run_attempt:runtime.producer.run_attempt,head_sha:runtime.source_sha,status:'completed',conclusion:'success',path:source.workflow,repository:{full_name:runtime.repository}}};
+    routes[rtPrefix+'/actions/runs/'+runtime.producer.run_id+'/attempts/'+runtime.producer.run_attempt]=routes[rtPrefix+'/actions/runs/'+runtime.producer.run_id];
+    routes[rtPrefix+'/releases/'+runtime.release_id+'/assets?per_page=100']={json:rtAssets};
+    routes[rtPrefix+'/releases/'+runtime.release_id+'/assets?per_page=100&page=1']={json:rtAssets};
+    const inventoryRoutes=join(directory,'inventory-routes.json'),inventoryMock=join(directory,'inventory-api.mjs');
+    writeFileSync(inventoryRoutes,JSON.stringify(routes));
+    writeFileSync(inventoryMock,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const routes=JSON.parse(fs.readFileSync(process.env.INVENTORY_ROUTES));cp.execFileSync=(command,args,options={})=>{
+ if(command!=='gh'||args[0]!=='api')throw Error('Unexpected inventory command');
+ const key=args.find(a=>a.startsWith('repos/')),entry=routes[key];if(!entry)throw Error('Unexpected inventory API: '+key);
+ const value=entry.binary?Buffer.from(entry.binary,'base64'):Buffer.from(args.includes('--jq')?entry.json.sha+'\\n':JSON.stringify(args.includes('--slurp')?[entry.json]:entry.json));
+ return options.encoding?value.toString():value;
+};syncBuiltinESMExports();`);
+    const inventoryArgs=['--import',pathToFileURL(inventoryMock).href,fileURLToPath(new URL('../../scripts/create-published-assets.mjs',import.meta.url)),
+      'v'+version,'44276673815','v'+runtime.version,String(runtime.producer.run_id)];
+    const generate=()=>spawnSync(process.execPath,inventoryArgs,{env:{...process.env,INVENTORY_ROUTES:inventoryRoutes},encoding:'utf8',timeout:15000});
+    const generated=generate();assert.equal(generated.status,0,generated.stderr);
+    const generatedInventory=JSON.parse(generated.stdout);assert.deepEqual(generatedInventory.cli.producer,publicPart.producer);assert.deepEqual(generatedInventory.runtime,runtime);
+    const originalRoutes=structuredClone(routes);
+    for(const change of [r=>r[cliPrefix+'/actions/runs/701/attempts/1'].json.status='in_progress',
+      r=>r[cliPrefix+'/releases/assets/9901'].binary=Buffer.from('{}').toString('base64')]){
+      const changed=structuredClone(originalRoutes);change(changed);writeFileSync(inventoryRoutes,JSON.stringify(changed));assert.notEqual(generate().status,0);
+    }
     for(const mutate of [c=>c.original.find(j=>j.name==='api-smoke').run_attempt++,c=>c.current[0].head_sha='f'.repeat(40),
       c=>c.original.find(j=>j.name.startsWith('cloud-sweep')).conclusion='failure',c=>c.current[0].status='in_progress',
       c=>c.original.find(j=>j.name.startsWith('validate / Release')).run_id=999]){

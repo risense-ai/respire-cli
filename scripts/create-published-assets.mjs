@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
-import {parsePublishedAssets, publishedAssetNames, validatePublishedRelease} from '../npm/scripts/extract-artifact.mjs';
+import {parsePublishedAssets, publishedAssetNames, inspectPublishedRelease,validateRecoveredRuntime} from '../npm/scripts/extract-artifact.mjs';
 
 const args = process.argv.slice(2);
 assert.equal(args.length, 4, 'Usage: node scripts/create-published-assets.mjs CLI_TAG CLI_RUN_ID RUNTIME_TAG RUNTIME_RUN_ID');
 const targets = JSON.parse(readFileSync(new URL('../npm/artifact-manifest.json', import.meta.url))).targets.map(t => t.triple);
 const api = path => JSON.parse(execFileSync('gh', ['api', path], {encoding: 'utf8'}));
 const spec = {schema: 2};
+let recovery;
 for (const [kind, tag, runID] of [['cli', args[0], args[1]], ['runtime', args[2], args[3]]]) {
   assert.match(tag, /^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/, 'Require an explicit public release tag');
   assert.match(runID, /^[1-9]\d*$/, 'Require an explicit producer run ID');
@@ -22,7 +23,6 @@ for (const [kind, tag, runID] of [['cli', args[0], args[1]], ['runtime', args[2]
   assert.equal(run.path, '.github/workflows/release.yml');
   assert.equal(run.head_sha, source.sha, 'Producer must match the actual public tag source');
   assert.equal(run.status, 'completed');
-  assert.equal(run.conclusion, 'success');
   const assets = JSON.parse(execFileSync('gh', ['api', '--paginate', '--slurp',
     `${prefix}/releases/${release.id}/assets?per_page=100`], {encoding: 'utf8'})).flat();
   const part = {
@@ -36,9 +36,14 @@ for (const [kind, tag, runID] of [['cli', args[0], args[1]], ['runtime', args[2]
       return {id: asset.id, name, size: asset.size, sha256: asset.digest.slice(7)};
     }),
   };
-  validatePublishedRelease(part, release, assets, source.sha);
+  const inspected=await inspectPublishedRelease(part, {fetcher: async (url, options) => {
+    const bytes=execFileSync('gh',['api',url.replace('https://api.github.com/',''),'-H','Accept: '+options.headers.Accept]);
+    return {status:200,json:async()=>JSON.parse(bytes),arrayBuffer:async()=>bytes};
+  }});
+  if(kind==='cli')recovery=inspected.recovery;
   spec[kind] = part;
 }
+validateRecoveredRuntime(recovery,spec.runtime);
 const json = JSON.stringify(spec);
 const sha256 = createHash('sha256').update(json, 'utf8').digest('hex');
 parsePublishedAssets(json, sha256, targets);

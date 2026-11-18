@@ -320,10 +320,27 @@ export async function inspectPublishedRelease(part, {token, fetcher = fetch} = {
   requireValue(producer && positiveID(producer.run_id) && positiveID(producer.run_attempt), 'Published producer identity missing');
   const run = await readGitHub(`${part.repository}/actions/runs/${producer.run_id}/attempts/${producer.run_attempt}`, token, fetcher);
   requireValue(run.id === producer.run_id && run.run_attempt === producer.run_attempt
-    && run.head_sha === part.source_sha && run.status === 'completed' && run.conclusion === 'success'
+    && run.head_sha === part.source_sha && run.status === 'completed' && ['success','failure'].includes(run.conclusion)
+    && (run.conclusion === 'success' || part.repository === 'risense-ai/respire-cli' && producer.run_id === 44276673815 && producer.run_attempt === 1)
     && run.path === '.github/workflows/release.yml' && run.repository?.full_name === part.repository,
     'Published producer run/source/attempt mismatch');
-  return {release_id: release.id, published_at: release.published_at, source_sha: object.sha, producer};
+  let recovery;
+  if(run.conclusion==='failure'){
+    const {inspectRecoveryPublication}=await import('./release-recovery3930.mjs');
+    recovery=await inspectRecoveryPublication(part,release,run,assets,
+      await publishedSourceJSON(part,'npm/artifact-manifest.json',{token,fetcher}),read,async asset=>{
+        const response=await fetcher(`https://api.github.com/repos/${part.repository}/releases/assets/${asset.id}`,{headers:{Accept:'application/octet-stream',...(token?{Authorization:`Bearer ${token}`}:{})}});
+        requireValue(response.status===200,'Recovery evidence download failed');
+        return Buffer.from(await response.arrayBuffer());
+      });
+  }
+  return {release_id: release.id, published_at: release.published_at, source_sha: object.sha, producer,...(recovery?{recovery}:{})};
+}
+export function validateRecoveredRuntime(recovery,runtime){
+  if(!recovery)return;
+  for(const key of ['repository','release_id','version','source_sha'])requireValue(recovery.runtime[key]===runtime[key],'Recovered Runtime identity differs');
+  requireValue(recovery.runtime.producer.run_id===runtime.producer.run_id&&recovery.runtime.producer.run_attempt===runtime.producer.run_attempt,'Recovered Runtime producer differs');
+  requireValue(recovery.runtime.assets.length===runtime.assets.length&&recovery.runtime.assets.every(a=>runtime.assets.some(b=>a.id===b.id&&a.name===b.name&&a.size===b.size&&a.sha256===b.sha256)),'Recovered Runtime bytes differ');
 }
 export async function inspectRuntimeProducer(part, target, {token, fetcher = fetch, artifactTransport} = {}) {
   const producer = part.producer, names = publishedAssetNames('runtime', target);
@@ -452,6 +469,7 @@ export async function verifyPublishedTarget(spec, target, destination, manifestH
         receipt.assets.push({repository: part.repository, ...asset});
       }
     }
+    validateRecoveredRuntime(receipt.releases.cli.recovery,spec.runtime);
     validatePublishedMetadata(spec, target,
       JSON.parse(readFileSync(join(destination, 'cli', `cli-build-${target}.json`), 'utf8')),
       JSON.parse(readFileSync(join(destination, 'runtime', `runtime-build-${target}.json`), 'utf8')));

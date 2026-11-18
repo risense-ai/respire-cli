@@ -5,11 +5,12 @@ import {RELEASE_ARTIFACT_CLEANUP_POLICY, validateSource, validateScopedPayload,
   packIdentity, assertSourceRun, assertActive, assertDraft, assertTag, selectRelease,
   api, pages, output, artifact, command, manifest, read, write, digest, sleep,
   verifyPackages, publicInstall} from './release-publication.mjs';
-import {readdirSync, statSync} from 'node:fs';
+import {readdirSync, statSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {regressionContract,validateRegressionContract,validationProfile,regressionStatus,regressionCompletedAt,parseTimestamp} from './release-regression-contract.mjs';
 import {validateImportAnchor,assertImportedContents,importPinFromEnv,readImportedPreparation,assertImportSelection,assertImportPin} from './prepared-import.mjs';
 import {preparationPinFromEnv,preparationReceiptJob} from './release-preparation.mjs';
+import {recoveryPublicationBody,recoveryPublicationEvidence,recoveryProofName,readPublicationCandidate} from './release-recovery3930.mjs';
 
 import {checkVersionFence,checkReservationFence,bindFenceNotes,persistVersionFence} from './publication-fence.mjs';
 const ALIAS = '.github/workflows/npm-alias.yml';
@@ -317,6 +318,19 @@ function finalizeAccepted() {
   const sourceAt=parseTimestamp(commit.commit.committer.date);
   if(sourceAt===null)throw Error('Invalid source commit clock');
   assertActive(s);
+  if(preparedImport?.receipt.preparation.source.producer){
+    const draft=api(`repos/${s.repository}/releases/${s.release_id}`);
+    assertDraft(draft,scoped);
+    const candidate=readPublicationCandidate(preparedImport);
+    const notes=recoveryPublicationBody(draft.body||'',preparedImport,{...s,workflow_head_sha:sourceRun.head_sha},candidate);
+    writeFileSync(recoveryProofName,recoveryPublicationEvidence(preparedImport,candidate));
+    command('gh',['release','upload',`v${s.version}`,recoveryProofName,'--repo',s.repository],{stdio:'inherit'});
+    writeFileSync('recovery-release-notes.md',notes);
+    command('gh',['release','edit',`v${s.version}`,'--repo',s.repository,'--notes-file','recovery-release-notes.md'],{stdio:'inherit'});
+    const confirmed=api(`repos/${s.repository}/releases/${s.release_id}`);
+    if(confirmed.body!==notes)throw Error('Durable recovery attestation write not confirmed');
+    assertDraft(confirmed,scoped);
+  }
   command('gh',['release','edit',`v${s.version}`,'--repo',s.repository,'--draft=false'],{stdio:'inherit'});
   // Confirm the read response after the write. A transport ambiguity never
   // becomes success and never causes another release edit here.

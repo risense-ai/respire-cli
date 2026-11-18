@@ -4,7 +4,7 @@ import {mkdtempSync,readFileSync,writeFileSync,rmSync,appendFileSync} from 'node
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {validateSource,validateScoped,validateAlias,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
+import {validateSource,validateScoped,validateAlias,assertReleaseAssets,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
 import {validateAcceptedScoped,validateAcceptedAlias,validateVerified,validateArmVerified} from './publication-acceptance.mjs';
 import {regressionStatus,validationProfile,validateRegressionContract} from './release-regression-contract.mjs';
 import {validatePreparationHistory,validatePreparationSource,preparationInputs} from './release-preparation.mjs';
@@ -33,7 +33,7 @@ export function requireRegressions(jobs,targets,inventory){
 export function requirePublished(release,scoped,tag){
   const s=scoped.source;
   if(release.id!==Number(s.release_id)||release.draft!==false||!release.published_at||release.tag_name!==`v${s.version}`||release.target_commitish!==s.sha||release.prerelease!==(s.channel==='dev')||tag?.type!=='commit'||tag.sha!==s.sha)throw Error('Exact public release/tag required');
-  if(release.assets.length!==scoped.assets.length||!scoped.assets.every(e=>release.assets.some(a=>a.name===e.name&&a.size===e.size&&a.state==='uploaded'&&a.digest===`sha256:${e.sha256}`)))throw Error('Public release assets differ');
+  assertReleaseAssets(release,scoped);
 }
 export function allowedSourceArtifact(name,source,targets,preparedOrigin){
   if(preparedOrigin&&[importName(source),consumerName(source)].includes(name))return true;
