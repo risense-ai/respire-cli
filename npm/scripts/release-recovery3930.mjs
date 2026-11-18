@@ -489,7 +489,8 @@ function muslRun(identity,path,conclusion){
 function muslHarness(sha){
   git('merge-base','--is-ancestor',muslBase,sha);git('merge-base','--is-ancestor',sha,'origin/main');
   const allowed=new Set([muslPreparationWorkflow,'npm/scripts/release-recovery3930.mjs','npm/scripts/release-preparation.mjs',
-    'npm/scripts/test-release-preparation.mjs','scripts/merge-musl3930-upgrades.py']);
+    'npm/scripts/test-release-preparation.mjs','scripts/merge-musl3930-upgrades.py',
+    'npm/scripts/extract-artifact.mjs','npm/scripts/test-release-publication.mjs','scripts/probe-client2-gui.ps1']);
   assert.ok(git('diff','--name-only',muslBase,sha).split(/\r?\n/).filter(Boolean).every(p=>allowed.has(p)),'Unreviewed composition product, fixture or harness change');
 }
 export function muslPreparationContext(source){
