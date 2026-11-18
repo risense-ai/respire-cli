@@ -114,6 +114,8 @@ class SeedReadinessTests(unittest.TestCase):
                 events.append(('legacy', state['profile'].name))
                 self.legacy_commands.append((state['profile'].name, tuple(command[3:])))
                 if command[-1] == '--version':
+                    return SimpleNamespace(returncode=0, stdout=('rsrs ' + seed_version).encode('utf-8'), stderr=b'')
+                if command[-1] == 'v':
                     return SimpleNamespace(returncode=0,
                                            stdout=json.dumps({'summary': {'version': seed_version}}).encode('utf-8'), stderr=b'')
             return SimpleNamespace(returncode=0, stdout=b'{"summary":{"id":"tombstone"}}', stderr=b'')
@@ -172,9 +174,9 @@ class SeedReadinessTests(unittest.TestCase):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 self.exercise(directory, historical=True, seed_version=version)
                 self.assertEqual([command[:3] for _, command in self.legacy_commands],
-                                 [('--version',), ('model', 'activate', 'm3'), ('remember', 'Real account return fixture main', '--title'),
+                                 [('v',), ('model', 'activate', 'm3'), ('remember', 'Real account return fixture main', '--title'),
                                   ('remember', 'Historical encrypted deletion main', '--title'), ('forget', 'tombstone'),
-                                  ('--version',), ('model', 'activate', 'm3'), ('remember', 'Real account return fixture alternate', '--title'),
+                                  ('v',), ('model', 'activate', 'm3'), ('remember', 'Real account return fixture alternate', '--title'),
                                   ('remember', 'Historical encrypted deletion alternate', '--title'), ('forget', 'tombstone')])
         for version in ('1.0.11-dev.1', '1.0.11', '1.0.12', '1.0.15', '1.0.16',
                         '1.0.17-dev.6', '1.0.18', '1.0.19', '1.0.20'):
@@ -188,7 +190,7 @@ class SeedReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(AssertionError, 'historical seed profile is not empty'):
                 self.exercise(directory, historical=True, seed_version='1.0.20', occupied=True)
-            self.assertEqual(self.legacy_commands, [('main', ('--version',))])
+            self.assertEqual(self.legacy_commands, [('main', ('v',))])
         with tempfile.TemporaryDirectory() as directory:
             self.exercise(directory, historical=True)
             old_host = next(node for node in ast.walk(TREE) if isinstance(node, ast.If)
