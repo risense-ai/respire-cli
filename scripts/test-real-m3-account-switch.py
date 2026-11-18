@@ -1,7 +1,7 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
 from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
-    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, canonical_scope_path)
+    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, canonical_scope_path, same_existing_path)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from contextlib import closing
 from types import SimpleNamespace
@@ -90,7 +90,7 @@ def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
         clean_env=dict(env)
         installation=pathlib.Path(env['RSRS_DATA_DIR'])
         config_bytes=(installation/'client.json').read_bytes()
-        assert pathlib.Path(json.loads(config_bytes)['data_dir']).resolve()==profile.resolve(), 'custody consumer account is not selected'
+        assert same_existing_path(json.loads(config_bytes)['data_dir'],profile), 'custody consumer account is not selected'
         for prefix in ('RSRS_','ONEMEMORY_','RESPIRE_'):
             for suffix in ('SUPER','PASS','SECRET','KDF_SALT','WRAPPED_URK','URK_NONCE'):
                 assert prefix+suffix not in env, 'resident custody consumer has a factor override'
@@ -331,7 +331,7 @@ for binary in BINARIES:
         worker=children[0]
         assert worker.pid==health['inference']['worker_pid'] and worker.ppid()==host.pid
         assert '--core-worker-internal' in worker.cmdline()
-        assert pathlib.Path(worker.exe()).resolve()==pathlib.Path(host.exe()).resolve()
+        assert same_existing_path(worker.exe(),host.exe())
         assert not any(pathlib.Path(file.path).name in ('rsrs.db','lock.db') for file in worker.open_files())
         assert not {'GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','RSRS_SUPER'} & worker.environ().keys()
         identity=(worker.pid,worker.create_time())
@@ -508,7 +508,7 @@ for binary in BINARIES:
             old_owner=psutil.Process(old_runtime.pid)
             old_birth=old_owner.create_time()
             old_start=process_start_id(old_runtime.pid)
-            assert pathlib.Path(old_owner.exe()).resolve()==pathlib.Path(args.seed_binary).resolve()
+            assert same_existing_path(old_owner.exe(),args.seed_binary)
             if not args.runtime_binary:
                 old_status=run('--client-only','status')
                 assert old_status.get('status')=='ok','new client could not read the old runtime through HTTP RPC'
@@ -664,7 +664,7 @@ for binary in BINARIES:
             doctor=run('doctor',allow_failure=True)
             rows={item['name']:item for item in doctor['items'] if item['name'] in ['embedder','model index']}
             assert len(rows)==2 and all(item['status']=='ok' for item in rows.values()),rows
-            assert pathlib.Path(json.loads((main/'client.json').read_text())['data_dir'])==profile
+            assert same_existing_path(json.loads((main/'client.json').read_text())['data_dir'],profile)
             config=json.loads((main/'client.json').read_text())
             if not database_upgrade:
                 assert all(config.get(key)==value for key,value in public_config.items()),'upgrade/switch changed public API settings'
@@ -916,7 +916,7 @@ for binary in BINARIES:
             retired_workers=[checked_worker(health)] if args.expect_supervised_worker else []
             if args.runtime_binary:
                 observe_runtime(health)
-                assert pathlib.Path(owned.exe()).resolve()==args.runtime_binary
+                assert same_existing_path(owned.exe(),args.runtime_binary)
             else:
                 assert pathlib.Path(owned.exe()).name.lower() in ['rsrs','rsrs.exe']
                 assert '--runtime-internal' in owned.cmdline(),'only the isolated runtime may be suspended'
@@ -963,7 +963,7 @@ for binary in BINARIES:
                 assert (replacement['pid'],replacement['process_start_id'])!=(health['pid'],health['process_start_id'])
                 assert replacement['instance_id']!=health['instance_id']
                 assert replacement['image_sha256']==health['image_sha256']==args.runtime_sha256
-            assert pathlib.Path(restarted['summary']['data_dir'])==main,restarted
+            assert same_existing_path(restarted['summary']['data_dir'],main),restarted
             assert (main/'client.json').read_bytes()==config_before,'restart changed the account or API configuration'
             assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_restart,'restart changed original records, sync work or URK'
             if args.seed_binary:
@@ -1097,7 +1097,7 @@ for binary in BINARIES:
             reports[-1]['passed']=False
             reports[-1]['cleanup_errors']=cleanup_errors
         if network_evidence and reports[-1]['passed']:
-            reports[-1]['post_upgrade_sync_checked']=(network_evidence.get('profile')==str(main.resolve())
+            reports[-1]['post_upgrade_sync_checked']=(same_existing_path(network_evidence.get('profile'),main)
                 and all(network_evidence.get(field) is True for field in ('original_urk_preserved',
                     'existing_keys_registered','source_push','independent_pull_decrypted','reverse_marker_source_pull',
                     'original_active_preserved','tombstones_propagated','pending_work_acknowledged'))
