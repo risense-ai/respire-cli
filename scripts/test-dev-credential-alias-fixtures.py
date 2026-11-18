@@ -874,6 +874,8 @@ class SnapshotTests(unittest.TestCase):
         self.keys.normalized_current_entries = set()
         self.keys.collection = Collection()
         self.keys.connection = self.keys.daemon = None
+        self.keys.daemon_stderr = None
+        self.keys.bus_mode = 'private'
         self.session = dict(user=USER, keyring_account=ALIAS)
         for prefix, value in (('super:', SUPER), ('pass:', PASSWORD)):
             self.keys.collection.items.append(Item(self.keys.collection, self.keys.attributes('rsrs', prefix + ALIAS), value))
@@ -945,13 +947,60 @@ class SnapshotTests(unittest.TestCase):
         report = self.keys.cleanup()
         self.assertTrue(report['passed'])
         self.assertEqual(report['provider_daemon'],
-                         {'started': False, 'exit_code_at_cleanup_start': None})
+                         {'started': False, 'exit_code_at_cleanup_start': None,
+                          'abort_type': 'unknown', 'abort_location': 'unknown'})
         baseline = report['provider_schema_baseline']
         self.assertEqual(baseline['scope'],
                          'verified_registration_pairs_and_verified_recovered_super_only')
         self.assertEqual(baseline['registered_entries'], 4)
         self.assertEqual(baseline['observed_normalizations'], 4)
         self.assertFalse(baseline['initial_raw_snapshots_overwritten'])
+        private = (USER + ' ' + PASSWORD + ' ' + SUPER).encode()
+        for stderr, code, expected in (
+                (b'Bail out! Gkm:ERROR:/private/' + private + b'.c:42:function: assertion failed: (' + private + b')', -6, 'glib_assertion'),
+                (b'free(): double free detected ' + private, -6, 'allocator_double_free'),
+                (b'double free or corruption ' + private, -6, 'allocator_corruption'),
+                (b'malloc(): corrupted ' + private, -6, 'allocator_corruption'),
+                (b'munmap_chunk(): invalid pointer ' + private, -6, 'allocator_invalid_pointer'),
+                (b'*** stack smashing detected *** ' + private, -6, 'stack_smashing'),
+                (private, -6, 'unknown'), (b'ERROR:file.c:42:fn: assertion failed', None, 'unknown'),
+                (b'ERROR:file.c:42:fn: assertion failed', 0, 'unknown')):
+            self.assertEqual(secret_service.provider_abort_type(stderr, code), expected)
+        for filename in (b'gkd-secret-service.c', b'gkm-secret-item.c', b'egg-secure-memory.c', b'gmain.c'):
+            header = b'Bail out! Gkm:ERROR:/private/' + private + b'/' + filename + b':42:some_function: assertion failed: (' + private + b')'
+            location = secret_service.provider_abort_location(header, -6)
+            self.assertEqual(location, dict(file=filename.decode(), line=42, function='some_function'))
+            for value in (USER, PASSWORD, SUPER, '/private/', 'assertion failed'):
+                self.assertNotIn(value, json.dumps(location))
+            self.assertEqual(secret_service.provider_abort_location(header, None), 'unknown')
+            self.assertEqual(secret_service.provider_abort_location(header, 0), 'unknown')
+        for header in (
+                b'ERROR:/private/' + private + b'.c:42:some_function: assertion failed: (private)',
+                b'ERROR:/private/unknown.c:42:some_function: assertion failed: (private)',
+                b'ERROR:/private/gkm-secret-item.c:0:some_function: assertion failed: (private)',
+                b'ERROR:/private/gkm-secret-item.c:-1:some_function: assertion failed: (private)',
+                b'ERROR:/private/gkm-secret-item.c:42:function-with-value: assertion failed: (private)',
+                b'ERROR:/private/gkm-secret-item.c:42:some_function(' + private + b'): assertion failed: (private)',
+                b'ERROR:/private/gkm-secret-item.c:42:some_function: private assertion failed',
+                b'private ERROR:/private/gkm-secret-item.c:42:some_function: assertion failed: (private)',
+                private):
+            self.assertEqual(secret_service.provider_abort_location(header, -6), 'unknown')
+        if secret_service.os.name == 'posix':
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.object(secret_service, 'owned_path', lambda path: path):
+                root = Path(directory)
+                root.chmod(0o700)
+                with secret_service.private_provider_stderr(root) as stream:
+                    self.assertEqual(secret_service.stat.S_IMODE(root.stat().st_mode), 0o700)
+                    self.assertEqual(secret_service.stat.S_IMODE((root / 'provider.stderr').stat().st_mode), 0o600)
+                    stream.write(private)
+                self.assertTrue((root / 'provider.stderr').read_bytes() == private)
+                with self.assertRaises(FileExistsError):
+                    secret_service.private_provider_stderr(root)
+                root.chmod(0o755)
+                with self.assertRaisesRegex(RuntimeError, '^fixture_provider_root_not_private$'):
+                    secret_service.private_provider_stderr(root)
+                root.chmod(0o700)
 
     def test_foreign_user_alias_missing_untracked_rejected(self):
         for session in (dict(user='foreign', keyring_account=ALIAS), dict(user=USER, keyring_account=OTHER), dict(user=USER)):
@@ -976,6 +1025,33 @@ class SnapshotTests(unittest.TestCase):
                          {'passed': False, 'stage': 'empty_check', 'remaining_entries': 1})
         for forbidden in (PASSWORD, SUPER, USER, ALIAS, OTHER, 'foreign'):
             self.assertNotIn(forbidden, json.dumps(report))
+        with tempfile.TemporaryDirectory() as directory:
+            stderr = self.keys.daemon_stderr = Path(directory) / 'provider.stderr'
+            stderr.write_bytes(b'Bail out! Gkm:ERROR:/private/gkm-secret-item.c:42:gkm_secret_item_get: assertion failed: ('
+                               + (USER + PASSWORD + SUPER).encode() + b')')
+            daemon = Mock()
+            daemon.poll.return_value = -6
+            self.keys.daemon = daemon
+            # A dead provider cannot prove collection cleanup; null must stay unknown.
+            with patch.object(self.keys.collection, 'get_all_items', side_effect=RuntimeError('private')):
+                report = self.keys.cleanup()
+            self.assertFalse(report['passed'])
+            self.assertEqual(report['provider_daemon'], dict(started=True,
+                exit_code_at_cleanup_start=-6, abort_type='glib_assertion',
+                abort_location=dict(file='gkm-secret-item.c', line=42, function='gkm_secret_item_get')))
+            self.assertEqual(report['collection_cleanup'], dict(passed=False,
+                stage='enumeration', remaining_entries=None))
+            self.assertIn({'code': 'fixture_collection_enumeration_failed'}, report['remaining_entries'])
+            daemon.terminate.assert_not_called()
+            daemon.kill.assert_not_called()
+            for forbidden in (PASSWORD, SUPER, USER, ALIAS, OTHER, '/private/', 'assertion failed'):
+                self.assertNotIn(forbidden, json.dumps(report))
+            stderr.unlink()
+            report = self.keys.cleanup()
+            self.assertFalse(report['passed'])
+            self.assertEqual(report['provider_daemon']['abort_type'], 'unknown')
+            self.assertEqual(report['provider_daemon']['abort_location'], 'unknown')
+            self.assertIn({'code': 'fixture_provider_diagnostic_read_failed'}, report['remaining_entries'])
 
     def test_business_cleanup_accepts_factor_slots_but_never_deletes_foreign_entries(self):
         self.keys.verify_owner = lambda: None
