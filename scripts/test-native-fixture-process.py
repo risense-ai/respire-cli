@@ -143,10 +143,13 @@ probe = ForegroundOverlapProbe(foreground_call, timeout=1)
 probe.start()
 try:
     time.sleep(.03)  # The original finite workload has already returned.
-    for _ in range(6):
+    for completed in range(1, 7):
+        # Thread scheduling has no minimum throughput; use the existing deadline.
+        while len(probe.calls) < completed:
+            probe.check()
+            time.sleep(.001)
         probe.observe({'foreground': {'active': True}, 'background': {'active': False}})
         probe.check()
-        time.sleep(.01)
     assert not probe.observed.is_set() and len(probe.calls) >= 6
     probe.observe({'foreground': {'active': True}, 'background': {'active': True}})
     probe.check()
