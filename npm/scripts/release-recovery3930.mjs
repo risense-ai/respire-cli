@@ -69,7 +69,10 @@ export function recoveryScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
     const start=text.indexOf('      - name: Verify and extract the release binary\n');assert.ok(start>=0,'Missing original native entry');
     return text.slice(start);
   };
-  const originalSteps=nativeTail(producerSHA);assert.equal(nativeTail(consumerSHA).replaceAll('${{ inputs.recovery_suffix }}',''),originalSteps,'Windows native scope or commands changed');
+  const originalSteps=nativeTail(producerSHA);
+  const withoutArtifactSuffix=value=>value.replaceAll('${{ inputs.recovery_suffix }}','');
+  assert.equal(withoutArtifactSuffix(nativeTail(consumerSHA)),withoutArtifactSuffix(originalSteps),
+    'Native regression scope or commands changed');
   const show=(sha,file)=>execFileSync('git',['show',`${sha}:${file}`],{cwd,encoding:'utf8'});
   const cloud_steps_sha256=cloudScope(show(producerSHA,'.github/workflows/release.yml'),show(consumerSHA,recoveryWorkflow));
   const tree=execFileSync('git',['ls-tree','-r',producerSHA],{cwd,encoding:'utf8',maxBuffer:16*1024*1024});
