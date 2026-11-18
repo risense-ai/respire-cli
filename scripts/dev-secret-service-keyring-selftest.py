@@ -55,9 +55,22 @@ def business_check(manager, env, command, roundtrips, run=run_command, *, timeou
         if not report["credential_after_passed"]:
             raise RuntimeError("credential_cases_incomplete")
         report["stage"] = "complete"
-    except Exception:
-        # Do not publish backend exceptions, command arguments, paths or bus addresses.
+    except Exception as error:
+        # Publish only fixed classifications and process state, never backend text.
         report["diagnostic_failed"] = True
+        report["failure_code"] = "fixture_diagnostic_failed"
+        if isinstance(error, RuntimeError) and str(error) in {
+                "fixture_secret_service_daemon_exited",
+                "fixture_secret_service_owner_mismatch", "credential_cases_incomplete"}:
+            report["failure_code"] = str(error)
+        elif isinstance(error, subprocess.TimeoutExpired):
+            report["failure_code"] = "business_command_timeout"
+        if manager.daemon is not None:
+            daemon_exit = manager.daemon.poll()
+            report["secret_service_daemon"] = {
+                "state": "running" if daemon_exit is None else "exited",
+                "exit_code": daemon_exit,
+            }
     finally:
         try:
             manager.cleanup_business_entries()
@@ -214,6 +227,7 @@ def self_test():
 
     class FakeManager:
         def __init__(self, cleanup_ok=True):
+            self.daemon = None
             self.cleaned = False
             self.cleanup_ok = cleanup_ok
             self.owners = 0
@@ -272,11 +286,28 @@ def self_test():
         roundtrips(manager, cases)
 
     manager = FakeManager()
+    manager.daemon = SimpleNamespace(poll=lambda: -6)
     code, report = business_check(manager, {}, ["fake-business"], failed_after,
         lambda *args, **kwargs: SimpleNamespace(returncode=17))
     assert code == 17 and manager.cleaned and report["stage"] == "credential_after"
     assert report["business_credential_cleanup_passed"] and not report["passed"]
+    assert report["failure_code"] == "fixture_diagnostic_failed"
+    assert report["secret_service_daemon"] == {"state": "exited", "exit_code": -6}
+    assert type(report["secret_service_daemon"]["exit_code"]) is int
     assert "sensitive-after" not in json.dumps(report)
+
+    manager = FakeManager()
+    manager.daemon = SimpleNamespace(poll=lambda: -6)
+    with patch.object(manager, "verify_owner", side_effect=[None,
+            RuntimeError("fixture_secret_service_daemon_exited")]):
+        code, report = business_check(manager, {}, ["fake-business"], roundtrips,
+            lambda *args, **kwargs: SimpleNamespace(returncode=17))
+    assert code == 17 and manager.cleaned and report["stage"] == "credential_after"
+    assert report["failure_code"] == "fixture_secret_service_daemon_exited"
+    assert report["secret_service_daemon"] == {"state": "exited", "exit_code": -6}
+    assert type(report["secret_service_daemon"]["exit_code"]) is int
+    assert report["diagnostic_failed"] and not report["passed"]
+    assert report["business_credential_cleanup_passed"]
     print(json.dumps({"stage": "pure_selftest", "passed": True}))
     return 0
 
