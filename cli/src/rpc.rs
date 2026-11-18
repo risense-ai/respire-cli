@@ -1655,6 +1655,9 @@ mod tests {
         assert_eq!(result["envelope"]["summary"]["state"], "completed");
         assert_eq!(result["envelope"]["summary"]["response"]["envelope"], first["envelope"]);
         replay["id"] = json!(uuid::Uuid::new_v4().to_string());
+        replay["args"] = json!([r#"{ "schema_version": 1 }"#]);
+        assert_eq!(runtime.post(&replay)?["code"], "idempotency_conflict");
+        replay["id"] = json!(uuid::Uuid::new_v4().to_string());
         replay["method"] = json!("cli.exec");
         replay["args"] = json!(["--json", "status"]);
         assert_eq!(runtime.post(&replay)?["code"], "idempotency_conflict");
