@@ -39,6 +39,30 @@ def hosted_user_bus_environment():
             "RSRS_SS_FIXTURE_BUS": "hosted-user"}
 
 
+def private_provider_stderr(root):
+    root = owned_path(root)
+    metadata = root.stat()
+    require(root.is_dir() and not root.is_symlink() and metadata.st_uid == os.getuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o700, "fixture_provider_root_not_private")
+    return os.fdopen(os.open(root / "provider.stderr", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
+
+
+def provider_abort_type(stderr, exit_code):
+    # Linux SIGABRT only; raw text, paths, assertion values and hashes never leave this parser.
+    if exit_code != -6:
+        return "unknown"
+    if re.search(rb"(?m)^(?:Bail out! )?(?:[A-Za-z0-9_-]+:)?ERROR:[^\r\n]+: assertion failed", stderr):
+        return "glib_assertion"
+    for marker, kind in ((b"free(): double free detected", "allocator_double_free"),
+                         (b"double free or corruption", "allocator_corruption"),
+                         (b"malloc(): corrupted", "allocator_corruption"),
+                         (b"munmap_chunk(): invalid pointer", "allocator_invalid_pointer"),
+                         (b"*** stack smashing detected ***", "stack_smashing")):
+        if marker in stderr:
+            return kind
+    return "unknown"
+
+
 class SecretServiceKeys(_base.TrackedKeys):
     name = "linux-secret-service"
     credential_backend = "secret_service"
@@ -46,6 +70,7 @@ class SecretServiceKeys(_base.TrackedKeys):
     def __init__(self, root, *, hosted_user_bus=False):
         super().__init__(root)
         self.daemon = None
+        self.daemon_stderr = None
         self.connection = None
         self.attribute_snapshots = {}
         self.current_target_entries = set()
@@ -94,10 +119,12 @@ class SecretServiceKeys(_base.TrackedKeys):
                 "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")}
             if hosted_user_bus:
                 self.private_env["XDG_RUNTIME_DIR"] = expected["XDG_RUNTIME_DIR"]
-            self.daemon = subprocess.Popen([
-                "gnome-keyring-daemon", "--foreground", "--unlock", "--components=secrets",
-                "--control-directory", str(control)], env=env, stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with private_provider_stderr(root) as stderr:
+                self.daemon_stderr = root / "provider.stderr"
+                self.daemon = subprocess.Popen([
+                    "gnome-keyring-daemon", "--foreground", "--unlock", "--components=secrets",
+                    "--control-directory", str(control)], env=env, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=stderr)
             self.daemon.stdin.write(secrets.token_urlsafe(32).encode("utf-8"))
             self.daemon.stdin.close()
             deadline = time.monotonic() + 10
@@ -346,7 +373,8 @@ class SecretServiceKeys(_base.TrackedKeys):
                 remaining.append(event)
         report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
         report["provider_daemon"] = {"started": daemon_started,
-                                     "exit_code_at_cleanup_start": daemon_exit_code}
+                                     "exit_code_at_cleanup_start": daemon_exit_code,
+                                     "abort_type": "unknown"}
         report["provider_schema_baseline"] = {
             "scope": "verified_registration_pairs_and_verified_recovered_super_only",
             "registered_entries": len(self.current_target_entries),
@@ -406,6 +434,13 @@ class SecretServiceKeys(_base.TrackedKeys):
             except Exception:
                 report["passed"] = False
                 report["remaining_entries"].append({"code": "fixture_daemon_cleanup_failed"})
+        if self.daemon_stderr is not None:
+            try:
+                report["provider_daemon"]["abort_type"] = provider_abort_type(
+                    self.daemon_stderr.read_bytes(), daemon_exit_code)
+            except OSError:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_provider_diagnostic_read_failed"})
         return report
 
 
