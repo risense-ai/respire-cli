@@ -1,6 +1,6 @@
 //! Pinned Granite embedding installs without touching the BGE-M3 layout.
 //!
-//! The runtime registers the matching built-in profiles; this installer only
+//! The host can register the profile with the Runtime; this installer only
 //! stages verified bytes under `models/granite-311m-r2` and
 //! `models/granite-97m-r2`. It reuses the shared download and verification
 //! pipeline and never publishes files the checksum does not match.
@@ -168,6 +168,33 @@ pub struct InstallGraniteReport {
     pub skipped: bool,
     pub profile: String,
     pub model: String,
+}
+
+impl InstallGraniteReport {
+    /// Configuration for the Runtime's generic model registration command.
+    pub fn configuration(&self) -> Result<serde_json::Value> {
+        let pin = pin_for(&self.model)?;
+        let (dimensions, pad_token_id) = if pin == GRANITE_97M { (384, 179935) } else { (768, 0) };
+        let resource = |file: GraniteFile| serde_json::json!({
+            "path": self.dir.join(file.relative),
+            "size": file.size,
+            "sha256": file.sha256,
+        });
+        Ok(serde_json::json!({"model_profile": {
+            "id": pin.profile,
+            "embedding": {
+                "model_id": pin.repo, "revision": pin.revision, "dimensions": dimensions,
+                "max_tokens": 32768, "pooling": "cls", "normalize": true,
+                "query_prefix": "", "document_prefix": "", "pad_token_id": pad_token_id,
+                "pad_to_max_tokens": false,
+            },
+            "onnx": {
+                "input_ids": "input_ids", "attention_mask": "attention_mask",
+                "output": "last_hidden_state",
+            },
+            "weights": resource(pin.weights), "tokenizer": resource(pin.tokenizer),
+        }}))
+    }
 }
 
 /// Download (if needed) and publish a single pinned file.

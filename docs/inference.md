@@ -44,7 +44,17 @@ performance guarantee is implied. The commands are
 `rsrs model load cpu|gpu|npu --model VARIANT` for validated loading.
 `rsrs model install-granite` installs quantized granite-311m by default;
 `--model 97m` installs non-quantized granite-97m. Files land in separate
-profile directories and are not activated.
+profile directories. To register and activate a profile on Runtime dev.24:
+
+```sh
+rsrs model install-granite --model 311m --json > granite-install.json
+jq -e '.summary.configuration' granite-install.json > granite-profile.json
+rsrs model configure granite-profile.json
+rsrs model switch granite-311m-r2 --engine cpu
+```
+
+For the standard-precision model, use `--model 97m` and
+`rsrs model switch granite-97m-r2 --engine cpu`.
 `rsrs model engine cpu|gpu|npu --model VARIANT` remains a settings-only CLI command;
 TUI engine changes use the validated load path.
 
