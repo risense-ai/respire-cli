@@ -150,7 +150,10 @@ def main():
     parser.add_argument("--runtime-version", default=os.environ.get("RSRS_RUNTIME_VERSION"))
     parser.add_argument("--register", action="store_true", help="Exercise a disposable current-user OS registration on an ephemeral GitHub runner")
     parser.add_argument("--previous-binary", type=Path, help="Pinned official DEV.6 native executable for upgrade acceptance")
+    parser.add_argument("--keyless-foreground-diagnostic", type=Path, help="Run only keyless foreground and write fixed safe evidence; never full acceptance")
     args = parser.parse_args()
+    if args.keyless_foreground_diagnostic and args.register:
+        parser.error("keyless diagnostic cannot exercise OS registration")
     if args.previous_binary and not args.register:
         parser.error("previous-version upgrade acceptance requires --register")
     if args.register and not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"):
@@ -259,6 +262,7 @@ def main():
                 child = subprocess.Popen([binary, "runtime", "run"], env=env,
                                          stdout=log, stderr=log)
                 foreground_stopped = False
+                stop_returncode = None
                 health = None
                 owner = None
                 try:
@@ -298,6 +302,7 @@ def main():
                         assert status_reply["summary"]["store_ready"] is False
                     assert child.poll() is None, "status RPC terminated the foreground host"
                     stopped = command("runtime", "stop")
+                    stop_returncode = stopped.returncode
                     assert stopped.returncode == 0, stopped.stderr
                     foreground_stopped = True
                     assert child.wait(timeout=20) == 0
@@ -335,9 +340,55 @@ def main():
                         if primary_error is None:
                             raise
                         print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
+                    finally:
+                        try:
+                            if args.keyless_foreground_diagnostic or (not expected_ready and primary_error is not None):
+                                # Export only fixed markers and primitive state, never raw logs/journals.
+                                log.flush()
+                                log.seek(0)
+                                text = log.read()
+                                markers = (
+                                    "background core owner exited", "background core owner changed",
+                                    "core config owner exited", "core config owner is unavailable",
+                                    "core config owner changed", "core config response missing envelope",
+                                    "agent_config_outcome_unknown", "core_config_rejected",
+                                    "core config response binding mismatch", "core config request rejected",
+                                    "core config response missing", "core config response state mismatch",
+                                    "runtime_draining", "runtime_stopping", "runtime_unavailable",
+                                    "core config read failed", "core config validate failed", "core config apply failed",
+                                    "Connection refused", "Connection reset", "connection closed",
+                                    "Broken pipe", "timed out", "cannot reap foreground Runtime",
+                                    "Runtime drain thread panicked", "No such file or directory",
+                                    "Permission denied", "database is locked", "database is busy",
+                                )
+                                journals = []
+                                for path in sorted((root / "runtime/autostart/core-config-applications").glob("*.json")):
+                                    assert path.is_file() and not path.is_symlink(), "invalid diagnostic journal"
+                                    control = json.loads(path.read_text(encoding="utf-8"))["control"]
+                                    response = control.get("response")
+                                    journals.append({"apply_sent": control.get("apply_sent") is True,
+                                                     "response_present": response is not None,
+                                                     "response_ok": isinstance(response, dict) and response.get("ok") is True})
+                                report = {"schema": 1, "diagnostic_only": True, "full_passed": False,
+                                          "keyless": expected_ready is False,
+                                          "stop_returncode": stop_returncode,
+                                          "foreground_returncode": child.poll(),
+                                          "log_characters": len(text),
+                                          "error_markers": [marker for marker in markers if marker in text],
+                                          "startup_journals": journals}
+                                if args.keyless_foreground_diagnostic:
+                                    args.keyless_foreground_diagnostic.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                                print("isolated keyless foreground evidence", json.dumps(report), file=sys.stderr, flush=True)
+                        except Exception:
+                            if primary_error is None:
+                                raise
+                            primary_error.add_note("keyless_foreground_evidence_failed")
             return health
 
         foreground(False)
+        if args.keyless_foreground_diagnostic:
+            print("PASS: keyless foreground diagnostic only; full_passed=false")
+            return
         print("PASS: fresh default-off status, client-only denial, keyless locked foreground and owned stop")
         env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", root))
         seed_local_credentials(binary, env, keys, root)
@@ -1094,7 +1145,8 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
         if keys is not None:
             cleanup = keys.cleanup()
             assert cleanup.get("passed") is True and not cleanup.get("remaining_entries"), "synthetic native credential cleanup failed; fixture retained"
-    shutil.rmtree(temporary)
+        if sys.exc_info()[0] is None:
+            shutil.rmtree(temporary)
 
 
 if __name__ == "__main__":
