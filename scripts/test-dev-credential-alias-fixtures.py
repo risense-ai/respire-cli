@@ -99,6 +99,7 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'win32', 'Windows final-path identity')
     def test_windows_extended_path_and_case_use_full_file_identity(self):
+        base_smoke = object.__new__(legacy.Smoke)
         for path in ('\\\\?\\' + str(self.runtime),
                      ('\\\\?\\' + str(self.runtime)).upper().replace('\\', '/')):
             with self.subTest(path_form=path[:7]):
@@ -122,12 +123,16 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
                     config.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
                     self.assertTrue(smoke.profile(env).samefile(target))
                     self.assertEqual(smoke.session(env), session)
+                    self.assertTrue(base_smoke.profile(env).samefile(target))
+                    self.assertEqual(base_smoke.session(env), session)
         for target in (self.profile, outside):
             for selected in (str(target), '\\\\?\\' + str(target)):
                 with self.subTest(outside=selected):
                     config.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
                     with self.assertRaisesRegex(RuntimeError, '^login_profile_selection_outside_fixture$'):
                         smoke.session(env)
+                    with self.assertRaisesRegex(RuntimeError, '^login_profile_selection_outside_fixture$'):
+                        base_smoke.session(env)
         for selected in ('', None):
             config.write_text(json.dumps({'data_dir': selected}), encoding='utf-8')
             with self.assertRaisesRegex(RuntimeError, '^login_profile_selection_invalid$'):

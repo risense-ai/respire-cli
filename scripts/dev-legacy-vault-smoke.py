@@ -245,13 +245,13 @@ class Smoke:
         return result
 
     def profile(self, env):
-        # RSRS_DATA_DIR is the installation root; client.json selects its account.
-        root = Path(env["RSRS_DATA_DIR"]).resolve()
+        # Compare both paths in Rust's canonical form, including Windows verbatim prefixes.
+        root = Path(canonical_scope_path(env["RSRS_DATA_DIR"]))
         config_path = root / "client.json"
         config = json.loads(config_path.read_text()) if config_path.exists() else {}
         selected = config.get("data_dir", str(root))
         require(isinstance(selected, str) and bool(selected), "login_profile_selection_invalid")
-        profile = Path(selected).resolve()
+        profile = Path(canonical_scope_path(selected))
         require(profile.is_relative_to(root), "login_profile_selection_outside_fixture")
         return profile
 
