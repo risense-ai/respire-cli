@@ -41,7 +41,7 @@ MARKERS = {
     'windows_connection_refused': 'os error 10061',
 }
 STAGES = frozenset({
-    'runtime_install', 'model_engine_cpu', 'model_install_m3', 'runtime_stop',
+    'runtime_install', 'model_install_m3', 'runtime_stop',
     'copy_tokenizer', 'copy_quantized_model', 'copy_cpu_container',
     'download_legacy_fp16', 'verify_model_bytes',
 })
@@ -59,6 +59,7 @@ def environment_receipt():
         'home_under_runner_temp': home.resolve().is_relative_to(Path(os.environ['RUNNER_TEMP']).resolve()),
         'data_under_runner_temp': root.resolve().is_relative_to(Path(os.environ['RUNNER_TEMP']).resolve()),
         'runtime_override_present': bool(os.environ.get('RSRS_RUNTIME_BIN')),
+        'cpu_environment_selected': os.environ.get('RSRS_ENGINE') == 'cpu',
         'private_key_environment_present': any(
             os.environ.get(prefix + suffix)
             for prefix in ('RSRS_', 'ONEMEMORY_', 'RESPIRE_')
@@ -83,6 +84,35 @@ def environment_receipt():
     return result
 
 
+def cpu_receipt_checks(response):
+    if not isinstance(response, dict):
+        return {'receipt_shape_valid': False}
+    try:
+        details = response['details']
+        assets = details['assets']
+        backend = details['backend_load']
+        evidence = backend['evidence']
+        hashes = {
+            'bge-m3-tokenizer': '6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790',
+            'bge-m3-cpu-ort': '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff',
+        }
+        return {
+            'status_ok': response['status'] == 'ok',
+            'assets_complete': details['complete'] is True and details['missing'] == [],
+            'exact_cpu_assets': len(assets) == len(hashes) and {a['name'] for a in assets} == set(hashes),
+            'asset_hashes_verified': all(a['state'] == 'complete' and a['sha256'] == hashes[a['name']]
+                and a['actual_sha256'] == hashes[a['name']] for a in assets),
+            'backend_loaded': backend['state'] == 'loaded' and backend.get('reason') is None,
+            'contract_verified': evidence['contract'] == 1 and evidence['status'] == 'loaded',
+            'cpu_selected': evidence['engine'] == 'cpu' and evidence['selected'] == 'CPU'
+                and evidence['backend'] == 'onnx' and evidence['provider'] == 'CPUExecutionProvider',
+            'fresh_inference_completed': evidence['ready'] is True and evidence['fresh_session'] is True
+                and evidence['inference_completed'] is True and evidence['dimensions'] == 1024,
+        }
+    except (KeyError, TypeError):
+        return {'receipt_shape_valid': False}
+
+
 def main():
     stage, *command = sys.argv[1:]
     if stage not in STAGES or not command:
@@ -104,6 +134,9 @@ def main():
             response = json.loads(completed.stdout)
         except (ValueError, UnicodeError):
             row['response_shape'] = 'not_json'
+            if stage == 'model_install_m3' and exit_code == 0:
+                row.update(result='receipt_validation_failed', receipt_shape_valid=False)
+                exit_code = 1
         else:
             row['response_shape'] = 'object' if isinstance(response, dict) else 'not_object'
             if isinstance(response, dict):
@@ -115,9 +148,16 @@ def main():
                 status = response.get('status')
                 if status in ('ok', 'warn', 'fail', 'skip'):
                     row['status'] = status
+            if stage == 'model_install_m3' and exit_code == 0:
+                row['cpu_receipt_checks'] = cpu_receipt_checks(response)
+                if not all(row['cpu_receipt_checks'].values()) or os.environ.get('RSRS_ENGINE') != 'cpu':
+                    row['result'] = 'receipt_validation_failed'
+                    exit_code = 1
         text = (completed.stdout + completed.stderr).decode('utf-8', errors='replace')
         row['error_markers'] = [name for name, marker in MARKERS.items() if marker in text]
-        if exit_code != 0 and not row['error_markers']:
+        if row['result'] == 'receipt_validation_failed':
+            row['error_class'] = 'cpu_preparation_receipt_invalid'
+        elif exit_code != 0 and not row['error_markers']:
             row['error_class'] = 'unclassified_command_failure'
     row['after'] = environment_receipt()
     report['commands'].append(row)
