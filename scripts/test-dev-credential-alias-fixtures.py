@@ -1062,6 +1062,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         import hashlib
         import sqlite3
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from native_fixture_process import same_existing_path
         tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                      and node.name in ('recover_fixture_urk', 'library_state', 'snapshot',
@@ -1071,7 +1072,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                                        'custody_consumer_error', 'verify_fixture_custody')]
         namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing,
                          pathlib=SimpleNamespace(Path=Path), sys=SimpleNamespace(platform='darwin'),
-                         canonical_scope_path=lambda path: str(path.resolve()))
+                         canonical_scope_path=lambda path: str(path.resolve()), same_existing_path=same_existing_path)
         exec(compile(ast.Module(body=functions, type_ignores=[]), '<upgrade-library-fixture>', 'exec'), namespace)
         cls.helpers = namespace
 
