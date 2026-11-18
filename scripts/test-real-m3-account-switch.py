@@ -411,7 +411,13 @@ for binary in BINARIES:
                     seeded=captured_run([str(pathlib.Path(args.seed_binary).resolve()),'--json','--direct',*command],env=seed_env,timeout=180)
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
                     return seeded
-                seed_command('model','activate','m3')
+                seed_version = json.loads(seed_command('--version').stdout)['summary']['version']
+                # These published versions select M3 without activating an empty index.
+                if seed_version in {'1.0.11-dev.1', '1.0.11', '1.0.12', '1.0.15', '1.0.16',
+                                    '1.0.17-dev.6', '1.0.18', '1.0.19', '1.0.20'}:
+                    assert not any((profile/name).exists() for name in ('rsrs.db','onememory.db')), 'historical seed profile is not empty'
+                else:
+                    seed_command('model','activate','m3')
                 seed_command('remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
                 if args.database_dev_checkpoint == 'v1.0.11-dev.1':
                     first_ids = {row[0] for row in snapshot(profile)[0][0]}
