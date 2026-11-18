@@ -55,9 +55,22 @@ def business_check(manager, env, command, roundtrips, run=run_command, *, timeou
         if not report["credential_after_passed"]:
             raise RuntimeError("credential_cases_incomplete")
         report["stage"] = "complete"
-    except Exception:
-        # Do not publish backend exceptions, command arguments, paths or bus addresses.
+    except Exception as error:
+        # Publish only fixed classifications and process state, never backend text.
         report["diagnostic_failed"] = True
+        report["failure_code"] = "fixture_diagnostic_failed"
+        if isinstance(error, RuntimeError) and str(error) in {
+                "fixture_secret_service_daemon_exited",
+                "fixture_secret_service_owner_mismatch", "credential_cases_incomplete"}:
+            report["failure_code"] = str(error)
+        elif isinstance(error, subprocess.TimeoutExpired):
+            report["failure_code"] = "business_command_timeout"
+        if manager.daemon is not None:
+            daemon_exit = manager.daemon.poll()
+            report["secret_service_daemon"] = {
+                "state": "running" if daemon_exit is None else "exited",
+                "exit_code": daemon_exit,
+            }
     finally:
         try:
             manager.cleanup_business_entries()
@@ -214,6 +227,7 @@ def self_test():
 
     class FakeManager:
         def __init__(self, cleanup_ok=True):
+            self.daemon = None
             self.cleaned = False
             self.cleanup_ok = cleanup_ok
             self.owners = 0
