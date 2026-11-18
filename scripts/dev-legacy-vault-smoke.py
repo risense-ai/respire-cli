@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import ssl
 import sqlite3
 from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
@@ -901,17 +902,28 @@ class Smoke:
     def cleanup(self):
         cleanup = self.report["cloud_cleanup"]
         for account in self.accounts:
-            event = {"user": account["user"], "passed": False}
+            event = {"user": account["user"], "passed": False, "stage": "identity"}
             try:
                 require(account["confirmed"], "registration_outcome_unconfirmed")
+                event["stage"] = "purge_request"
                 value = self.api(account, "POST", "/api/self/purge", {"confirm": account["user"]})
                 require(value.get("purged") is True and value.get("user") == account["user"], "self_purge_not_confirmed")
+                event["stage"] = "verify_revocation"
                 status, _ = self.request(account, "GET", "/api/self")
                 require(status == 401, "purged_token_still_accepted")
                 cleanup["remaining_users"].remove(account["user"])
-                event.update(passed=True, old_token_rejected=True)
+                event.update(passed=True, old_token_rejected=True, stage="complete")
             except Exception as error:
                 event["code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+                if isinstance(error, urllib.error.URLError):
+                    reason = error.reason
+                    event["transport"] = ("timeout" if isinstance(reason, TimeoutError)
+                        else "dns" if isinstance(reason, socket.gaierror)
+                        else "tls" if isinstance(reason, ssl.SSLError)
+                        else "os_error" if isinstance(reason, OSError)
+                        else "unclassified_url_error")
+                    if isinstance(reason, OSError):
+                        event["errno"] = reason.errno
             cleanup["events"].append(event)
         cleanup["passed"] = not cleanup["remaining_users"]
 
