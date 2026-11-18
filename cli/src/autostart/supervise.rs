@@ -209,7 +209,8 @@ pub(super) fn configure_background_owner(owner: &crate::net_rpc::Health) -> Resu
         Err(error) => return Err(error),
     };
     if marker.try_exists()? { return Ok(false); }
-    let current = crate::rpc::probe_runtime()?.context("background core owner exited")?;
+    // An external stop may finish after the caller's health probe; let it reap the child.
+    let Some(current) = crate::rpc::probe_runtime()? else { return Ok(false); };
     anyhow::ensure!(current.pid == owner.pid && current.process_start_id == owner.process_start_id
         && crate::net_rpc::request_scope(&current)? == crate::net_rpc::request_scope(owner)?,
         "background core owner changed");
@@ -345,7 +346,7 @@ mod tests {
                 }
             }
         }
-        let _restore = Restore(["RSRS_RUNTIME_BIN", "RSRS_DATA_DIR", "RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART"]
+        let _restore = Restore(["RSRS_RUNTIME_BIN", "RSRS_DATA_DIR", "RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART", "RSRS_RPC_PORT"]
             .into_iter().map(|key| (key, std::env::var_os(key))).collect());
         let directory = tempfile::tempdir()?;
         std::env::set_var("RSRS_RUNTIME_BIN", directory.path().join("missing-runtime"));
@@ -378,6 +379,10 @@ mod tests {
         assert!(!configure_background_owner(&owner)?);
         assert!(controller.protects(&root.join("runtime/takeover"))?);
         drop(controller);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
+        drop(listener);
+        assert!(!configure_background_owner(&owner)?, "absent owner must leave configuration pending");
         let lock_file = root.join("runtime/takeover/lock.db");
         std::fs::remove_file(&lock_file)?;
         std::fs::create_dir(&lock_file)?;
