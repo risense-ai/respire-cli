@@ -1,0 +1,54 @@
+name: Recover CLI3930 musl v1.0.8 and resident
+on:
+  workflow_dispatch:
+    inputs:
+      fixture_commit:
+        description: Exact reviewed Lorentz fixture commit already merged into main
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      candidate: ${{ steps.plan.outputs.candidate }}
+      sha: ${{ steps.plan.outputs.sha }}
+      suffix: ${{ steps.plan.outputs.suffix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MUSL_FIXTURE_COMMIT: ${{ inputs.fixture_commit }}
+        run: node npm/scripts/release-musl3930.mjs plan '${{ runner.temp }}/musl-selection'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: musl-diagnostic-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/musl-selection/musl-diagnostic-plan.json
+          if-no-files-found: error
+          retention-days: 1
+  native-regression:
+    needs: plan
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      artifact_source: build
+      candidate_assets: ${{ needs.plan.outputs.candidate }}
+      ref: ${{ needs.plan.outputs.sha }}
+      version: 2.0.0-dev.19
+      validation_profile: full
+      recovery_run: '44276673815'
+      recovery_attempt: '1'
+      recovery_matrix: '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]'
+      recovery_suffix: ${{ needs.plan.outputs.suffix }}
+      musl_source_recovery: true
+      musl_fixture_commit: ${{ inputs.fixture_commit }}
+      client2_candidate_run_id: ''
+    secrets: inherit
