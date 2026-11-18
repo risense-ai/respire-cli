@@ -5,6 +5,10 @@ name: Dev server sweep
 on:
   workflow_dispatch:
     inputs:
+      windows_arm_takeover_only:
+        description: Build one instrumented ARM CLI and diagnose takeover guards; never release acceptance
+        type: boolean
+        default: false
       database_sync_only:
         description: Only test legacy ciphertext migration, real sync and independent current-device decryption
         type: boolean
@@ -69,8 +73,94 @@ permissions:
   actions: read
 
 jobs:
+  windows-arm-takeover:
+    if: ${{ inputs.windows_arm_takeover_only }}
+    name: Windows ARM64 takeover diagnostic only
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    env:
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      RSRS_RUNTIME_TRIPLE: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Require native Windows ARM64 and the frozen Runtime pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Diagnostic requires native Windows ARM64 hardware'
+          }
+          if ((Get-Content -Raw runtime-pin.json | ConvertFrom-Json).required -cne '2.0.0-dev.24') {
+            throw 'Diagnostic must retain frozen Runtime24'
+          }
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare the original candidate version
+        run: node npm/scripts/set-build-version.mjs 2.0.0-dev.19
+      - name: Build only the instrumented ARM frontend
+        run: cargo build --release --locked -p respire --bin rsrs --target aarch64-pc-windows-msvc --target-dir target/ci
+      - name: Bind the independent official frozen Runtime
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/takeover-runtime-proof
+        run: node scripts/ci-install-pinned-runtime.mjs target/ci/aarch64-pc-windows-msvc/release/rsrs.exe
+      - name: Run one isolated existing ARM sweep and expose only safe classifications
+        shell: pwsh
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_SHA: ${{ github.sha }}
+          RSRS_ENGINE: cpu
+          RSRS_TAKEOVER_DIAGNOSTIC: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'takeover-arm-sweep'
+          $console = Join-Path $env:RUNNER_TEMP 'takeover-arm-console.log'
+          $safe = Join-Path $env:RUNNER_TEMP 'takeover-classifications.txt'
+          $exe = Join-Path $PWD 'target/ci/aarch64-pc-windows-msvc/release/rsrs.exe'
+          $sweepExit = $null
+          try {
+            & pwsh -NoProfile -File scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion 2.0.0-dev.19 -Root $root -DeferSupplemental *> $console
+            $sweepExit = $LASTEXITCODE
+          } finally {
+            $records = [System.Collections.Generic.List[string]]::new()
+            $records.Add('diagnostic_only=true source_sha=' + $env:CLI_SHA)
+            $pattern = 'takeover_diag guard=(host_control|commands_legacy) component=\d+ canonical_equal=(true|false) base_equal=(true|false) root_equal=(true|false|io_error) within_root=(true|false)'
+            $logs = Join-Path $root 'logs'
+            if (Test-Path -LiteralPath $logs) {
+              foreach ($file in Get-ChildItem -LiteralPath $logs -File -Filter '*.err.txt') {
+                foreach ($line in [IO.File]::ReadLines($file.FullName)) {
+                  foreach ($match in [regex]::Matches($line, $pattern)) { $records.Add($match.Value) }
+                }
+              }
+            } else {
+              $records.Add('diagnostic_logs=unavailable')
+            }
+            foreach ($line in [IO.File]::ReadLines($console)) {
+              if ($line -cmatch '^(PASS|FAIL|EXPECTED_ERROR|SKIP) ([a-zA-Z0-9_.-]+) exit=(-?\d+) status=([a-z]+)') {
+                $records.Add($Matches[0])
+              }
+            }
+            $records.Add('diagnostic_match_count=' + @($records | Where-Object { $_ -cmatch '^takeover_diag ' }).Count)
+            [IO.File]::WriteAllLines($safe, $records, [Text.UTF8Encoding]::new($false))
+            $records | ForEach-Object { Write-Host $_ }
+          }
+          if ($null -eq $sweepExit) { throw 'Sweep did not return an exit code' }
+          if ($sweepExit -ne 0) { exit $sweepExit }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: windows-arm-takeover-classifications
+          path: ${{ runner.temp }}/takeover-classifications.txt
+          if-no-files-found: error
   sweep:
-    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
+    if: ${{ !inputs.windows_arm_takeover_only && (!inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only) }}
     name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -424,7 +514,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.database_sync_only && !inputs.business_only }}
+    if: ${{ !inputs.windows_arm_takeover_only && !inputs.database_sync_only && !inputs.business_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:

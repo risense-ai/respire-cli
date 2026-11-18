@@ -101,8 +101,26 @@ fn checked_takeover_directory() -> Result<std::path::PathBuf> {
                 "takeover path has an invalid file type: {}",
                 ancestor.display()
             );
+            let resolved = ancestor.canonicalize()?;
+            let expected = canonical_root.join(ancestor.strip_prefix(&root)?);
+            if resolved != expected
+                && std::env::var_os("RSRS_TAKEOVER_DIAGNOSTIC").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+            {
+                let root_equal = match root.canonicalize() {
+                    Ok(current) if current == canonical_root => "true",
+                    Ok(_) => "false",
+                    Err(_) => "io_error",
+                };
+                eprintln!(
+                    "takeover_diag guard=commands_legacy component={index} canonical_equal={} base_equal={} root_equal={root_equal} within_root={}",
+                    resolved == expected,
+                    resolved.parent() == expected.parent(),
+                    resolved.starts_with(&canonical_root),
+                );
+            }
             anyhow::ensure!(
-                ancestor.canonicalize()? == canonical_root.join(ancestor.strip_prefix(&root)?),
+                resolved == expected,
                 "takeover path escapes or changed its resolved installation root"
             );
         }
