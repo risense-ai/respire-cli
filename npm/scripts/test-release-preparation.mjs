@@ -1,14 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,writeFileSync,rmSync,readFileSync,mkdirSync,existsSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,rmSync,readFileSync,mkdirSync,existsSync,readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
-import {spawnSync} from 'node:child_process';
+import {spawnSync,execFileSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {publishedFullFixture} from './full-report-fixture.mjs';
 import {publishedAssetNames} from './extract-artifact.mjs';
 import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun} from './release-preparation.mjs';
+import {completeCandidate} from './candidate-artifact.mjs';
+import {continuationWorkflow,windowsTarget,validateContinuationRuns,continuationJobs,continuationArtifact,continuationArtifacts,
+  downloadContinuationArtifact,validateContinuationEvidence,continuationScripts} from './release-continuation.mjs';
 
 const sha='a'.repeat(40),hash='b'.repeat(64),version='1.2.3-dev.4';
 const targets=[['x86_64-unknown-linux-gnu','linux-x64-gnu'],['x86_64-unknown-linux-musl','linux-x64'],['aarch64-apple-darwin','macos-arm64'],['x86_64-pc-windows-msvc','win-x64']];
@@ -130,6 +133,7 @@ test('actual synthetic asset files bind source, version, platform and binary/run
           binary_file:binary,runtime_file:runtime,binary_sha256:sha256,runtime_sha256:sha256}));
     }
     assert.equal(preparedAssets(folder,source,layout).length,frontend?8:12);
+    if(frontend)assert.deepEqual(preparedAssets(folder,{...source,run_id:'701',producer:source},layout),preparedAssets(folder,source,layout));
     const metadata=join(folder,`cli-build-${targets[0][0]}.json`),original=JSON.parse(readFileSync(metadata));
     for(const mutate of frontend?[m=>m.binary_size++,m=>m.producer.run_attempt++,m=>m.producer.run_id='999',
       m=>m.runtime_file='unexpected-runtime.tar.gz',m=>m.schema_version=1]:[m=>m.schema_version=2]){
@@ -157,6 +161,13 @@ test('Release attests all full candidate consumers and publishes only verified i
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(release,/needs: \[plan, validate, native-regression, cloud-sweep, api-smoke\]/);
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
+  assert.match(release,/prepared_binary_run: \$\{\{ steps.prepared.outputs.prepared_binary_run \}\}/);
+  assert.equal((release.match(/run-id: \$\{\{ needs.plan.outputs.prepared_binary_run \}\}/g)||[]).length,2);
+  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-continuation,release-preparation,candidate-artifact,extract-artifact\}.mjs \| tar -x/g)||[]).length,4);
+  const continuation=readFileSync(new URL('../../.github/workflows/release-continuation.yml',import.meta.url),'utf8');
+  assert.match(continuation,/uses: \.\/.github\/workflows\/release-native-validation.yml/);
+  assert.match(continuation,/validation_profile: full/);
+  assert.doesNotMatch(continuation,/contents: write|actions: write|GITHUB_(SHA|RUN_ID|RUN_ATTEMPT):|gh run rerun|gh workflow run/);
   const publisher=release.split('\n  publish:\n')[1];
   assert.match(publisher,/needs.prepared-import.result == 'success'/);
   assert.match(publisher,/needs.publication-ready.result == 'success'/);
@@ -192,12 +203,26 @@ test('actual attester subprocess reads only main-bound mock APIs and rejects sta
     const inputs={'Cargo.lock':'synthetic locked dependencies','rust-toolchain.toml':'[toolchain]\nchannel="1.95.0"',
       'runtime-pin.json':JSON.stringify({required:runtimeVersion}),'.github/workflows/release.yml':'synthetic trusted Release',
       '.github/workflows/release-validation.yml':'synthetic trusted build and package validation',
-      '.github/workflows/release-native-validation.yml':'synthetic trusted native validation','npm/artifact-manifest.json':JSON.stringify(manifest)};
+      '.github/workflows/release-native-validation.yml':'      - name: Verify and extract the release binary\n        run: original-native-scope\n','npm/artifact-manifest.json':JSON.stringify(manifest)};
     const state=join(directory,'state.json'),reads=join(directory,'reads'),output=join(directory,'proof.json'),mock=join(directory,'mock.mjs');
     writeFileSync(mock,`import cp from 'node:child_process';import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
 const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
  const s=JSON.parse(fs.readFileSync(process.env.MOCK_PREPARATION));
- if(command==='git'){if(a.join(' ')==='rev-parse HEAD')return s.source.sha+'\\n';if(a[0]==='show'&&a[1].startsWith(s.source.sha+':')){const x=s.inputs[a[1].slice(41)];if(x===undefined)throw Error('Unknown source input');return Buffer.from(x);}throw Error('Unexpected git action');}
+ if(s.continuation){
+  if(command==='git'&&['merge-base','diff','ls-tree'].includes(a[0]))return '';
+  if(command==='git'&&a[0]==='show'&&a[1]===s.consumerRun.head_sha+':.github/workflows/release-native-validation.yml')return s.inputs['.github/workflows/release-native-validation.yml'];
+  if(command==='unzip')return a[0]==='-Z1'?'release-prepared.json\\n':JSON.stringify(s.proof);
+  if(command==='gh'){
+   const p=a.at(-1),base='repos/risense-ai/respire-cli/actions/';
+   if(p===base+'runs/701')return JSON.stringify(s.consumerRun);
+   if(p===base+'runs/701/attempts/1/jobs?per_page=100')return JSON.stringify([{jobs:s.current}]);
+   if(p===base+'runs/700/attempts/1/jobs?per_page=100')return JSON.stringify([{jobs:s.original}]);
+   if(p===base+'runs/701/artifacts?per_page=100')return JSON.stringify([{artifacts:s.consumerArtifacts}]);
+   if(p===base+'runs/700/artifacts?per_page=100')return JSON.stringify([{artifacts:s.artifacts}]);
+   if(p===base+'artifacts/9001/zip')return fs.readFileSync(s.zip);
+  }
+ }
+ if(command==='git'){if(a.join(' ')==='rev-parse HEAD')return s.source.sha+'\\n';if(a[0]==='show'&&a[1].startsWith(s.source.sha+':')){const x=s.inputs[a[1].slice(41)];if(x===undefined)throw Error('Unknown source input');return options?.encoding==='utf8'?x:Buffer.from(x);}throw Error('Unexpected git action');}
  if(command!=='gh')return original(command,a,options);
  const p=a.at(-1),base='repos/risense-ai/respire-cli/actions/';if(a[0]!=='api'||a.some(x=>['--method','-X','POST','PATCH','PUT','DELETE'].includes(x)))throw Error('Non-read API action');fs.appendFileSync(process.env.MOCK_READS,p+'\\n');let r;
  if(p===base+'runs/700')r=s.run;else if(p===base+'runs/600')r=s.ci;else if(p===base+'runs/700/attempts/1/jobs?per_page=10')r=[{jobs:s.jobs}];else if(p===base+'runs/700/artifacts?per_page=100')r=[{artifacts:s.artifacts}];else if(p===base+'workflows/ci.yml/runs?head_sha='+s.source.sha+'&per_page=100')r=[{workflow_runs:[s.ci]}];else throw Error('Unexpected API scope');return JSON.stringify(r);
@@ -205,6 +230,7 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
     const env={...process.env,MOCK_PREPARATION:state,MOCK_READS:reads,GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'700',GITHUB_RUN_ATTEMPT:'1',GITHUB_EVENT_NAME:'workflow_dispatch',
       GITHUB_REF:'refs/heads/main',GITHUB_SHA:sha,CLI_SHA:sha,CLI_VERSION:version,VALIDATION_PROFILE:'full',CANDIDATE_ASSETS:JSON.stringify(candidate)};
     const artifactNames=[...manifest.targets.map(t=>'cli-release-'+t.triple),'npm-release-validation','npm-release-packages'];
+    let attestedIdentity;
     for(const [index,mutate] of [()=>{},s=>s.run.head_sha='f'.repeat(40),s=>s.ci.event='workflow_dispatch',s=>s.jobs[0].conclusion='skipped',s=>s.run.run_attempt=2,
       ()=>rmSync(join(reports,'client2-published-online-x86_64-pc-windows-msvc','report.json'))].entries()){
       const {context}=fixture();
@@ -216,9 +242,109 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
       if(index===0){
         assert.equal(result.status,0,result.stderr);const proof=JSON.parse(readFileSync(output));
         assert.deepEqual(proof.source,source);assert.equal(Object.keys(proof.identity.hashes).length,7);
+        attestedIdentity=proof.identity;
         assert.equal(proof.assets.length,16);assert.equal(proof.packs.length,9);assert.equal(proof.state,'validated-unpublished');assert.equal(proof.full_result.gui_passed,true);
       }else{assert.notEqual(result.status,0);assert.equal(existsSync(output),false);}
     }
+    // Continue only Windows: all original bytes/reports retain their actual producer identities.
+    publishedFullFixture(reports,{candidate,assets:inventory,packsFolder:packs});
+    const consumer={...source,workflow:continuationWorkflow,run_id:'701',workflow_head_sha:'c'.repeat(40),producer:source};
+    const original=raw.jobs.map((j,i)=>({...j,id:100+i,started_at:time(0),completed_at:time(3)}));
+    const failed=original.find(j=>j.name===`native-regression / Native (${windowsTarget})`);failed.conclusion='failure';
+    const current=[{...failed,id:1000,conclusion:'success',run_id:701,head_sha:consumer.workflow_head_sha},
+      {id:1001,name:'preparation-receipt',status:'in_progress',started_at:time(3)}];
+    const joined=continuationJobs(original,current,source,consumer,manifest);
+    const {context:base}=fixture();
+    const run={...base.run,id:701,status:'in_progress',path:continuationWorkflow,head_sha:consumer.workflow_head_sha};
+    const producerRun={...base.run,status:'completed',conclusion:'failure'};
+    validateContinuationRuns(producerRun,run,source,consumer);
+    const names=[...manifest.targets.map(t=>'cli-release-'+t.triple),'npm-release-validation',
+      ...readdirSync(reports).filter(n=>!n.startsWith('published-assets-verification-'))];
+    const replaced=['candidate-assets-','resident-concurrency-','published-upgrades-','client2-published-online-'].map(p=>p+windowsTarget);
+    const metadata=(name,i,replace)=>({name,id:200+i,size_in_bytes:100,digest:'sha256:'+hash,expired:false,
+      workflow_run:{id:replace?701:700,head_sha:replace?consumer.workflow_head_sha:sha},created_at:time(1),updated_at:time(2)});
+    const ctx={...base,source:consumer,manifest,run,...joined,original,current,assets:inventory,packs:preparedPacks(packs,source,manifest),identity:attestedIdentity,
+      scripts:{producer_sha:sha,consumer_sha:consumer.workflow_head_sha,native_steps_sha256:createHash('sha256').update(inputs['.github/workflows/release-native-validation.yml']).digest('hex'),unchanged_tree_sha256:createHash('sha256').update('').digest('hex')},
+      artifacts:[...new Set(names)].map((n,i)=>metadata(n,i,false)),
+      consumerArtifacts:replaced.map((n,i)=>metadata(n,100+i,true))};
+    const options={evidenceOwners:joined.evidenceOwners,env:{...env,CLI_PRODUCER_RUN_ID:'700',CLI_PRODUCER_ATTEMPT:'1',GITHUB_RUN_ID:'701',GITHUB_SHA:consumer.workflow_head_sha}};
+    const full=()=>completeCandidate(candidate,inventory,reports,ctx.jobs,consumer,options);
+    const full_result=full();assert.equal(full_result.full_passed,true);assert.equal(full_result.historical_upgrades.length,8);
+    assert.equal(Object.keys(joined.evidenceOwners).filter(n=>n.startsWith('cloud-sweep')).length,7);
+    full_result.continuation={producer:source,consumer:{run_id:'701',run_attempt:1,sha:consumer.workflow_head_sha},scripts:ctx.scripts,
+      artifacts:continuationArtifacts(ctx),failed_native_job_id:failed.id,
+      failed_artifacts:replaced.map(name=>({...continuationArtifact(ctx.artifacts,name,failed,{sha,run_id:700,run_attempt:1},{failed:true}),reused:false}))};
+    validateContinuationEvidence(full_result,ctx);
+    const proof=createPreparation({...ctx,assets:inventory,packs:preparedPacks(packs,source,manifest),full_result});
+    ctx.run={...run,status:'completed',conclusion:'success'};
+    Object.assign(ctx.jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});
+    assert.equal(validatePreparation(proof,ctx),proof);
+    for(const mutate of [c=>c.original.find(j=>j.name==='api-smoke').run_attempt++,c=>c.current[0].head_sha='f'.repeat(40),
+      c=>c.original.find(j=>j.name.startsWith('cloud-sweep')).conclusion='failure',c=>c.current[0].status='in_progress',
+      c=>c.original.find(j=>j.name.startsWith('validate / Release')).run_id=999]){
+      const c=structuredClone(ctx);mutate(c);assert.throws(()=>continuationJobs(c.original,c.current,source,consumer,manifest));
+    }
+    for(const mutate of [r=>r.run_attempt++,r=>r.head_sha='f'.repeat(40),r=>r.status='in_progress',r=>r.conclusion='success']){
+      const r=structuredClone(producerRun);mutate(r);assert.throws(()=>validateContinuationRuns(r,run,source,consumer));
+    }
+    const binding=ctx.artifacts[0],build=original.find(j=>j.name===`validate / Release (${manifest.targets[0].triple})`);
+    continuationArtifact(ctx.artifacts,binding.name,build,{sha,run_id:700,run_attempt:1});
+    for(const mutate of [a=>a.expired=true,a=>a.digest='bad',a=>a.workflow_run.head_sha='f'.repeat(40),a=>a.created_at=time(4)]){
+      const a=structuredClone(binding);mutate(a);assert.throws(()=>continuationArtifact([a],a.name,build,{sha,run_id:700,run_attempt:1}));
+    }
+    for(const mutate of [p=>p.full_result.continuation.artifacts[0].digest='sha256:'+'f'.repeat(64),
+      p=>p.full_result.continuation.consumer.run_attempt++,p=>p.full_result.continuation.scripts.unchanged_tree_sha256='f'.repeat(64),
+      p=>p.full_result.continuation.artifacts.pop(),p=>p.full_result.continuation.failed_native_job_id++]){
+      const p=structuredClone(proof);mutate(p);assert.throws(()=>validatePreparation(p,ctx));
+    }
+    const nativeFile=join(reports,'resident-concurrency-'+windowsTarget,'real-account-return-verification.json'),nativeBytes=readFileSync(nativeFile);
+    const changed=JSON.parse(nativeBytes);changed[0].runtime_binary_sha256='f'.repeat(64);writeFileSync(nativeFile,JSON.stringify(changed));assert.throws(full);
+    writeFileSync(nativeFile,nativeBytes);
+    const upgradeFile=join(reports,'published-upgrades-'+windowsTarget,'published-upgrades.json'),upgradeBytes=readFileSync(upgradeFile);
+    const upgrade=JSON.parse(upgradeBytes);upgrade.sources[0].passed=false;writeFileSync(upgradeFile,JSON.stringify(upgrade));assert.throws(full);
+    writeFileSync(upgradeFile,upgradeBytes);
+    for(const mutate of [e=>e.CLI_PRODUCER_ATTEMPT='2',e=>e.CLI_PRODUCER_RUN_ID='999',e=>e.CLI_SHA='f'.repeat(40)]){
+      const e={...options.env};mutate(e);assert.throws(()=>completeCandidate(candidate,inventory,reports,ctx.jobs,consumer,{...options,env:e}));
+    }
+    const zip=join(directory,'bound.zip');
+    const zipper=spawnSync(process.platform==='win32'?'py':'python3',[...(process.platform==='win32'?['-3']:[]),'-I','-c',
+      'import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],"w"); z.writestr("report.json", "{\\"passed\\":true}"); z.close()',zip],{encoding:'utf8'});
+    assert.equal(zipper.status,0,zipper.stderr);
+    const zipBytes=readFileSync(zip),anchor={id:'1',size:zipBytes.length,digest:'sha256:'+createHash('sha256').update(zipBytes).digest('hex')};
+    const extracted=join(directory,'bound-extraction');
+    downloadContinuationArtifact(anchor,extracted,{transport:()=>zipBytes});assert.equal(JSON.parse(readFileSync(join(extracted,'report.json'))).passed,true);
+    assert.throws(()=>downloadContinuationArtifact({...anchor,digest:'sha256:'+hash},join(directory,'wrong-digest'),{transport:()=>zipBytes}));
+    assert.throws(()=>downloadContinuationArtifact({...anchor,size:1},join(directory,'wrong-size'),{transport:()=>zipBytes}));
+    const proofFile=join(directory,'continuation-proof.json');writeFileSync(proofFile,JSON.stringify(proof));
+    const proofZip=join(directory,'continuation-proof.zip');
+    const zipped=spawnSync(process.platform==='win32'?'py':'python3',[...(process.platform==='win32'?['-3']:[]),'-I','-c',
+      'import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],"w",zipfile.ZIP_DEFLATED); z.write(sys.argv[2],"release-prepared.json"); z.close()',proofZip,proofFile],{encoding:'utf8'});
+    assert.equal(zipped.status,0,zipped.stderr);
+    const proofBytes=readFileSync(proofZip),proofMetadata={...metadata('release-prepared-701-1',0,true),id:9001,size_in_bytes:proofBytes.length,
+      digest:'sha256:'+createHash('sha256').update(proofBytes).digest('hex')};
+    const replay={...ctx,continuation:true,source,inputs,run:producerRun,consumerRun:ctx.run,ci:base.ci,proof,zip:proofZip,
+      consumerArtifacts:[...ctx.consumerArtifacts,proofMetadata]};
+    const reader='import {readPreparedRun} from '+JSON.stringify(new URL('./release-preparation.mjs',import.meta.url).href)+'; const r=readPreparedRun("701",'+JSON.stringify(sha)+','+JSON.stringify(version)+',"full"); if(r.receipt.source.producer.run_id!=="700")throw Error("Wrong producer");';
+    for(const [index,mutate] of [()=>{},s=>s.consumerRun.run_attempt++,s=>s.original[0].run_attempt++,s=>s.consumerArtifacts.at(-1).digest='sha256:'+hash].entries()){
+      const s=structuredClone(replay);mutate(s);writeFileSync(state,JSON.stringify(s));
+      const result=spawnSync(process.execPath,['--import',pathToFileURL(mock).href,'--input-type=module','-e',reader],{env:{...env,GH_TOKEN:'offline-fixture-only'},encoding:'utf8',timeout:15000});
+      if(index===0)assert.equal(result.status,0,result.stderr);else assert.notEqual(result.status,0);
+    }
+    const gitFolder=join(directory,'script-contract');mkdirSync(gitFolder);
+    const git=(...args)=>execFileSync('git',args,{cwd:gitFolder,encoding:'utf8'}).trim();
+    git('init','-q');git('config','user.email','fixture@example.invalid');git('config','user.name','fixture');
+    mkdirSync(join(gitFolder,'scripts'));writeFileSync(join(gitFolder,'scripts','fixture.py'),'original fixture\n');
+    mkdirSync(join(gitFolder,'.github','workflows'),{recursive:true});writeFileSync(join(gitFolder,'.github','workflows','release-native-validation.yml'),inputs['.github/workflows/release-native-validation.yml']);
+    git('add','.');git('commit','-qm','original');const originalSHA=git('rev-parse','HEAD');
+    mkdirSync(join(gitFolder,'npm','scripts'),{recursive:true});writeFileSync(join(gitFolder,'npm','scripts','release-continuation.mjs'),'CI implementation\n');
+    git('add','.');git('commit','-qm','CI');const ciSHA=git('rev-parse','HEAD');
+    assert.match(continuationScripts(originalSHA,ciSHA,{cwd:gitFolder}).unchanged_tree_sha256,/^[a-f0-9]{64}$/);
+    writeFileSync(join(gitFolder,'.github','workflows','release-native-validation.yml'),inputs['.github/workflows/release-native-validation.yml'].replace('original-native-scope','reduced-native-scope'));
+    git('add','.');git('commit','-qm','changed native scope');
+    assert.throws(()=>continuationScripts(originalSHA,git('rev-parse','HEAD'),{cwd:gitFolder}),/Windows native scope or commands changed/);
+    writeFileSync(join(gitFolder,'.github','workflows','release-native-validation.yml'),inputs['.github/workflows/release-native-validation.yml']);
+    writeFileSync(join(gitFolder,'scripts','fixture.py'),'changed fixture\n');git('add','.');git('commit','-qm','changed scope');
+    assert.throws(()=>continuationScripts(originalSHA,git('rev-parse','HEAD'),{cwd:gitFolder}),/fixture or unrelated CI source changed/);
     assert(readFileSync(reads,'utf8').trim().split('\n').every(p=>p.startsWith('repos/risense-ai/respire-cli/actions/')));
   }finally{rmSync(directory,{recursive:true,force:true});}
 });

@@ -119,7 +119,14 @@ test('supported Linux ARM targets require native runners, every source feedback 
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
   for(const file of ['release-validation.yml','release-native-validation.yml','release.yml']){
     const workflow=text(file).replace(/\r\n/g,'\n');
-    for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
+    if(file==='release-native-validation.yml'){
+      const expression=workflow.match(/include: \$\{\{ fromJSON\((.*)\) \}\}/)?.[1];assert(expression);
+      assert(expression.startsWith("inputs.continuation_run != '' && "));
+      const [windows,full]=[...expression.matchAll(/'(\[.*?\])'/g)].map(m=>JSON.parse(m[1]));
+      assert.deepEqual(windows,[{os:'windows-latest',target:'x86_64-pc-windows-msvc',rustflags:'-C target-feature=-crt-static'}]);
+      assert.deepEqual(full.map(t=>t.target).sort(),manifest.targets.map(t=>t.triple).sort());
+      for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert.equal(full.find(t=>t.target===triple)?.os,'ubuntu-24.04-arm');
+    }else for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
     assert(workflow.includes('scripts/require-native-linux-arm64.sh'),file+' lacks hardware check');
   }
   const source=text('token-free-sdk-check.yml');assert.match(source,/if: \$\{\{ !contains\(inputs.target, '-musl'\) \}\}/);

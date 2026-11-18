@@ -223,6 +223,7 @@ jobs:
       prepared_receipt_sha256: ${{ steps.prepared.outputs.prepared_receipt_sha256 }}
       prepared_binary_artifact_ids: ${{ steps.prepared.outputs.prepared_binary_artifact_ids }}
       prepared_pack_artifact_ids: ${{ steps.prepared.outputs.prepared_pack_artifact_ids }}
+      prepared_binary_run: ${{ steps.prepared.outputs.prepared_binary_run }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -247,6 +248,8 @@ jobs:
         if: inputs.prepared_run != ''
         id: prepared
         run: |
+          # Use the current trusted reader while HEAD and product files remain the selected source.
+          git archive "$GITHUB_SHA" npm/scripts/{release-continuation,release-preparation,candidate-artifact,extract-artifact}.mjs | tar -x
           export CLI_SHA="$(git rev-parse HEAD)"
           node npm/scripts/release-preparation.mjs inspect
       - uses: actions/upload-artifact@v4
@@ -705,18 +708,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Load the current trusted preparation reader for frozen product bytes
+        run: git archive "$GITHUB_SHA" npm/scripts/{release-continuation,release-preparation,candidate-artifact,extract-artifact}.mjs | tar -x
       - run: node npm/scripts/prepared-import.mjs consumer
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.plan.outputs.prepared_binary_artifact_ids }}
-          run-id: ${{ inputs.prepared_run }}
+          run-id: ${{ needs.plan.outputs.prepared_binary_run }}
           github-token: ${{ github.token }}
           path: release-assets
           merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.plan.outputs.prepared_pack_artifact_ids }}
-          run-id: ${{ inputs.prepared_run }}
+          run-id: ${{ needs.plan.outputs.prepared_binary_run }}
           github-token: ${{ github.token }}
           path: npm/release-packages
           merge-multiple: true
@@ -768,6 +773,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Load the current trusted preparation reader for frozen product bytes
+        run: git archive "$GITHUB_SHA" npm/scripts/{release-continuation,release-preparation,candidate-artifact,extract-artifact}.mjs | tar -x
       - id: ready
         run: node npm/scripts/prepared-import.mjs readiness
 
@@ -805,6 +812,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Require publication barrier support before any npm write
         run: |
+          git archive "$GITHUB_SHA" npm/scripts/{release-continuation,release-preparation,candidate-artifact,extract-artifact}.mjs | tar -x
           # Old refs lacking the protocol must fail before scoped publication.
           test "$(node npm/scripts/release-publication.mjs protocol)" = 2
           node --input-type=module -e "import fs from 'node:fs'; if (JSON.parse(fs.readFileSync('npm/artifact-manifest.json')).npmScope !== 'rsrs-cli') throw Error('New publication requires the direct rsrs-cli launcher')"

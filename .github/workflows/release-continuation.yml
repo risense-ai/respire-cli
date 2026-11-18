@@ -1,0 +1,92 @@
+name: Continue frozen Windows native acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      producer_run:
+        description: Completed failed full Release with only Windows x64 native failed
+        required: true
+        type: string
+      producer_attempt:
+        description: Exact original producer attempt (never inferred from latest)
+        required: true
+        type: string
+      version:
+        description: Original exact CLI DEV version
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+env:
+  CONTINUATION_RUN: ${{ inputs.producer_run }}
+  CONTINUATION_ATTEMPT: ${{ inputs.producer_attempt }}
+  CLI_VERSION: ${{ inputs.version }}
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      candidate: ${{ steps.plan.outputs.candidate }}
+      client2_release: ${{ steps.plan.outputs.client2_release }}
+      client2_commit: ${{ steps.plan.outputs.client2_commit }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-continuation.mjs plan '${{ runner.temp }}/origin-selection'
+  native-regression:
+    needs: plan
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      artifact_source: build
+      candidate_assets: ${{ needs.plan.outputs.candidate }}
+      ref: ${{ needs.plan.outputs.sha }}
+      harness_ref: ${{ github.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      validation_profile: full
+      continuation_run: ${{ inputs.producer_run }}
+      continuation_attempt: ${{ inputs.producer_attempt }}
+      client2_release: ${{ needs.plan.outputs.client2_release }}
+      client2_commit: ${{ needs.plan.outputs.client2_commit }}
+      client2_candidate_run_id: ''
+    secrets: inherit
+  preparation-receipt:
+    needs: [plan, native-regression]
+    runs-on: ubuntu-latest
+    env:
+      CLI_SHA: ${{ needs.plan.outputs.sha }}
+      CLI_PRODUCER_RUN_ID: ${{ inputs.producer_run }}
+      CLI_PRODUCER_ATTEMPT: ${{ inputs.producer_attempt }}
+      VALIDATION_PROFILE: full
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Join only successful bound reports and verify complete original full scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-continuation.mjs attest '${{ runner.temp }}/full-reports' release-prepared.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-prepared.json
+          if-no-files-found: error
+          retention-days: 1

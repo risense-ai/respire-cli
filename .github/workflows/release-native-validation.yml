@@ -28,6 +28,17 @@ on:
       producer_prefix:
         default: ''
         type: string
+      continuation_run:
+        description: Original frozen producer; selects only the complete Windows x64 native scope
+        default: ''
+        type: string
+      continuation_attempt:
+        default: ''
+        type: string
+      harness_ref:
+        description: Trusted continuation implementation; product and fixture scripts must match producer
+        default: ''
+        type: string
       client2_release:
         description: Explicit public Client2 tag for product upgrade acceptance; empty selects CI candidate evidence
         default: ''
@@ -52,6 +63,11 @@ env:
   REQUEST_PUBLISH: 'false'
   VALIDATION_PROFILE: full
   RELEASE_REF: ${{ inputs.ref }}
+  CONTINUATION_RUN: ${{ inputs.continuation_run }}
+  CONTINUATION_ATTEMPT: ${{ inputs.continuation_attempt }}
+  CLI_PRODUCER_RUN_ID: ${{ inputs.continuation_run }}
+  CLI_PRODUCER_ATTEMPT: ${{ inputs.continuation_attempt }}
+  CLI_VERSION: ${{ inputs.version }}
 
 jobs:
   native:
@@ -62,30 +78,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
+        include: ${{ fromJSON(inputs.continuation_run != '' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","rustflags":"-C target-feature=-crt-static"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"os":"macos-15-intel","target":"x86_64-apple-darwin"},{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","rustflags":"-C target-feature=-crt-static"},{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc","rustflags":"-C target-feature=-crt-static"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.harness_ref || inputs.ref }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Require native Windows ARM64 hardware
         if: matrix.target == 'aarch64-pc-windows-msvc'
@@ -174,10 +173,16 @@ jobs:
           path: validated-cli
           merge-multiple: true
       - uses: actions/download-artifact@v4
-        if: inputs.validation_profile == 'full' && inputs.artifact_source != 'published-assets'
+        if: inputs.validation_profile == 'full' && inputs.artifact_source != 'published-assets' && inputs.continuation_run == ''
         with:
           name: cli-release-${{ matrix.target }}
           path: validated-cli
+      - name: Verify original producer job, ZIP and metadata without replacing its identity
+        if: inputs.continuation_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: node npm/scripts/release-continuation.mjs native validated-cli
       - uses: actions/download-artifact@v4
         if: inputs.artifact_source == 'published-assets'
         with:

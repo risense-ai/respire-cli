@@ -10,6 +10,7 @@ import {api,pages,output as setOutput} from './release-publication.mjs';
 import {readVerifiedReceipt} from './verified-receipt.mjs';
 import {frontendLayout, releaseAssetNames, validateBuildMetadata} from './verify-binary.mjs';
 import {completeCandidate} from './candidate-artifact.mjs';
+import {continuationWorkflow,continuationContext,validateContinuationEvidence} from './release-continuation.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
@@ -18,17 +19,23 @@ const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const positive=value=>/^[1-9]\d*$/.test(String(value))&&Number.isSafeInteger(Number(value));
 export const preparationName=source=>`release-prepared-${source.run_id}-${source.run_attempt}`;
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+const preparationHead=source=>source.producer?source.workflow_head_sha:source.sha;
 
 export function validatePreparationSource(source){
-  requireValue(source?.repository===REPO&&source.workflow===WORKFLOW&&positive(source.run_id)&&positive(source.run_attempt)&&
+  requireValue(source?.repository===REPO&&[WORKFLOW,continuationWorkflow].includes(source.workflow)&&positive(source.run_id)&&positive(source.run_attempt)&&
     SHA.test(source.sha||'')&&/^\d+\.\d+\.\d+-dev\.[1-9]\d*$/.test(source.version||''), 'Invalid exact-source DEV preparation');
+  if(source.workflow===continuationWorkflow){
+    validatePreparationSource(source.producer);
+    requireValue(source.producer.workflow===WORKFLOW&&source.producer.sha===source.sha&&source.producer.version===source.version&&
+      String(source.producer.run_id)!==String(source.run_id)&&SHA.test(source.workflow_head_sha||''),'Invalid continuation producer/consumer identity');
+  }else requireValue(source.producer===undefined,'Ordinary preparation cannot replace its producer');
   return source;
 }
 export function validatePreparationRun(run,source,{producing=false}={}){
   validatePreparationSource(source);
   requireValue(String(run?.id)===String(source.run_id)&&Number(run.run_attempt)===Number(source.run_attempt)&&
-    run.path===WORKFLOW&&run.head_repository?.full_name===REPO&&run.event==='workflow_dispatch'&&
-    run.head_branch==='main'&&run.head_sha===source.sha&&
+    run.path===source.workflow&&run.head_repository?.full_name===REPO&&run.event==='workflow_dispatch'&&
+    run.head_branch==='main'&&run.head_sha===preparationHead(source)&&
     (producing?run.status==='in_progress':run.status==='completed'&&run.conclusion==='success'),
     'Preparation must be the exact successful main Release attempt; PR, stale, fork and foreign-source runs are refused');
 }
@@ -84,6 +91,7 @@ export function preparationValidation(jobs,ci,source,manifest,profile='full'){
 }
 
 export function preparationArtifacts(artifacts,source,manifest){
+  source=source.producer || source;
   const names=[...manifest.targets.map(t=>`cli-release-${t.triple}`),'npm-release-validation','npm-release-packages'];
   return names.map(name=>{
     const hits=artifacts.filter(a=>a.name===name);
@@ -108,7 +116,7 @@ export function preparedAssets(folder,source,manifest){
     const binary=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,runtime=`rsrs-${t.triple}-runtime.tar.gz`,metadata=`cli-build-${t.triple}.json`;
     const b=ordinaryFile(folder,binary),r=frontendLayout(manifest)?undefined:ordinaryFile(folder,runtime),m=ordinaryFile(folder,metadata,65536);
     const info=JSON.parse(readFileSync(join(folder,metadata)));
-    validateBuildMetadata(info,manifest,t.triple,source,b,r);
+    validateBuildMetadata(info,manifest,t.triple,source.producer || source,b,r);
     assets.push(b,...(r?[r]:[]),m);
   }
   requireValue(same(readdirSync(folder).sort(),assets.map(a=>a.file).sort()),'Unexpected or missing prepared release asset');
@@ -137,15 +145,17 @@ export function preparationReceiptJob(jobs,{producing=false}={}){
   return job;
 }
 
-export function createPreparation({source,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result,profile='full',now=new Date().toISOString()}){
+export function createPreparation(context){
+  const {source,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result,profile:requestedProfile='full',now=new Date().toISOString()}=context;
   validatePreparationRun(run,source,{producing:true});
-  profile=validationProfile(profile);
+  const profile=validationProfile(requestedProfile);
   const validation=preparationValidation(jobs,ci,source,manifest,profile),time=parseTimestamp(now);
   preparationReceiptJob(jobs,{producing:true});
   // Completed API gates are read before writing; runner time is audit data only.
   requireValue(time!==null,'Preparation receipt clock is invalid');
   validatePreparedBytes(assets,packs,source,manifest);
   validatePreparationFull(full_result,source,manifest);
+  if(source.producer)validateContinuationEvidence(full_result,context);
   return structuredClone({schema:1,kind:'release-prepared',state:'validated-unpublished',validation_profile:profile,source,identity,validation,
     origin_artifacts:preparationArtifacts(artifacts,source,manifest),assets,packs,full_result,prepared_at:now});
 }
@@ -154,7 +164,7 @@ export function validatePreparationFull(result,source,manifest){
     &&result.profile_import?.required===false&&result.profile_import.status==='not-run'
     &&result.profile_import.diagnostic_workflow==='.github/workflows/migration-keyring-check.yml'
     &&result.kind==='candidate-full'&&result.full_passed===true&&result.gui_passed===true
-    &&result.harness_sha===source.sha&&result.product_sources?.cli===source.sha&&HASH.test(result.manifest_sha256||'')
+    &&result.harness_sha===preparationHead(source)&&result.product_sources?.cli===source.sha&&HASH.test(result.manifest_sha256||'')
     &&Number(result.run_id)===Number(source.run_id)&&Number(result.run_attempt)===Number(source.run_attempt)
     &&Array.isArray(result.historical_upgrades)&&result.historical_upgrades.length===manifest.targets.length
     &&manifest.targets.every(t=>result.historical_upgrades.filter(r=>r.target===t.triple&&r.profile==='full'&&r.all_published_sources_covered===true).length===1)
@@ -179,6 +189,7 @@ export function validatePreparationHistory(receipt,context){
     same(receipt.source,source)&&same(receipt.identity,identity),'Prepared receipt source, SDK, toolchain or layout differs');
   const profile=validationProfile(receipt.validation_profile);
   validatePreparationFull(receipt.full_result,source,manifest);
+  if(source.producer)validateContinuationEvidence(receipt.full_result,context);
   validateRegressionContract(receipt.validation?.inventory,manifest,profile);
   if(context.validation_profile!==undefined)requireValue(profile===validationProfile(context.validation_profile),'Prepared validation profile differs');
   requireValue(same(receipt.validation,preparationValidation(jobs,ci,source,manifest,profile)), 'Prepared CI/regression proof changed or is stale');
@@ -197,6 +208,7 @@ export function validatePreparation(receipt,context){
 
 export function preparationContext(source){
   validatePreparationSource(source);
+  if(source.producer)return continuationContext(source);
   const run=api(`repos/${REPO}/actions/runs/${source.run_id}`);
   const jobs=pages(`repos/${REPO}/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
   const artifacts=pages(`repos/${REPO}/actions/runs/${source.run_id}/artifacts?per_page=100`).flatMap(p=>p.artifacts);
@@ -227,7 +239,7 @@ export function attestPreparation(assetsFolder,packsFolder,output,reportsFolder)
 export function preparationLink(receipt,metadata){
   const s=validatePreparationSource(receipt.source);
   requireValue(metadata?.name===preparationName(s)&&positive(metadata.id)&&/^sha256:[a-f0-9]{64}$/.test(metadata.digest||'')&&
-    metadata.expired===false&&String(metadata.workflow_run?.id)===String(s.run_id)&&metadata.workflow_run.head_sha===s.sha,
+    metadata.expired===false&&String(metadata.workflow_run?.id)===String(s.run_id)&&metadata.workflow_run.head_sha===preparationHead(s),
     'Preparation proof artifact is expired, foreign or unbound');
   return {source:structuredClone(s),artifact:{id:String(metadata.id),name:metadata.name,digest:metadata.digest,size:metadata.size_in_bytes},
     receipt_sha256:digest(JSON.stringify(receipt))};
@@ -243,19 +255,21 @@ export function validatePreparationLink(link,source){
 export function readPreparedRun(runId,sha,version,profile=process.env.VALIDATION_PROFILE){
   requireValue(positive(runId)&&SHA.test(sha||''),'Invalid preparation lookup');
   const initial=api(`repos/${REPO}/actions/runs/${runId}`);
-  requireValue(String(initial.id)===String(runId)&&positive(initial.run_attempt)&&initial.path===WORKFLOW&&
-    initial.event==='workflow_dispatch'&&initial.head_branch==='main'&&initial.head_sha===sha&&initial.head_repository?.full_name===REPO&&
+  requireValue(String(initial.id)===String(runId)&&positive(initial.run_attempt)&&[WORKFLOW,continuationWorkflow].includes(initial.path)&&
+    initial.event==='workflow_dispatch'&&initial.head_branch==='main'&&initial.head_repository?.full_name===REPO&&
     initial.status==='completed'&&initial.conclusion==='success','Only a completed exact-main preparation can be consumed');
   const name=preparationName({run_id:runId,run_attempt:initial.run_attempt});
   const initialArtifacts=pages(`repos/${REPO}/actions/runs/${runId}/artifacts?per_page=100`).flatMap(p=>p.artifacts).filter(a=>a.name===name);
   requireValue(initialArtifacts.length===1,'Preparation proof is missing or duplicated');
   const receipt=readVerifiedReceipt(initialArtifacts[0],'release-prepared.json',{runId,headSha:initial.head_sha});
   if(profile!==undefined)requireValue(validationProfile(receipt.validation_profile)===validationProfile(profile),'Selected preparation validation profile differs');
-  const source=validatePreparationSource({repository:REPO,workflow:WORKFLOW,run_id:String(runId),run_attempt:Number(initial.run_attempt),
-    sha,version:version||receipt.source?.version});
+  const source=validatePreparationSource(receipt.source);
+  requireValue(source.sha===sha&&source.workflow===initial.path&&source.repository===REPO&&String(source.run_id)===String(runId)&&
+    Number(source.run_attempt)===Number(initial.run_attempt)&&preparationHead(source)===initial.head_sha&&
+    (!version||version===source.version),'Prepared source/consumer/version differs');
   const context=preparationContext(source);
   validatePreparation(receipt,context);
-  const proofs=context.artifacts.filter(a=>a.name===name);
+  const proofs=(context.consumerArtifacts || context.artifacts).filter(a=>a.name===name);
   requireValue(proofs.length===1,'Duplicate preparation proof artifact');
   requireValue(String(proofs[0].id)===String(initialArtifacts[0].id)&&proofs[0].digest===initialArtifacts[0].digest&&
     proofs[0].size_in_bytes===initialArtifacts[0].size_in_bytes,'Preparation proof changed during selection');
@@ -297,6 +311,7 @@ export function inspectPreparation(runId,sha,version){
   // Only public artifact IDs and the exact version are workflow outputs.
   setOutput({prepared_run:result.receipt.source.run_id,prepared_version:result.receipt.source.version,
     prepared_attempt:result.receipt.source.run_attempt,prepared_artifact_id:result.link.artifact.id,
+    prepared_binary_run:(result.receipt.source.producer || result.receipt.source).run_id,
     prepared_artifact_digest:result.link.artifact.digest,prepared_receipt_sha256:result.link.receipt_sha256,
     prepared_binary_artifact_ids:result.receipt.origin_artifacts.filter(a=>a.name.startsWith('cli-release-')).map(a=>a.id).join(','),
     prepared_pack_artifact_ids:result.receipt.origin_artifacts.filter(a=>a.name==='npm-release-packages').map(a=>a.id).join(',')});
