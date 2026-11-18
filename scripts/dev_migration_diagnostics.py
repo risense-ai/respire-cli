@@ -91,6 +91,30 @@ def migration_execution_state(fixture_root, env, arguments, envelope):
                 return {"state": "busy" if type(code) is int and code & 255 in (5, 6) else "sqlite_error",
                         "sqlite_code": code if type(code) is int else None}
 
+        def staged_conversion(stage):
+            path = owned(stage / 'onememory.db')
+            if not path.is_file():
+                return {'status': 'legacy_database_absent'}
+            try:
+                with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=0.1)) as connection:
+                    connection.execute('PRAGMA query_only=ON')
+                    journal = connection.execute('PRAGMA journal_mode').fetchone()[0]
+                    total, converted = connection.execute('''SELECT COUNT(*),
+                        COUNT(CASE WHEN substr(ciphertext, 1, 8) = 'rsrs:v1:' THEN 1 END)
+                        FROM memories''').fetchone()
+                    triggers = connection.execute('''SELECT COUNT(*) FROM sqlite_master
+                        WHERE type = 'trigger' AND name IN ('sync_capture_insert', 'sync_capture_update')''').fetchone()[0]
+            except sqlite3.Error as error:
+                return {'status': 'sqlite_error', 'sqlite_code': getattr(error, 'sqlite_errorcode', None)}
+            result = {'status': 'collected', 'memory_rows': total, 'converted_rows': converted,
+                      'sync_capture_triggers': triggers,
+                      'journal_mode': journal if journal in ('delete', 'wal', 'truncate', 'persist', 'memory', 'off') else 'other'}
+            path = owned(stage / 'session.json')
+            if path.is_file():
+                session = json.loads(path.read_text(encoding='utf-8'))
+                result['session_rewritten'] = session.get('crypto_namespace') == 'rsrs:v1:' and session.get('keyring_account') == 'legacy-' + source[:16]
+            return result
+
         host_records = []
         directory = owned(root / "runtime/autostart/migrations")
         if directory.exists():
@@ -135,6 +159,8 @@ def migration_execution_state(fixture_root, env, arguments, envelope):
             result["staging_exists"] = stage.is_dir()
             result["staging_receipt_exists"] = owned(stage / ".rsrs-migration.json").is_file()
             result["staging_databases"] = {name: database_state(stage / name) for name in ("onememory.db", "rsrs.db")}
+            if intent['phase'] == 'transforming':
+                result['staging_conversion'] = staged_conversion(stage)
         result["destination_databases"] = {name: database_state(destination / name) for name in ("onememory.db", "rsrs.db")}
         if os.name == "nt":
             import winreg
