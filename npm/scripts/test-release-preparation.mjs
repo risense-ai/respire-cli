@@ -167,7 +167,7 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
   assert.match(release,/prepared_binary_run: \$\{\{ steps.prepared.outputs.prepared_binary_run \}\}/);
   assert.equal((release.match(/run-id: \$\{\{ needs.plan.outputs.prepared_binary_run \}\}/g)||[]).length,2);
-  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication\}.mjs \| tar -x/g)||[]).length,4);
+  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt\}.mjs \| tar -x/g)||[]).length,4);
   const continuation=readFileSync(new URL('../../.github/workflows/release-recovery3930.yml',import.meta.url),'utf8');
   assert.match(continuation,/uses: \.\/.github\/workflows\/release-native-validation.yml/);
   assert.match(continuation,/validation_profile: full/);

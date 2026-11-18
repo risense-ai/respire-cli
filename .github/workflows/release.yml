@@ -249,7 +249,7 @@ jobs:
         id: prepared
         run: |
           # Use the current trusted reader while HEAD and product files remain the selected source.
-          git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs | tar -x
+          git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt}.mjs | tar -x
           export CLI_SHA="$(git rev-parse HEAD)"
           node npm/scripts/release-preparation.mjs inspect
       - uses: actions/upload-artifact@v4
@@ -709,7 +709,7 @@ jobs:
         with:
           node-version: '24'
       - name: Load the current trusted preparation reader for frozen product bytes
-        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs | tar -x
+        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt}.mjs | tar -x
       - run: node npm/scripts/prepared-import.mjs consumer
       - uses: actions/download-artifact@v4
         with:
@@ -774,7 +774,7 @@ jobs:
         with:
           node-version: '24'
       - name: Load the current trusted preparation reader for frozen product bytes
-        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs | tar -x
+        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt}.mjs | tar -x
       - id: ready
         run: node npm/scripts/prepared-import.mjs readiness
 
@@ -812,7 +812,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Require publication barrier support before any npm write
         run: |
-          git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs | tar -x
+          git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt}.mjs | tar -x
           # Old refs lacking the protocol must fail before scoped publication.
           test "$(node npm/scripts/release-publication.mjs protocol)" = 2
           node --input-type=module -e "import fs from 'node:fs'; if (JSON.parse(fs.readFileSync('npm/artifact-manifest.json')).npmScope !== 'rsrs-cli') throw Error('New publication requires the direct rsrs-cli launcher')"
