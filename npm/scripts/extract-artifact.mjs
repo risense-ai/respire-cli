@@ -755,7 +755,8 @@ export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2}=
   if(client2)requireValue(sourcePattern.test(client2.source_sha||'') && gui.source_sha===client2.source_sha
     && gui.release===client2.release && gui.official_exe_verified===true, 'GUI Client2 source/release differs from the selected product');
   const cliHash=spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256;
-  for(const phase of ['initial','restart'])requireValue(gui.cli_processes?.some(p=>p.phase===phase && p.sha256===cliHash
+  // Earlier PowerShell reports can start with a null from an uninitialized array.
+  for(const phase of ['initial','restart'])requireValue(gui.cli_processes?.some(p=>p?.phase===phase && p.sha256===cliHash
     && positiveID(p.pid) && positiveID(p.parent_pid) && typeof p.started_ticks==='string' && /^\d+$/.test(p.started_ticks)
     && p.parent_verified===true && p.session_verified===true && p.lifetime_verified===true), 'GUI did not observe the actual CLI image');
   const inputs=candidate?gui.candidate_inputs:gui.published_inputs;

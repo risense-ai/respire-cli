@@ -37,6 +37,7 @@ $report = [ordered]@{
     native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
     target_desktop_screenshot_saved = $false
     cleanup_exit_confirmed = $false; cleanup_pending_absence = @()
+    cli_processes = @(); cli_observation_diagnostics = @()
     full_gui_acceptance = 'not-evaluated'; g1_passed = $false; status = 'failed'
     cloud_login = 'not-evaluated-no-gui-account-fixture'
 }

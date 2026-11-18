@@ -793,6 +793,13 @@ test('published full joins every existing report and live image identity; copied
       g=>g.release='v2.0.0-dev.5',g=>g.restart_native_gui.offline.automatic_key_handoff=false,g=>g.cleanup_error='observer failed']){
       const gui=JSON.parse(guiBytes);mutate(gui);writeFileSync(guiFile,JSON.stringify(gui));assert.throws(run);
     }
+    const originalGui=JSON.parse(guiBytes);
+    originalGui.cli_processes.unshift(null);
+    writeFileSync(guiFile,JSON.stringify(originalGui));
+    assert.equal(run().full_passed,true);
+    originalGui.cli_processes.pop();
+    writeFileSync(guiFile,JSON.stringify(originalGui));
+    assert.throws(run,/GUI did not observe the actual CLI image/);
     writeFileSync(guiFile,guiBytes);
     assert(complete.historical_upgrades.every(r=>r.profile==='full'&&r.all_published_sources_covered));
     for(const target of f.targets) {
