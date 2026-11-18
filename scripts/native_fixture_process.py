@@ -351,7 +351,7 @@ def verify_runtime_health(args, health, root, profile, pid=None):
 
 def _verify_runtime_health(args, health, root, profile, pid=None):
     import psutil
-    root, profile = pathlib.Path(root).resolve(strict=True), pathlib.Path(profile).resolve(strict=True)
+    root, profile = pathlib.Path(canonical_scope_path(root)), pathlib.Path(canonical_scope_path(profile))
     if not profile.is_relative_to(root):
         raise RuntimeHealthFailure('runtime_health_profile_escape')
     if os.name == 'posix' and (root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077):
