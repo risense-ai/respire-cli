@@ -29,7 +29,7 @@ function fixture(){
   const job=name=>({name,status:'completed',conclusion:'success',started_at:time(0),completed_at:time(3)});
   const jobs=[...triples.map(t=>job(`validate / Release (${t})`)),job('validate / npm-dry-run'),
     ...triples.map(t=>job(`native-regression / Native (${t})`)),...triples.slice(1).map(t=>job(`cloud-sweep (runner, ${t})`)),
-    ...triples.slice(2).flatMap(t=>[job(`Native migration (${t})`),job(`Migration gate (${t})`)]),job('api-smoke')];
+    job('api-smoke')];
   const run={id:700,run_attempt:1,path:source.workflow,event:'workflow_dispatch',head_branch:'main',head_sha:sha,
     head_repository:{full_name:source.repository},status:'in_progress',updated_at:time(5)};
   const ci={id:600,run_attempt:1,path:'.github/workflows/ci.yml',event:'push',head_branch:'main',head_sha:sha,
@@ -39,7 +39,7 @@ function fixture(){
   const assets=triples.flatMap(t=>[`rsrs-${t}${t.includes('windows')?'.exe':''}`,`rsrs-${t}-runtime.tar.gz`,`cli-build-${t}.json`]).map(file=>({file,size:100,sha256:hash}));
   const packs=[...manifest.targets.map(t=>t.pkg),manifest.npmScope].map((name,i)=>({name,version,file:`pack-${i}.tgz`,size:100,sha256:hash}));
   const identity={hashes:{'Cargo.lock':hash,'rust-toolchain.toml':hash},sdk:[]};
-  const full_result={schema:1,kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:original.sha,product_sources:{cli:original.sha},manifest_sha256:hash,run_id:Number(original.run_id),run_attempt:Number(original.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
+  const full_result={schema:2,scope:'database-in-place-upgrade',profile_import:{required:false,status:'not-run',diagnostic_workflow:'.github/workflows/migration-keyring-check.yml'},kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:original.sha,product_sources:{cli:original.sha},manifest_sha256:hash,run_id:Number(original.run_id),run_attempt:Number(original.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
   const history={source:original,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result};
   jobs.push({id:900,name:'preparation-receipt',status:'in_progress',started_at:time(3)});
   const proof=createPreparation({...history,now:time(4)});
@@ -145,7 +145,9 @@ test('optional historical byte parameters cannot substitute for mandatory write-
 test('prepared import rejects critical and any incomplete full proof before publication',()=>{
   const f=fixture();
   for(const mutate of [r=>r.validation_profile='critical',r=>r.preparation.validation_profile='critical',
-    r=>delete r.preparation.full_result,r=>r.preparation.full_result.gui_passed=false,r=>r.preparation.full_result.historical_upgrades.pop()]){
+    r=>delete r.preparation.full_result,r=>r.preparation.full_result.gui_passed=false,r=>r.preparation.full_result.historical_upgrades.pop(),
+    r=>r.preparation.full_result.schema=1,r=>delete r.preparation.full_result.scope,
+    r=>r.preparation.full_result.profile_import.status='passed',r=>r.preparation.validation.inventory.schema=1]){
     const receipt=structuredClone(f.receipt);mutate(receipt);
     receipt.origin=preparationLink(receipt.preparation,{id:90,name:'release-prepared-700-1',size_in_bytes:100,digest:`sha256:${hash}`,expired:false,workflow_run:{id:700,head_sha:sha}});
     assert.throws(()=>validateImportedEvidence(receipt,f.source,f.manifest,f.context));

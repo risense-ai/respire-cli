@@ -6,10 +6,8 @@ export function validationProfile(value='full') {
 export function regressionContract(manifest,profile='full') {
   profile=validationProfile(profile);
   const native=manifest.targets.map(t=>t.triple);
-  // Legacy migration fixtures bind architectures with published pre-1.0.20 binaries.
-  const migration=native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin'||t==='x86_64-apple-darwin');
   if(profile==='critical')return {schema:1,validation_profile:profile,binaries:native,package:true,native:[],cloud:[],migration:[],migration_gate:[],api:false};
-  return {schema:1,native,cloud:native.filter(t=>t!=='x86_64-unknown-linux-gnu'),migration,migration_gate:migration,api:true};
+  return {schema:2,scope:'database-in-place-upgrade',native,cloud:native.filter(t=>t!=='x86_64-unknown-linux-gnu'),migration:[],migration_gate:[],api:true};
 }
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 export function validateRegressionContract(contract,manifest,expectedProfile){
@@ -29,6 +27,7 @@ const groups=[
 ];
 export function regressionStatus(jobs,contract){
   const profile=validationProfile(contract?.validation_profile);
+  if(profile==='full'&&(contract?.schema!==2||contract.scope!=='database-in-place-upgrade'))throw Error('Full regression scope differs');
   let pending=false;
   for(const [kind,select,match] of groups){
     if(kind==='binaries'&&profile==='full')continue;

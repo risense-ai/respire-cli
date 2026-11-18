@@ -666,10 +666,12 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
         && base.base_complete === true && base.failed === 0 && base.required_missing?.length === 0, 'Base sweep incomplete');
       if (target.includes('linux')) {
         const combined = read('release-sweep-'+target,'combined-coverage.json'); identity(combined,target);
-        requireValue(combined.complete === true, 'Full supplement join incomplete');
+        requireValue(combined.schema === 2 && combined.scope === 'database-in-place-upgrade'
+          && combined.profile_import?.required === false && combined.profile_import.status === 'not-run'
+          && combined.complete === true, 'Full supplement join incomplete or scope differs');
         const outcomes = read('release-sweep-'+target,'suite-results.json');
-        requireValue(Array.isArray(outcomes) && outcomes.length===6 && ['outbox','ai_inject','runtime','legacy_vault','profile_migration','login_interruption'].every(name=>outcomes.filter(r=>r.suite===name&&r.passed===true&&r.exit===0).length===1), 'Full suite outcomes incomplete');
-        for (const name of ['ai-inject-coverage.json','legacy-vault-coverage.json','migration-coverage.json','interruption-coverage.json']) {
+        requireValue(Array.isArray(outcomes) && outcomes.length===5 && ['outbox','ai_inject','runtime','legacy_vault','login_interruption'].every(name=>outcomes.filter(r=>r.suite===name&&r.passed===true&&r.exit===0).length===1), 'Full suite outcomes incomplete');
+        for (const name of ['ai-inject-coverage.json','legacy-vault-coverage.json','interruption-coverage.json']) {
           const r=read('release-sweep-'+target,name); identity(r,target);
           requireValue(r.passed===true || name==='ai-inject-coverage.json' && r.status==='passed', 'Full raw supplement incomplete');
         }
@@ -677,15 +679,8 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
           const r = read('release-sweep-'+target,name); identity(r,target);
           processes.push(...validatePublishedProcessEvidence(r,spec,target,manifestHash));
         }
-        const migration = read('secret-service-profile-migration-'+target,'migration-platform-gate.json'); identity(migration,target);
-        requireValue(migration.passed === true, 'Secret Service migration incomplete');
         const login = read('secret-service-profile-migration-'+target,'interruption-coverage.json'); identity(login,target);
         requireValue(login.passed === true, 'Native login interruption incomplete');
-      } else {
-        job(j => j.name === `Native migration (${target})`,target+' migration');
-        job(j => j.name === `Migration gate (${target})`,target+' migration join');
-        const migration = read('native-profile-migration-'+target,'migration-platform-gate.json'); identity(migration,target);
-        requireValue(migration.complete === true, 'Native migration join incomplete');
       }
     }
   }
@@ -714,7 +709,9 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
       && (name!=='dev-api-coverage.json' || api.cli_workflow_sha===context.sha)
       && apiIdentity.reports?.[name]===reports.at(-1).sha256, 'API coverage incomplete or stale');
   }
-  return {schema:1,kind:candidate?'candidate-full':'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
+  return {schema:2,scope:'database-in-place-upgrade',
+    profile_import:{required:false,status:'not-run',diagnostic_workflow:'.github/workflows/migration-keyring-check.yml'},
+    kind:candidate?'candidate-full':'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
     reports,actual_processes:processes,historical_upgrades:historicalUpgrades,
     full_passed:historicalUpgrades.every(report => report.profile === 'full'),gui_passed:true,g1Passed:false,

@@ -58,8 +58,8 @@ evidence is implemented and authorized.
 default Release profile. From an exact main workflow dispatch, run it with
 `publish=false` and explicit `client2_release` / `client2_commit`. It freezes the
 candidate CLI Actions bytes and official pinned Runtime asset IDs and hashes,
-then requires all eight native lanes, seven cloud sweeps, four native migration
-fixtures and four joins, historical formal/database DEV upgrades, the existing
+then requires all eight native lanes, seven cloud sweeps, historical
+formal/database DEV upgrades, the existing
 Windows Client2 GUI subset (including restart/recovery), packaging and API gates.
 The GUI installs the candidate CLI locally; it cannot download a newer public
 CLI in place of the candidate. Live GUI-owned CLI process paths, parent/session,
@@ -314,27 +314,34 @@ succeed, including unexpected skips. Release's exact-source push-CI check still
 requires the entire CLI CI run to succeed; adding a job does not automatically
 configure a GitHub required branch check.
 
-Windows and macOS migration fixtures run independently of base cloud sweeps,
-with separate runners, profile roots and owned random native keyring entries.
-Their join jobs wait for both successful producer groups. On each native
-platform, the existing migration gate checks both reports against the original
-verified build metadata's exact SHA/version/target/binary digest. Fixture success
-alone cannot replace the base report, and base success cannot replace migration.
-Linux supplements and their model/outbox dependencies keep their ordering.
+Full release regression inventory schema 2 declares scope
+`database-in-place-upgrade`. It requires all eight native historical/resident
+lanes, seven cloud sweeps and API, plus every build/package check and exact-source
+CI. Historical released binaries must create real databases before Runtime 24 is
+installed. All formal sources and registered database-changing DEV checkpoints
+remain mandatory, with the existing explicit platform applicability policy.
+Original keys and URK, outbox, tombstones, integrity, decryption, remember/recall,
+bidirectional sync, process identity and exact cleanup checks are unchanged.
+The historical handoff actor must be null; a fixture or old host actor is refused.
 
-New accepted/prepared receipts bind the selected validation profile and its
-exact required inventory. Critical requires seven native startup/CPU/latest
-upgrade lanes and API; full requires seven historical/resident lanes, six cloud
-sweeps, three native migration fixtures, three joins and API. Both retain all
-seven builds and exact-source CI. Publication and cleanup validate every
-declared lane; failure, cancellation, skip, missing or duplicate targets cannot
-authorize success. A legacy proof without a profile is interpreted only as its
-original full contract, never as a critical shortcut. Older platform inventories
-retain their committed requirements rather than inventing jobs that did not
-exist. No critical receipt or imported proof can authorize a requested full
-gate. The receipt contract uses `validation_profile`; an absent legacy field
-means full, while an unknown value fails closed. The five-minute end-to-end ACK
-target still needs an actual measurement.
+Explicit cross-directory profile import is outside this default full scope.
+Run `migration-keyring-check.yml` manually with `release_run_id` and the exact
+published CLI/Runtime inventory to diagnose it on Linux Secret Service, macOS or
+Windows. The existing raw reports and gates still fail the diagnostic run on
+failure; no `continue-on-error` is used. Default full results record
+`profile_import.required=false` and `profile_import.status=not-run`, and identify
+that diagnostic workflow. A failed or unknown diagnostic remains separate failed
+or unknown evidence; a successful database full gate does not claim import is
+fixed. Linux native login interruption and login/key continuation remain required
+in the default full gate, including their separate Secret Service report.
+Supplement model/outbox dependencies keep their ordering.
+
+Candidate/published full report schema 2 and regression inventory schema 2 bind
+this scope. Prepared receipts, verified prepared copies and current frontend
+publication acceptance must contain the new scoped evidence; schema 1 full
+reports or inventories cannot be relabelled as the new full scope. Critical still
+runs build and package checks only and cannot prepare or publish. Publication and
+cleanup reject failure, cancellation, skip, missing or duplicate required lanes.
 
 
 The read-only `publication-ready` job waits for exact-source push CI and the
@@ -425,8 +432,9 @@ negative or shortened performance claims.
 
 A manual Release from the exact current main commit with `publish=false` and
 `full_regression_before_publish=true` can emit `release-prepared-RUN-ATTEMPT`.
-Its read-only producer waits for all existing build/package, native, sweep,
-migration, join and API jobs, then checks the latest exact-source main push CI.
+Its read-only producer waits for all mandatory build/package, native, sweep
+and API jobs, then checks the latest exact-source main push CI. Cross-directory
+profile import is a separate manual diagnostic and cannot replace DB evidence.
 Other refs, forks, stale attempts and failed or incomplete gates cannot attest.
 
 The proof binds the source and version, validation profile, committed Cargo/toolchain/SDK/workflow

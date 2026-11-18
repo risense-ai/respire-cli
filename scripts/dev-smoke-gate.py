@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sys
 
-SUPPLEMENTS = {"runtime", "ai_inject", "outbox", "legacy_vault", "profile_migration"}
+SUPPLEMENTS = {"runtime", "ai_inject", "outbox", "legacy_vault"}
 OUTBOX = {"foreground_save_during_network_wait", "independent_pull_decrypt",
           "scheduled_transport_retry", "finite_manual_boundary", "reset_old_response_rejection"}
 AI = {"model_cpu_real", "inject_preview_install_remove", "inject_stale_revision_rejected",
@@ -105,9 +105,12 @@ def verify(args, result):
             and not base.get("cloud_cleanup", {}).get("remaining_users"), "cli_cleanup_failed")
     result["components"]["cli"] = {"passed": True, "required_observed": len(required)}
     if args.migration_only:
+        require(args.profile_migration is not None, "migration_diagnostic_report_required")
         verify_migration(args, result)
+        result["profile_import"]["status"] = "passed"
         result["complete"] = True
         return
+    require(args.profile_migration is None, "profile_import_requires_migration_only_diagnostic")
     require(all(getattr(args, name) is not None for name in ("outbox", "ai_inject", "runtime", "legacy_vault")),
             "full_gate_supplement_paths_required")
 
@@ -153,8 +156,6 @@ def verify(args, result):
     require(runtime.get("cloud_cleanup", {}).get("passed") is True
             and not runtime.get("cloud_cleanup", {}).get("remaining_users"), "runtime_cleanup_failed")
     result["components"]["runtime"] = {"passed": True, "required_observed": len(runtime_required)}
-
-    verify_migration(args, result)
 
     interruption = read(args.login_interruption)
     identity(interruption, args)
@@ -216,9 +217,9 @@ def verify(args, result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("cli-report", "profile-migration", "report"):
+    for name in ("cli-report", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("outbox", "ai-inject", "runtime", "legacy-vault", "login-interruption"):
+    for name in ("outbox", "ai-inject", "runtime", "legacy-vault", "login-interruption", "profile-migration"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--migration-only", action="store_true",
                         help="Verify this native platform's base and migration only; not the full supplemental gate.")
@@ -227,7 +228,10 @@ def main():
     args = parser.parse_args()
     result = {"complete": False, "source_sha": args.source_sha, "version": args.version,
               "binary_sha256": args.binary_sha256, "components": {},
-              "scope": "native_profile_migration" if args.migration_only else "full_cli_supplements"}
+              "schema": 2,
+              "scope": "native_profile_migration" if args.migration_only else "database-in-place-upgrade",
+              "profile_import": {"required": args.migration_only,
+                                 "status": "failed" if args.migration_only else "not-run"}}
     try:
         verify(args, result)
     except Exception as error:

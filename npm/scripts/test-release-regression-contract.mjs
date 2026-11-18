@@ -202,8 +202,9 @@ test('supported Linux ARM targets require native runners, every source feedback 
   assert.match(alpine,/\$NATIVE_RUNTIME_SHA256  \/runtime\/rsrs-runtime/);
   assert.match(alpine,/case "\$\(\/runtime\/rsrs-runtime --version\)"/);
 });
-test('new full gate requires every native, cloud, migration fixture, join and API success',()=>{
-  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,manifest.targets.length);assert.equal(contract.cloud.length,manifest.targets.length-1);assert.equal(contract.migration.length,4);assert.equal(contract.migration_gate.length,4);
+test('new database full gate requires every native, cloud and API success',()=>{
+  validateRegressionContract(contract,manifest);assert.equal(contract.schema,2);assert.equal(contract.scope,'database-in-place-upgrade');assert.equal(contract.native.length,manifest.targets.length);assert.equal(contract.cloud.length,manifest.targets.length-1);assert.equal(contract.migration.length,0);assert.equal(contract.migration_gate.length,0);
+  for(const change of [c=>c.schema=1,c=>delete c.scope,c=>c.scope='native_profile_migration']){const old=copy(contract);change(old);assert.throws(()=>validateRegressionContract(old,manifest));}
   assert.equal(regressionStatus(inventory(),contract),'success');requireRegressions(inventory(),contract.native,contract);
   for(let index=0;index<inventory().length-1;index++){
     for(const conclusion of ['failure','cancelled','skipped',null]){
@@ -216,20 +217,17 @@ test('new full gate requires every native, cloud, migration fixture, join and AP
 test('duplicates, unknown targets and changed declared inventory cannot silently weaken the release/cleanup gate',()=>{
   for(const index of [0,4,7,9,11]){const jobs=inventory();jobs.push(copy(jobs[index]));assert.throws(()=>regressionStatus(jobs,contract));}
   const foreign=inventory();foreign[0].name='native-regression / Native (foreign-target)';assert.throws(()=>regressionStatus(foreign,contract));
-  for(const key of ['native','cloud','migration','migration_gate']){const c=copy(contract);c[key].pop();assert.throws(()=>validateRegressionContract(c,manifest));}
+  for(const key of ['native','cloud','migration','migration_gate']){const c=copy(contract);if(c[key].length)c[key].pop();else c[key].push('x86_64-pc-windows-msvc');assert.throws(()=>validateRegressionContract(c,manifest));}
 });
-test('workflow runs independent fixture work before the join, and keeps Linux supplement model dependencies serial',()=>{
+test('workflow keeps profile import in manual diagnostics and Linux login and model dependencies mandatory',()=>{
   const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const part=name=>workflow.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
-  const migration=part('native-migration'),join=part('migration-gate'),base=part('cloud-sweep'),publish=part('publish'),ready=part('publication-ready');
-  for(const consumer of [migration,base])assert.match(consumer,/needs: \[plan, validate, artifact-inputs, published-assets-verification\]/);
-  assert.doesNotMatch(migration,/needs:.*cloud-sweep|dev-smoke-gate.py|continue-on-error/);
-  assert.match(migration,/dev-profile-migration-smoke.py/);assert.match(migration,/extract-artifact.mjs/);assert.match(migration,/verified-build.json/);
-  assert.match(join,/\$schema = if \(\$manifest.artifactLayout -ceq 'cli-frontend-v2'\) \{ 2 \} else \{ 1 \}/);
-  assert.match(join,/\$build.schema_version -ne \$schema -or \$build.artifact_layout -cne \$manifest.artifactLayout/);
-  assert.match(join,/throw 'Unknown CLI artifact layout'/);
-  assert.match(join,/needs: \[plan, cloud-sweep, native-migration, artifact-inputs, published-assets-verification\]/);assert.match(join,/base-release-sweep-/);assert.match(join,/native-profile-migration-fixture-/);
-  assert.match(join,/--migration-only/);assert.match(join,/--binary-sha256 \$build.binary_sha256/);assert.match(join,/\$build.git_sha -ne \$env:CLI_SHA/);assert.match(join,/\$build.target -ne \$env:CLI_TARGET/);
+  const base=part('cloud-sweep'),publish=part('publish'),ready=part('publication-ready');
+  assert.equal(part('native-migration'),undefined);assert.equal(part('migration-gate'),undefined);
+  assert.match(base,/needs: \[plan, validate, artifact-inputs, published-assets-verification\]/);
+  const diagnostic=readFileSync(new URL('../../.github/workflows/migration-keyring-check.yml',import.meta.url),'utf8');
+  assert.match(diagnostic,/workflow_dispatch:/);assert.match(diagnostic,/dev-profile-migration-smoke.py/);assert.match(diagnostic,/dev-secret-service-migration-smoke.py/);assert.doesNotMatch(diagnostic,/continue-on-error/);
+  assert.match(base,/dev-login-interruption-smoke.py --native-credentials/);assert.doesNotMatch(base,/dev-secret-service-migration-smoke.py/);
   assert.doesNotMatch(base,/dev-profile-migration-smoke.py/);assert.match(base,/dev-smoke-supplements.py/);assert(base.indexOf('dev-smoke-supplements.py')<base.indexOf('dev-login-interruption-smoke.py'));
   assert.match(ready,/prepared-import.mjs readiness/);assert.doesNotMatch(ready,/native.length===4&&cloud.length===3/);assert.doesNotMatch(ready,/concurrency:|id-token:|contents: write/);assert.match(publish,/needs.publication-ready.result == 'success'/);assert.doesNotMatch(publish,/async function requireCi|async function requireRegression/);
 });
@@ -383,7 +381,7 @@ test('all release business consumers require published assets and no critical na
   assert.equal(part('native-regression-critical-readonly'),undefined);
   assert.match(part('native-regression'),/cache-mode: read/);
   assert.match(text('release-validation.yml'),/^cache-mode: read$/m);
-  for(const name of ['native-regression','cloud-sweep','native-migration','migration-gate','api-smoke']){
+  for(const name of ['native-regression','cloud-sweep','api-smoke']){
     const condition=part(name).match(/    if: \$\{\{ (.+) \}\}/)[1].replace(/needs\.([a-z][a-z0-9-]*)/g,(_,id)=>`needs[${JSON.stringify(id)}]`);
     const needs=new Proxy({},{get:()=>({result:'success',outputs:{validation_profile:'critical'}})});
     for(const artifact_source of ['build','published-assets'])assert.equal(Boolean(runInNewContext(condition,{always:()=>true,needs,inputs:{artifact_source}})),artifact_source==='published-assets',name);
@@ -456,7 +454,7 @@ test('published mode cannot enter any build/prepared/publication/recovery job or
   const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const jobs = Object.fromEntries([...workflow.slice(workflow.indexOf('jobs:\n') + 6).matchAll(/^  ([a-z][a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z][a-z0-9-]+:|$(?![\s\S]))/gm)].map(m => [m[1], m[2]]));
   for (const [name, body] of Object.entries(jobs)) {
-    if (['artifact-inputs', 'published-assets-verification', 'published-full-complete', 'validate', 'native-regression', 'cloud-sweep', 'native-migration', 'migration-gate', 'api-smoke'].includes(name)) continue;
+    if (['artifact-inputs', 'published-assets-verification', 'published-full-complete', 'validate', 'native-regression', 'cloud-sweep', 'api-smoke'].includes(name)) continue;
     const condition = body.match(/^    if: \$\{\{ (.*?) \}\}$/m)?.[1];
     assert.ok(condition, name);
     const suffix = " && (inputs.artifact_source || 'build') == 'build'";
@@ -502,7 +500,7 @@ test('published mode cannot enter any build/prepared/publication/recovery job or
   assert.match(jobs['published-full-complete'], /--complete-published full-reports/);
   assert.match(jobs['published-full-complete'], /actual process image digests/);
   assert.match(jobs['published-full-complete'], /Object.values\(n\).some\(j=>j.result!=='success'\)/);
-  for(const name of ['validate','native-regression','cloud-sweep','native-migration','migration-gate','api-smoke']) {
+  for(const name of ['validate','native-regression','cloud-sweep','api-smoke']) {
     const body=jobs[name], condition=body.match(/^    if: \$\{\{ (.*?) \}\}$/m)[1];
     const expr=condition.replace(/needs\.([a-z][a-z0-9-]*)/g,(_,id)=>`needs[${JSON.stringify(id)}]`);
     for(const result of ['success','failure','cancelled','skipped']) {
@@ -549,14 +547,14 @@ test('published consumers declare every condition dependency and cannot execute 
   const root=new URL('../../.github/workflows/',import.meta.url),text=name=>readFileSync(new URL(name,root),'utf8').replace(/\r\n/g,'\n');
   const workflow=text('release.yml'),jobs=Object.fromEntries([...workflow.slice(workflow.indexOf('jobs:\n')+6).matchAll(/^  ([a-z][a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z][a-z0-9-]+:|$(?![\s\S]))/gm)].map(m=>[m[1],m[2]]));
   const js=expr=>expr.replace(/needs\.([a-z][a-z0-9-]*)/g,(_,name)=>`needs[${JSON.stringify(name)}]`);
-  for(const name of ['validate','native-regression','cloud-sweep','native-migration','migration-gate','api-smoke']) {
+  for(const name of ['validate','native-regression','cloud-sweep','api-smoke']) {
     const body=jobs[name],dependencies=body.match(/^    needs: \[(.+)\]$/m)[1].split(',').map(v=>v.trim());
     const condition=body.match(/^    if: \$\{\{ (.+) \}\}$/m)[1];
     const make=(mode,failed)=>new Proxy(Object.fromEntries(dependencies.map(id=>[id,{result:id===failed?'failure':id==='plan'&&mode==='published-assets'?'skipped':id==='published-assets-verification'&&mode==='build'?'skipped':'success',outputs:{validation_profile:'full'}}])),{get(t,key){assert(dependencies.includes(key),'undeclared '+name+' dependency '+key);return t[key];}});
     for(const mode of ['build','published-assets']) {
       const context={always:()=>true,needs:make(mode),inputs:{artifact_source:mode,reuse_dev12_validation:false,prepared_run:''}};
       assert.equal(Boolean(runInNewContext(js(condition),context)),true,name+' '+mode);
-      const required=mode==='published-assets'?['artifact-inputs','published-assets-verification',...(['native-regression','cloud-sweep','native-migration'].includes(name)?['validate']:[]),...(name==='migration-gate'?['cloud-sweep','native-migration']:[])]:dependencies.filter(id=>!['artifact-inputs','published-assets-verification'].includes(id));
+      const required=mode==='published-assets'?['artifact-inputs','published-assets-verification',...(['native-regression','cloud-sweep'].includes(name)?['validate']:[])]:dependencies.filter(id=>!['artifact-inputs','published-assets-verification'].includes(id));
       for(const failed of required)assert.equal(Boolean(runInNewContext(js(condition),{...context,needs:make(mode,failed)})),false,name+' accepted failed '+failed);
     }
   }

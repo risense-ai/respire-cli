@@ -1,4 +1,5 @@
 import {installPinnedRuntime} from '../../scripts/ci-install-pinned-runtime.mjs';
+import {regressionContract} from './release-regression-contract.mjs';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validatePublishedPackage} from './extract-artifact.mjs';
@@ -81,7 +82,10 @@ test('exact scoped packages, draft and installed alias produce a complete barrie
   assert.equal(aliasName(source, aliasRun), 'alias-ready-100-2-400-3');
   const frontend={...m,artifactLayout:'cli-frontend-v2'},receipt=copy(scoped);
   receipt.assets=receipt.assets.filter(a=>!a.name.endsWith('-runtime.tar.gz'));
+  assert.throws(()=>validateScoped(receipt,frontend));
+  receipt.validation_inventory=regressionContract(frontend);
   validateScoped(receipt,frontend);
+  const old=copy(receipt);old.validation_inventory.schema=1;assert.throws(()=>validateScoped(old,frontend));
   assert.throws(()=>validateScoped(scoped,frontend));
   assert.throws(()=>validateScoped(receipt,m));
   assert.throws(()=>validateScoped(receipt,{...frontend,artifactLayout:'unknown'}));
@@ -771,6 +775,15 @@ test('published full joins every existing report and live image identity; copied
   try {
     const f=publishedFullFixture(root),run=()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context,{client2:{release:'v2.0.0-dev.6',source_sha:'f'.repeat(40)}});
     const complete=run();assert.equal(complete.full_passed,true);assert.equal(complete.harness_sha,f.context.sha);
+    assert.equal(complete.schema,2);assert.equal(complete.scope,'database-in-place-upgrade');
+    assert.deepEqual(complete.profile_import,{required:false,status:'not-run',diagnostic_workflow:'.github/workflows/migration-keyring-check.yml'});
+    assert(!complete.reports.some(r=>r.path.endsWith('migration-coverage.json')||r.path.endsWith('migration-platform-gate.json')));
+    const linux=f.targets.find(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu');
+    const combinedFile=path.join(root,'release-sweep-'+linux,'combined-coverage.json'),combinedBytes=readFileSync(combinedFile);
+    for(const change of [r=>r.schema=1,r=>delete r.scope,r=>r.profile_import.status='passed',r=>r.profile_import.status='failed']){
+      const old=JSON.parse(combinedBytes);change(old);writeFileSync(combinedFile,JSON.stringify(old));assert.throws(run);
+    }
+    writeFileSync(combinedFile,combinedBytes);
     assert.notEqual(complete.harness_sha,complete.product_sources.cli);
     assert.equal(complete.actual_processes.length,f.targets.length+Object.values(f.upgradeReports).reduce((count,r)=>count+r.sources.filter(row=>row.passed).length,0)+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
     assert.equal(complete.historical_upgrades.length,f.targets.length);

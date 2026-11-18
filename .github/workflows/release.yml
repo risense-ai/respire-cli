@@ -166,7 +166,7 @@ jobs:
 
   published-full-complete:
     if: ${{ always() && inputs.artifact_source == 'published-assets' }}
-    needs: [artifact-inputs, published-assets-verification, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke]
+    needs: [artifact-inputs, published-assets-verification, validate, native-regression, cloud-sweep, api-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -545,7 +545,7 @@ jobs:
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/supplement-credentials" --timeout 6600 -- python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-supplements" --cli-report "$RUNNER_TEMP/release-sweep/coverage.json"
-      - name: Verify legacy Secret Service account migration
+      - name: Verify independent native Secret Service login and key continuation
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
@@ -558,20 +558,12 @@ jobs:
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/release-supplements/outbox/models"
-          root="$RUNNER_TEMP/secret-service-profile-migration"
-          suite_exit=0
-          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || suite_exit=$?
-          gate_exit=0
-          python3 scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --source-sha "$CLI_SHA" --version "$CLI_VERSION" --binary-sha256 "$checksum" || gate_exit=$?
-          test "$suite_exit" -eq 0 && test "$gate_exit" -eq 0
       - uses: actions/upload-artifact@v4
         if: ${{ always() && runner.os == 'Linux' }}
         with:
           retention-days: 1
           name: secret-service-profile-migration-${{ matrix.target }}
           path: |
-            ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
-            ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json
             ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
@@ -589,202 +581,7 @@ jobs:
             ${{ runner.temp }}/release-supplements/ai-inject/ai-inject-coverage.json
             ${{ runner.temp }}/release-supplements/runtime-coverage.json
             ${{ runner.temp }}/release-supplements/legacy-vault/legacy-vault-coverage.json
-            ${{ runner.temp }}/release-supplements/profile-migration/migration-coverage.json
             ${{ runner.temp }}/release-supplements/login-interruption/interruption-coverage.json
-          if-no-files-found: error
-
-  native-migration:
-    env:
-      CANDIDATE_ASSETS: ${{ needs.plan.outputs.candidate }}
-      VALIDATION_PROFILE: full
-      RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-    name: Native migration (${{ matrix.target }})
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) && needs.validate.result == 'success' }}
-    needs: [plan, validate, artifact-inputs, published-assets-verification]
-    permissions:
-      contents: read
-      actions: read
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Require the approved development server
-        env:
-          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-        run: |
-          node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api-dev.rsrs.rs")'
-      - name: Prepare ephemeral build version
-        if: inputs.artifact_source != 'published-assets'
-        run: node npm/scripts/set-build-version.mjs ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
-      - name: Wait for this platform's build artifact
-        if: inputs.artifact_source != 'published-assets'
-        timeout-minutes: 46
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_TARGET: ${{ matrix.target }}
-        run: |
-          node - <<'NODE'
-          const cp=require('child_process');
-          const repo=process.env.GITHUB_REPOSITORY,run=process.env.GITHUB_RUN_ID,target=process.env.CLI_TARGET;
-          const name=`cli-release-${target}`,deadline=Date.now()+45*60*1000;
-          const read=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${run}/${path}`],{encoding:'utf8',timeout:30000}));
-          async function wait(){
-            let statusFailures=0;
-            while(Date.now()<deadline){
-              if(read('artifacts?per_page=100').artifacts.some(a=>a.name===name&&!a.expired)){
-                console.log(`Build artifact ready: ${name}`);return;
-              }
-              let job;
-              try {
-                job=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${run}/jobs?per_page=10`],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs).find(j=>j.name.endsWith(`Release (${target})`));
-                statusFailures=0;
-              } catch(error) {
-                if(!/HTTP 50[0-9]/.test(String(error.stderr))||++statusFailures>=2) throw error;
-                console.warn('GitHub job status temporarily unavailable; retrying this read once');
-                await new Promise(resolve=>setTimeout(resolve,30000));continue;
-              }
-              if(job?.status==='completed'&&job.conclusion!=='success') throw new Error(`Build ${job.name} concluded ${job.conclusion}`);
-              console.log(`Waiting for ${name}; other platform tests run independently`);
-              await new Promise(resolve=>setTimeout(resolve,30000));
-            }
-            throw new Error(`Build artifact ${name} unavailable within 45 minutes`);
-          }
-          wait().catch(error=>{console.error(error.message);process.exit(1)});
-          NODE
-      - uses: actions/download-artifact@v4
-        if: inputs.artifact_source != 'published-assets'
-        with:
-          name: cli-release-${{ matrix.target }}
-          path: validated-cli
-      - uses: actions/download-artifact@v4
-        if: inputs.artifact_source == 'published-assets'
-        with:
-          name: published-assets-verification-${{ matrix.target }}
-          path: validated-cli
-      - name: Verify and extract this platform's artifacts
-        id: verified_artifact
-        env:
-          CLI_TARGET: ${{ matrix.target }}
-          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
-          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
-        run: node npm/scripts/extract-artifact.mjs validated-cli cli
-      - name: Bind fixtures to an independent official pinned Runtime
-        if: inputs.artifact_source != 'published-assets'
-        shell: bash
-        env:
-          RSRS_DATA_DIR: ${{ runner.temp }}/full-runtime-proof
-        run: |
-          set -euo pipefail
-          exe=cli/rsrs
-          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
-          node scripts/ci-install-pinned-runtime.mjs "$exe"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Verify native account migration with isolated profiles and owned random keyring entries
-        shell: pwsh
-        env:
-          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
-          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
-          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python -m pip install --only-binary=:all: cryptography==46.0.3
-          if ($LASTEXITCODE -ne 0) { throw 'Native migration fixture dependencies failed' }
-          $binary = (Resolve-Path (Join-Path cli $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }))).Path
-          $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-          python scripts/dev-profile-migration-smoke.py --binary $binary --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA --root (Join-Path $env:RUNNER_TEMP 'native-profile-migration')
-          if ($LASTEXITCODE -ne 0) { throw 'Native credential migration failed' }
-          Copy-Item -LiteralPath 'validated-cli/cli-build-${{ matrix.target }}.json' -Destination (Join-Path $env:RUNNER_TEMP 'native-profile-migration/verified-build.json')
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          retention-days: 1
-          name: native-profile-migration-fixture-${{ matrix.target }}
-          path: ${{ runner.temp }}/native-profile-migration/*.json
-          if-no-files-found: error
-
-  migration-gate:
-    name: Migration gate (${{ matrix.target }})
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) && needs.cloud-sweep.result == 'success' && needs.native-migration.result == 'success' }}
-    needs: [plan, cloud-sweep, native-migration, artifact-inputs, published-assets-verification]
-    permissions:
-      contents: read
-      actions: read
-    env:
-      CANDIDATE_ASSETS: ${{ needs.plan.outputs.candidate }}
-      VALIDATION_PROFILE: full
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/download-artifact@v4
-        with:
-          name: base-release-sweep-${{ matrix.target }}
-          path: base-sweep
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-profile-migration-fixture-${{ matrix.target }}
-          path: native-profile-migration
-      - name: Require both actual base sweep and migration reports for this platform and binary
-        shell: pwsh
-        env:
-          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
-          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
-          CLI_TARGET: ${{ matrix.target }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $build = Get-Content -Raw native-profile-migration/verified-build.json | ConvertFrom-Json
-          $manifest = Get-Content -Raw npm/artifact-manifest.json | ConvertFrom-Json
-          if ($null -ne $manifest.artifactLayout -and $manifest.artifactLayout -cne 'cli-frontend-v2') { throw 'Unknown CLI artifact layout' }
-          $schema = if ($manifest.artifactLayout -ceq 'cli-frontend-v2') { 2 } else { 1 }
-          if ($build.schema_version -ne $schema -or $build.artifact_layout -cne $manifest.artifactLayout -or $build.git_sha -ne $env:CLI_SHA -or $build.version -ne $env:CLI_VERSION -or $build.target -ne $env:CLI_TARGET -or $build.binary_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Verified migration artifact identity differs' }
-          python scripts/dev-smoke-gate.py --migration-only --cli-report base-sweep/release-sweep/coverage.json --profile-migration native-profile-migration/migration-coverage.json --report native-profile-migration/migration-platform-gate.json --source-sha $env:CLI_SHA --version $env:CLI_VERSION --binary-sha256 $build.binary_sha256
-          if ($LASTEXITCODE -ne 0) { throw 'Native migration/base-sweep join gate failed' }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          retention-days: 1
-          name: native-profile-migration-${{ matrix.target }}
-          path: native-profile-migration/*.json
           if-no-files-found: error
 
   api-smoke:
@@ -839,7 +636,7 @@ jobs:
 
   preparation-receipt:
     if: ${{ always() && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full' && (inputs.artifact_source || 'build') == 'build' }}
-    needs: [plan, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke]
+    needs: [plan, validate, native-regression, cloud-sweep, api-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read

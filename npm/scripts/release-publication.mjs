@@ -8,7 +8,8 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {packPackage, publishPackage, readExpectedPacks, waitForPackage} from './registry-publication.mjs';
 import {validateRecoverySource, validateRecoveryAuthority} from './dev6-recovery-policy.mjs';
-import {releaseAssetNames} from './verify-binary.mjs';
+import {releaseAssetNames,frontendLayout} from './verify-binary.mjs';
+import {validateRegressionContract} from './release-regression-contract.mjs';
 
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
 // Only new receipts opt into post-consumption temporary artifact deletion.
@@ -80,6 +81,7 @@ export function validateScoped(receipt, expectedManifest) {
 }
 export function validateScopedPayload(receipt, expectedManifest) {
   const source = validateSource(receipt.source);
+  if(frontendLayout(expectedManifest))validateRegressionContract(receipt.validation_inventory,expectedManifest,receipt.validation_profile);
   const names = [...expectedManifest.targets.map(t => t.pkg), ...(expectedManifest.npmScope === 'rsrs-cli' ? [] : [expectedManifest.npmScope])].sort();
   if (expectedManifest.npmScope === 'rsrs-cli') {
     if (receipt.schema !== 2 || receipt.launcher?.name !== 'rsrs-cli' || receipt.launcher.version !== source.version ||

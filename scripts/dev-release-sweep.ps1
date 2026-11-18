@@ -90,10 +90,10 @@ if ($IsMacOS) {
 }
 $script:Catalog = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'dev-smoke-cli-coverage.json') -Raw -Encoding utf8 | ConvertFrom-Json
 if ($DeferSupplemental) {
-    $approved = @('runtime', 'ai_inject', 'outbox', 'legacy_vault', 'profile_migration')
+    $approved = @('runtime', 'ai_inject', 'outbox', 'legacy_vault')
     $actual = @($script:Catalog.supplemental_required | Sort-Object -Unique)
     if (@($script:Catalog.required_remaining).Count -gt 0 -or @($actual | Where-Object { $_ -notin $approved }).Count -gt 0 -or $actual.Count -ne $approved.Count -or @($script:Catalog.supplemental_required).Count -ne $approved.Count) {
-        throw 'Only the five explicitly assigned supplemental suites may be deferred; unknown required functionality must fail closed.'
+        throw 'Only the four explicitly assigned supplemental suites may be deferred; unknown required functionality must fail closed.'
     }
 }
 function Stop-OurRuntimes {

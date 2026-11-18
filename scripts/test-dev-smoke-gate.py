@@ -136,6 +136,7 @@ class MigrationJoinReportTests(unittest.TestCase):
         self.assertTrue(report["complete"])
         self.assertTrue(report["components"]["cli"]["passed"])
         self.assertTrue(report["components"]["profile_migration"]["passed"])
+        self.assertEqual(report["profile_import"], {"required": True, "status": "passed"})
         extra = 'secret_service_current_credentials_for_legacy_db'
         secret_service = copy.deepcopy(self.migration)
         secret_service.update(platform='linux', keyring_backend='linux-secret-service',
@@ -177,6 +178,7 @@ class MigrationJoinReportTests(unittest.TestCase):
                 completed, report = self.run_gate(base, migration)
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertFalse(report["complete"])
+                self.assertEqual(report["profile_import"], {"required": True, "status": "failed"})
                 self.assertEqual(report["failure_code"], code)
 
 
