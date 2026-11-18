@@ -32,7 +32,8 @@ test('receipt JSON is decoded only after independently matching the actual ZIP b
   assert.throws(()=>read(changed,metadata(bytes)),/ZIP differs/);
   const large={evidence:'x'.repeat(1350000)};
   assert.deepEqual(read(archive([['release-prepared.json',JSON.stringify(large)]])),large);
-  assert.throws(()=>read(archive([['prepared-import.json',JSON.stringify(large)]]),undefined,'prepared-import.json'),{code:'ENOBUFS'});
+  assert.deepEqual(read(archive([['prepared-import.json',JSON.stringify(large)]]),undefined,'prepared-import.json'),large);
+  assert.throws(()=>read(archive([['prepared-consumer.json',JSON.stringify(large)]]),undefined,'prepared-consumer.json'),{code:'ENOBUFS'});
 });
 test('foreign run/SHA, expired, oversized, missing digest and unsafe IDs fail before any download',()=>{
   const bytes=archive([['release-prepared.json','{}']]);
