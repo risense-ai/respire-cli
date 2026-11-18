@@ -94,7 +94,9 @@ def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
         for prefix in ('RSRS_','ONEMEMORY_','RESPIRE_'):
             for suffix in ('SUPER','PASS','SECRET','KDF_SALT','WRAPPED_URK','URK_NONCE'):
                 assert prefix+suffix not in env, 'resident custody consumer has a factor override'
-        with closing(sqlite3.connect((profile/'rsrs.db').as_uri()+'?mode=ro',uri=True)) as db:
+        database = profile/'rsrs.db'
+        if not database.exists(): database = profile/'onememory.db'
+        with closing(sqlite3.connect(database.as_uri()+'?mode=ro',uri=True)) as db:
             row=db.execute('SELECT id,ciphertext,nonce FROM memories WHERE deleted=0 ORDER BY id LIMIT 1').fetchone()
         assert row is not None, 'custody consumer has no original ciphertext'
         expected=json.loads(vault_crypto.decrypt_content(expected_urk,*row[1:]))['content']

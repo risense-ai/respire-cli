@@ -1108,11 +1108,13 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         import tempfile
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.exceptions import InvalidTag
-        for version in (1, 3, 4):
-            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+        for version, database_name in ((version, name) for version in (1, 3, 4)
+                                       for name in ('rsrs.db', 'onememory.db')):
+            with self.subTest(version=version, database=database_name), tempfile.TemporaryDirectory() as directory:
                 installation = Path(directory) / '.rsrs'
                 profile = installation / 'accounts/alternate' if version == 3 else installation
                 profile.mkdir(parents=True)
+                database = profile / database_name
                 urk, salt, nonce = bytes(range(32)), 'ab' * 16, bytes.fromhex('cd' * 12)
                 factors = {'pass': PASSWORD, 'super': 'A3-' + '12' * 18,
                            'secret': 'original-secret', 'secret_key': 'original-secret-key'}
@@ -1130,7 +1132,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                 (profile / 'session.json').write_text(json.dumps(session), encoding='utf-8')
                 (profile / 'core-index').mkdir()
                 (profile / 'core-index/index').write_bytes(b'old index')
-                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                with closing(sqlite3.connect(database)) as db, db:
                     db.executescript('CREATE TABLE memories(id TEXT,ciphertext TEXT,nonce TEXT,dirty INTEGER,deleted INTEGER);'
                         'CREATE TABLE sync_outbox(seq INTEGER,operation TEXT);'
                         'CREATE TABLE core_artifacts(memory_id TEXT,model TEXT,source TEXT);')
@@ -1215,7 +1217,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                                 keyring_backend='native')
                 (profile / 'session.json').write_text(json.dumps(migrated), encoding='utf-8')
                 (profile / 'core-index/index').write_bytes(b'rebuilt index')
-                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                with closing(sqlite3.connect(database)) as db, db:
                     db.execute('UPDATE memories SET ciphertext=?', (encrypt(True),))
                     db.execute('UPDATE core_artifacts SET source=?', ('rebuilt source',))
                 self.assertNotEqual(snapshot(profile), before)
@@ -1227,15 +1229,15 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                         ('DELETE FROM memories', None), ('UPDATE memories SET dirty=0', 'UPDATE memories SET dirty=1'),
                         ('UPDATE memories SET deleted=1', 'UPDATE memories SET deleted=0'),
                         ('DELETE FROM sync_outbox', "INSERT INTO sync_outbox VALUES(1,'pending original write')")):
-                    with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                    with closing(sqlite3.connect(database)) as db, db:
                         db.execute(mutation)
                     self.assertNotEqual(state(snapshot(profile), factors), expected)
-                    with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                    with closing(sqlite3.connect(database)) as db, db:
                         if restore is None:
                             db.execute('INSERT INTO memories VALUES(?,?,?,?,?)', ('original', encrypt(True), nonce.hex(), 1, 0))
                         else:
                             db.execute(restore)
-                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                with closing(sqlite3.connect(database)) as db, db:
                     db.execute('UPDATE memories SET ciphertext=?', (encrypt(True, b'changed record'),))
                 self.assertNotEqual(state(snapshot(profile), factors), expected)
                 replacement_urk = bytes(reversed(range(32)))
@@ -1243,7 +1245,7 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                 (profile / 'session.json').write_text(json.dumps(migrated), encoding='utf-8')
                 with self.assertRaises(InvalidTag):
                     state(snapshot(profile), factors)
-                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                with closing(sqlite3.connect(database)) as db, db:
                     db.execute('UPDATE memories SET ciphertext=?', (encrypt(True, key=replacement_urk),))
                 self.assertEqual(state(snapshot(profile), factors)[0], expected[0])
                 self.assertNotEqual(state(snapshot(profile), factors), expected)
