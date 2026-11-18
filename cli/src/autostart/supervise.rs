@@ -19,7 +19,7 @@ pub(crate) mod offline_keygen;
 pub(crate) use launch_authorization::migration_control::control_migrate_profile;
 pub(crate) use launch_authorization::metadata_control::{control_metadata, control_offline_read, discover_legacy_snapshot};
 pub(crate) use launch_authorization::agent_config_control::{control_agent_config, control_core_config_result, control_core_config_rpc, CoreConfigUnknown};
-pub(crate) use launch_authorization::agent_config_control::apply_startup_core_config;
+pub(crate) use launch_authorization::agent_config_control::{apply_startup_core_config, startup_core_config_ready};
 pub(crate) use launch_authorization::key_control::{
     control_super_reset, control_super_reset_step, control_key_result, control_key_rollback,
     control_fivekeys,

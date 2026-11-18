@@ -841,9 +841,13 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         crate::net_rpc::health()?;
         return Ok(());
     }
-    // Serialize startup configuration with setters even when reusing a resident owner.
     if let Some(health) = probe_runtime()? {
         if runtime_acceptable(&health)? {
+            if crate::autostart::startup_core_config_ready(&health)? {
+                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+                return Ok(());
+            }
+            // Only unfinished startup configuration needs serialization with setters.
             let _takeover = crate::runtime_policy::takeover_lock()?;
             let health = probe_runtime()?.context("Runtime owner exited before core configuration")?;
             anyhow::ensure!(runtime_acceptable(&health)?, "Runtime owner changed before core configuration");
