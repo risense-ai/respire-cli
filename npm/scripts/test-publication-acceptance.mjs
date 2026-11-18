@@ -49,6 +49,14 @@ test('accepted receipts require all exact package ACKs and cannot masquerade as 
   direct.scoped.acceptances=direct.scoped.acceptances.filter(p=>p.name!==m.npmScope);
   direct.scoped.optionalDependencies=Object.fromEntries(m.targets.map(t=>[t.pkg,version]));
   validateAcceptedScoped(direct.scoped,directManifest);
+  const frontend={...directManifest,artifactLayout:'cli-frontend-v2'},current=copy(direct.scoped);
+  current.assets=current.assets.filter(a=>!a.name.endsWith('-runtime.tar.gz'));
+  assert.throws(()=>validateAcceptedScoped(current,frontend));
+  current.validation_inventory=regressionContract(frontend);
+  validateAcceptedScoped(current,frontend);
+  for(const change of [r=>r.validation_inventory.schema=1,r=>delete r.validation_inventory.scope]){
+    const old=copy(current);change(old);assert.throws(()=>validateAcceptedScoped(old,frontend));
+  }
   direct.alias.scoped_packages=direct.scoped.packages;
   delete direct.alias.dependencies;direct.alias.optionalDependencies=direct.scoped.optionalDependencies;
   validateAcceptedAlias(direct.alias,direct.scoped,direct.child,direct.jobs);
@@ -129,7 +137,7 @@ function cleanupFixture(){
   f.artifacts=new Map([[10,a(10,'cli-release-'+m.targets[0].triple,f.run)],[11,a(11,'scoped-accepted-100-1',f.run)],[12,a(12,'alias-accepted-100-1-200-1',f.child)],[13,a(13,'publication-verified-100-1-400-1',verifier)]]);
   f.artifacts.set(16,a(16,'publication-arm64-verified-100-1-400-1',verifier));
   const job=name=>({name,status:'completed',conclusion:'success',completed_at:f.run.updated_at});
-  f.parentJobs=[...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),...m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin'||t.triple==='x86_64-apple-darwin').flatMap(t=>[job(`Native migration (${t.triple})`),job(`Migration gate (${t.triple})`)]),job('api-smoke'),job('publish')];
+  f.parentJobs=[...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),job('api-smoke'),job('publish')];
   f.io={repository:source.repository,run:async()=>copy(f.run),artifacts:async id=>copy([...f.artifacts.values()].filter(a=>a.workflow_run.id===id)),
     receipt:async a=>copy(a.id===11?f.scoped:a.id===12?f.alias:a.id===16?f.armVerified:f.verified),jobs:async id=>copy(id===100?f.parentJobs:id===200?f.jobs:[job('verify-publication'),job('verify-publication-arm64')]),
     release:async()=>({id:300,draft:false,published_at:f.run.updated_at,tag_name:'v'+version,target_commitish:sha,prerelease:true,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))}),tag:async()=>({type:'commit',sha}),
@@ -142,16 +150,15 @@ function preparedCleanupFixture(){
   const original={repository:source.repository,workflow:source.workflow,run_id:'50',run_attempt:1,sha,version};
   const manifest={...m,cliVersion:version},identity={hashes:{'Cargo.lock':hash},sdk:[]};
   const job=name=>({name,status:'completed',conclusion:'success',started_at:previous('20'),completed_at:previous('30')});
-  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin'||t.triple==='x86_64-apple-darwin');
   const originalJobs=[...m.targets.map(t=>job(`validate / Release (${t.triple})`)),job('validate / npm-dry-run'),
     ...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (runner, ${t.triple})`)),
-    ...migration.map(t=>job(`Native migration (${t.triple})`)),...migration.map(t=>job(`Migration gate (${t.triple})`)),job('api-smoke')];
+    job('api-smoke')];
   const originalRun={...copy(f.run),id:50,run_attempt:1,head_sha:sha,head_branch:'main',status:'in_progress',updated_at:previous('40'),created_at:previous('10')};
   const ci={...originalRun,id:60,path:'.github/workflows/ci.yml',event:'push',status:'completed',conclusion:'success',run_started_at:previous('10'),updated_at:previous('25')};
   const artifacts=[...m.targets.map(t=>`cli-release-${t.triple}`),'npm-release-validation','npm-release-packages'].map((name,i)=>({id:50+i,name,size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:50,head_sha:sha}}));
   const assets=f.scoped.assets.map(a=>({file:a.name,size:a.size,sha256:a.sha256}));
   const packs=f.scoped.packages.map((p,i)=>({name:p.name,version,file:`pack-${i}.tgz`,size:10,sha256:hash}));
-  const full_result={schema:1,kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:original.sha,product_sources:{cli:original.sha},manifest_sha256:hash,run_id:Number(original.run_id),run_attempt:Number(original.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
+  const full_result={schema:2,scope:'database-in-place-upgrade',profile_import:{required:false,status:'not-run',diagnostic_workflow:'.github/workflows/migration-keyring-check.yml'},kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:original.sha,product_sources:{cli:original.sha},manifest_sha256:hash,run_id:Number(original.run_id),run_attempt:Number(original.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
   f.history={source:original,identity,manifest,run:originalRun,jobs:originalJobs,ci,artifacts,full_result};
   originalJobs.push({id:900,name:'preparation-receipt',status:'in_progress',started_at:previous('30')});
   const proof=createPreparation({...f.history,assets,packs,now:previous('35')});
@@ -268,10 +275,9 @@ test('real coordinator processes finish acceptance while child workflow runs, an
   const f=fixture();f.run.status='in_progress';f.run.conclusion=null;f.child.status='in_progress';f.child.conclusion=null;
   const release={id:300,draft:true,prerelease:true,tag_name:'v'+version,target_commitish:sha,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))};
   const successful=name=>({name,status:'completed',conclusion:'success',completed_at:'2026-10-27T00:04:00Z'});
-  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin'||t.triple==='x86_64-apple-darwin');
   f.full_jobs=[...m.targets.map(t=>successful(`native-regression / Native (${t.triple})`)),
     ...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>successful(`cloud-sweep (runner, ${t.triple})`)),
-    ...migration.map(t=>successful(`Native migration (${t.triple})`)),...migration.map(t=>successful(`Migration gate (${t.triple})`)),successful('api-smoke')];
+    successful('api-smoke')];
   f.full_jobs[0].completed_at='2026-10-27T00:08:00Z'; // Later than fast-manual readiness at 00:05.
   const save=()=>writeFileSync(path.join(root,'fixture.json'),JSON.stringify({...f,release}));save();
   writeFileSync(path.join(root,'scoped-accepted.json'),JSON.stringify(f.scoped));

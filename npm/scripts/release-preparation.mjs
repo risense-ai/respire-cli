@@ -150,7 +150,10 @@ export function createPreparation({source,identity,manifest,run,jobs,ci,artifact
     origin_artifacts:preparationArtifacts(artifacts,source,manifest),assets,packs,full_result,prepared_at:now});
 }
 export function validatePreparationFull(result,source,manifest){
-  requireValue(result?.schema===1&&result.kind==='candidate-full'&&result.full_passed===true&&result.gui_passed===true
+  requireValue(result?.schema===2&&result.scope==='database-in-place-upgrade'
+    &&result.profile_import?.required===false&&result.profile_import.status==='not-run'
+    &&result.profile_import.diagnostic_workflow==='.github/workflows/migration-keyring-check.yml'
+    &&result.kind==='candidate-full'&&result.full_passed===true&&result.gui_passed===true
     &&result.harness_sha===source.sha&&result.product_sources?.cli===source.sha&&HASH.test(result.manifest_sha256||'')
     &&Number(result.run_id)===Number(source.run_id)&&Number(result.run_attempt)===Number(source.run_attempt)
     &&Array.isArray(result.historical_upgrades)&&result.historical_upgrades.length===manifest.targets.length

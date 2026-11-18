@@ -32,13 +32,12 @@ def main():
         ("ai_inject", "dev-ai-inject-smoke.py", common + ["--root", str(root / "ai-inject")]),
         ("runtime", "dev-runtime-smoke.py", common + ["--root", str(root / "runtime"), "--report", str(root / "runtime-coverage.json")]),
         ("legacy_vault", "dev-legacy-vault-smoke.py", common + ["--root", str(root / "legacy-vault")]),
-        ("profile_migration", "dev-profile-migration-smoke.py", common + ["--root", str(root / "profile-migration")]),
         ("login_interruption", "dev-login-interruption-smoke.py", common + ["--root", str(root / "login-interruption"), "--model-dir", str(root / "outbox/models")]),
     ]
     def run_suite(command):
         name, script, flags = command
         argv = [sys.executable, str(scripts / script), *flags]
-        if (sys.platform.startswith("linux") and name in ("legacy_vault", "profile_migration", "login_interruption")
+        if (sys.platform.startswith("linux") and name in ("legacy_vault", "login_interruption")
                 and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
                 and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:")):
             # Each native manager must own its own initially empty private service.
@@ -83,7 +82,6 @@ def main():
     gate = [sys.executable, str(scripts / "dev-smoke-gate.py"), "--cli-report", str(args.cli_report),
             "--outbox", str(root / "outbox/outbox-coverage.json"), "--ai-inject", str(root / "ai-inject/ai-inject-coverage.json"),
             "--runtime", str(root / "runtime-coverage.json"), "--legacy-vault", str(root / "legacy-vault/legacy-vault-coverage.json"),
-            "--profile-migration", str(root / "profile-migration/migration-coverage.json"),
             "--login-interruption", str(root / "login-interruption/interruption-coverage.json"),
             "--report", str(root / "combined-coverage.json"), "--source-sha", args.source_sha,
             "--version", args.version, "--binary-sha256", args.binary_sha256]

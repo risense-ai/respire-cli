@@ -60,7 +60,8 @@ class RunnerTests(unittest.TestCase):
             else:
                 self.assertFalse(any(value.endswith('/dev-secret-service-keyring-selftest.py') for value in process.argv))
                 self.assertEqual(process.calls, [1500])
-        self.assertEqual(len(outcomes), 6)
+        self.assertEqual({row['suite'] for row in outcomes},
+                         {'outbox', 'ai_inject', 'runtime', 'legacy_vault', 'login_interruption'})
         self.assertEqual(kills, 0)
 
     def test_business_failure_and_outer_timeout_never_pass(self):

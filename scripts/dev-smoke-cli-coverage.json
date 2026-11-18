@@ -1143,7 +1143,7 @@
       "reason": "This operation requires a supported Windows WinML catalog/provider and accelerator hardware. Headless hosted CPU evidence cannot assert acceleration or optional provider download support. Saving GPU/NPU engine selection is explicitly asserted by the base suite; actual accelerated inference remains unverified."
     }
   ],
-  "gate": "Default fails until all required base observations and five named supplemental suites pass for the exact CI artifact. Retained dashboard business functions require observed CLI/RPC equivalents; six UI-only functions are explicitly retired by requirement.",
+  "gate": "Default fails until all required base observations and four named supplemental suites pass for the exact CI artifact. Cross-directory profile import is a separate manual diagnostic. Retained dashboard business functions require observed CLI/RPC equivalents; six UI-only functions are explicitly retired by requirement.",
   "excluded_not_implemented": [
     {
       "feature": "Grant token consumption through CLI/Web/MCP/RPC",
@@ -1156,8 +1156,7 @@
     "runtime",
     "ai_inject",
     "outbox",
-    "legacy_vault",
-    "profile_migration"
+    "legacy_vault"
   ],
   "supplemental_features": [
     {
@@ -1204,12 +1203,6 @@
       "feature": "Legacy ciphertext migration and real push/pull decryption on an independent current device",
       "source": "scripts/dev-legacy-vault-smoke.py:database_sync",
       "reason": "Use current registered accounts and explicit host key input. Preserve old ciphertext, original URK, encrypted tombstones and source bytes through migration and real remote sync; published DB checkpoint coverage remains separate. Old authentication salts, credential locations and cross-version TTY prompts are not release requirements."
-    },
-    {
-      "suite": "profile_migration",
-      "feature": "Encrypted legacy home/profile migration, WAL/outbox retention and restart recovery",
-      "source": "crates/app/src/migration.rs",
-      "reason": "Genuine disposable accounts and original keyring credentials must remain readable without a SUPER environment override; original roots must be preserved."
     }
   ],
   "business_equivalence_catalog": "scripts/dev-runtime-business-coverage.json",

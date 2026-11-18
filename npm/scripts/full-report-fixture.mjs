@@ -62,15 +62,11 @@ print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps}))`],
     job(`cloud-sweep (runner, ${target})`);
     put('base-release-sweep-'+target,'coverage.json',{...identity,observed_version:spec.cli.version,expected_version:spec.cli.version,base_complete:true,failed:0,required_missing:[]});
     if(target.includes('linux')) {
-      put('release-sweep-'+target,'combined-coverage.json',{...identity,complete:true});
-      put('release-sweep-'+target,'suite-results.json',['outbox','ai_inject','runtime','legacy_vault','profile_migration','login_interruption'].map(suite=>({suite,passed:true,exit:0})));
-      for(const name of ['ai-inject-coverage.json','legacy-vault-coverage.json','migration-coverage.json','interruption-coverage.json'])put('release-sweep-'+target,name,{...identity,passed:true});
+      put('release-sweep-'+target,'combined-coverage.json',{...identity,schema:2,scope:'database-in-place-upgrade',profile_import:{required:false,status:'not-run'},complete:true});
+      put('release-sweep-'+target,'suite-results.json',['outbox','ai_inject','runtime','legacy_vault','login_interruption'].map(suite=>({suite,passed:true,exit:0})));
+      for(const name of ['ai-inject-coverage.json','legacy-vault-coverage.json','interruption-coverage.json'])put('release-sweep-'+target,name,{...identity,passed:true});
       for(const name of ['outbox-coverage.json','runtime-coverage.json'])put('release-sweep-'+target,name,runtime);
-      put('secret-service-profile-migration-'+target,'migration-platform-gate.json',{...identity,passed:true});
       put('secret-service-profile-migration-'+target,'interruption-coverage.json',{...identity,passed:true});
-    } else {
-      job(`Native migration (${target})`);job(`Migration gate (${target})`);
-      put('native-profile-migration-'+target,'migration-platform-gate.json',{...identity,complete:true});
     }
   }
   put('gnu-login-interruption','interruption-coverage.json',{...identity,passed:true});

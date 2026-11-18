@@ -21,7 +21,7 @@ function fixture(){
   const jobs=[...targets.map(([t])=>job(`validate / Release (${t})`)),job('validate / npm-dry-run'),
     ...targets.map(([t])=>job(`native-regression / Native (${t})`)),
     ...targets.slice(1).map(([t])=>job(`cloud-sweep (runner, ${t})`)),
-    ...targets.slice(2).flatMap(([t])=>[job(`Native migration (${t})`),job(`Migration gate (${t})`)]),job('api-smoke')];
+    job('api-smoke')];
   const run={id:700,run_attempt:1,path:source.workflow,head_repository:{full_name:source.repository},head_sha:sha,
     head_branch:'main',event:'workflow_dispatch',status:'in_progress',updated_at:time(5)};
   const ci={id:600,run_attempt:1,path:'.github/workflows/ci.yml',head_repository:{full_name:source.repository},head_sha:sha,
@@ -31,7 +31,7 @@ function fixture(){
   const assets=targets.flatMap(([t])=>[`rsrs-${t}${t.includes('windows')?'.exe':''}`,`rsrs-${t}-runtime.tar.gz`,`cli-build-${t}.json`]).map(file=>({file,size:100,sha256:hash}));
   const packs=[...targets.map(([,n])=>`@rsrsai/${n}`),'@rsrsai/cli'].map((name,i)=>({name,version,file:`pack-${i}.tgz`,size:100,sha256:hash}));
   jobs.push({id:900,name:'preparation-receipt',status:'in_progress',started_at:time(3)});
-  const full_result={schema:1,kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:source.sha,product_sources:{cli:source.sha},manifest_sha256:hash,run_id:Number(source.run_id),run_attempt:Number(source.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
+  const full_result={schema:2,scope:'database-in-place-upgrade',profile_import:{required:false,status:'not-run',diagnostic_workflow:'.github/workflows/migration-keyring-check.yml'},kind:'candidate-full',full_passed:true,gui_passed:true,harness_sha:source.sha,product_sources:{cli:source.sha},manifest_sha256:hash,run_id:Number(source.run_id),run_attempt:Number(source.run_attempt),historical_upgrades:manifest.targets.map(t=>({target:t.triple,profile:'full',all_published_sources_covered:true})),reports:[{artifact:'client2-published-online-x86_64-pc-windows-msvc',path:'report.json',sha256:hash}]};
   const context={source,identity,manifest,run,jobs,ci,artifacts,assets,packs,full_result,now:time(4)};
   const receipt=createPreparation(context);
   Object.assign(jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});
@@ -155,7 +155,7 @@ test('actual synthetic npm packs must match the full exact-version local pack in
 
 test('Release attests all full candidate consumers and publishes only verified imported bytes',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  assert.match(release,/needs: \[plan, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke\]/);
+  assert.match(release,/needs: \[plan, validate, native-regression, cloud-sweep, api-smoke\]/);
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
   const publisher=release.split('\n  publish:\n')[1];
   assert.match(publisher,/needs.prepared-import.result == 'success'/);
@@ -226,7 +226,9 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
 test('preparation requires full GUI and DB evidence and never upgrades critical or old incomplete proofs',()=>{
   const f=fixture();
   for(const change of [r=>delete r.full_result,r=>r.full_result.gui_passed=false,r=>r.full_result.full_passed=false,
-    r=>r.full_result.historical_upgrades.pop(),r=>r.full_result.run_attempt++,r=>r.validation_profile='critical']){
+    r=>r.full_result.historical_upgrades.pop(),r=>r.full_result.run_attempt++,r=>r.validation_profile='critical',
+    r=>r.full_result.schema=1,r=>delete r.full_result.scope,r=>r.full_result.profile_import.status='passed',
+    r=>r.validation.inventory.schema=1,r=>delete r.validation.inventory.scope]){
     const receipt=structuredClone(f.receipt);change(receipt);assert.throws(()=>validatePreparation(receipt,f.context));
   }
   assert.throws(()=>createPreparation({...f.context,run:{...f.context.run,status:'in_progress'},profile:'critical'}));
