@@ -146,6 +146,8 @@ jobs:
             ${{ runner.temp }}/core-query-gui/core-issue.json
             ${{ runner.temp }}/core-query-gui/core-resume.json
             ${{ runner.temp }}/core-query-gui/native-gui.json
+            ${{ runner.temp }}/core-query-gui/workspace.png
+            ${{ runner.temp }}/core-query-gui/core-selection.png
             ${{ runner.temp }}/core-query-gui/core-issue-unknown.png
             ${{ runner.temp }}/core-query-gui/core-resume-unknown.png
             ${{ runner.temp }}/core-query-gui/core-applied.png

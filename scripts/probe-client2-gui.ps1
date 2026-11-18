@@ -902,10 +902,11 @@ public static class RespireGuiNative {
         if ($report.status -ceq 'connectivity-passed') {
             try {
                 $finalQuery = Invoke-RestMethod -Uri ($queryProxy.address + '/__fixture') -Headers @{'X-Fixture-Control'=$queryProxy.nonce} -TimeoutSec 10
-                $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope')
+                $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope','apply_fusion','effective_fusion')
                 $actualKeys = @($finalQuery.PSObject.Properties.Name)
                 if ($actualKeys.Count -ne $publicKeys.Count -or @($actualKeys | Where-Object { $_ -cnotin $publicKeys }).Count) { throw 'Forwarding proof has non-public fields' }
                 if (@($finalQuery.errors).Count -or @($finalQuery.apply_ids).Count -ne 1 -or $finalQuery.dropped_apply_replies -ne 1 -or
+                    $finalQuery.apply_fusion -cne 'attention' -or $finalQuery.effective_fusion -cne 'attention' -or
                     $finalQuery.result_issued -ne @($finalQuery.result_ids).Count -or $finalQuery.result_forwarded -ne $finalQuery.result_issued -or
                     $finalQuery.result_response_lost -lt 1 -or $finalQuery.result_response_lost -ge $finalQuery.result_forwarded -or
                     @($finalQuery.result_ids).Count -lt 2 -or @($finalQuery.result_ids | Where-Object { $_ -cne $report.core_query_original.operation_id }).Count) { throw 'Final forwarding evidence is not one original apply with original-only result queries' }

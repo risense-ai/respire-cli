@@ -1239,14 +1239,14 @@ function Fill-OfflineField([string]$Name, [string]$Text) {
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
 
-function Read-CoreQueryControl([string]$Mode = '') {
+function Read-CoreQueryControl([string]$Mode = '', [switch]$FailureEvidence) {
     $options = @{Uri=($binding.core_query.address + '/__fixture'); Headers=@{'X-Fixture-Control'=$script:coreQueryControl.nonce}; TimeoutSec=10}
     if ($Mode) { $options.Method='POST'; $options.ContentType='application/json'; $options.Body=(@{mode=$Mode} | ConvertTo-Json -Compress) }
     $value = Invoke-RestMethod @options
-    $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope')
+    $publicKeys = @('operation_id','apply_ids','result_ids','result_issued','result_forwarded','result_response_lost','dropped_apply_replies','errors','core_test_mode','scope','apply_fusion','effective_fusion')
     $actualKeys = @($value.PSObject.Properties.Name)
     if ($actualKeys.Count -ne $publicKeys.Count -or @($actualKeys | Where-Object { $_ -cnotin $publicKeys }).Count) { throw 'Forwarding proof has non-public fields' }
-    if (@($value.errors).Count -ne 0 -or $value.core_test_mode -ne $false) { throw 'Real forwarding fixture failed' }
+    if ($value.core_test_mode -ne $false -or (-not $FailureEvidence -and @($value.errors).Count -ne 0)) { throw 'Real forwarding fixture failed' }
     return $value
 }
 function Read-CoreQueryRecord {
@@ -1274,31 +1274,46 @@ function Find-CoreQuerySave {
 }
 function Invoke-CoreQueryAcceptance {
     $report.offline = @{}
-    $report.core_query = @{status='failed';phase=$binding.core_query.phase;diagnostic_only=$true;scope_rejection_boundary='CLI'}
+    $report.core_query = @{status='failed';phase=$binding.core_query.phase;diagnostic_only=$true;scope_rejection_boundary='CLI';call_site='core_control_binding'}
     $script:coreQueryControl = Get-Content -Raw -LiteralPath $binding.core_query.control_file | ConvertFrom-Json
     if ($script:coreQueryControl.address -cne $binding.core_query.address -or $script:coreQueryControl.nonce -cnotmatch '^[a-f0-9]{64}$') { throw 'Private control binding differs' }
     if ($env:RSRS_CORE_TEST_MODE) { throw 'Real query mode cannot run with CORE_TEST_MODE' }
     $null = Read-CoreQueryControl
+    $report.core_query.call_site = 'navigate_models'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6a21\u578b\u4e0e\u7d22\u5f15\u0024'))
+    $report.core_query.call_site = 'find_fusion_save'
     $save = Find-CoreQuerySave
     if ($binding.core_query.phase -ceq 'core-issue') {
         if (-not $save.Current.IsEnabled) { throw 'Fresh fusion save is disabled' }
+        $report.core_query.call_site = 'find_fusion_combo'
         $combo = Find-OfflineControl 'ControlType.ComboBox' ([regex]::Unescape('\u005e\u878d\u5408\u6a21\u5f0f\u0024'))
-        $initialSelection = @($combo.GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern).GetCurrentSelection())
-        if ($initialSelection.Count -ne 1 -or $initialSelection[0].Current.Name -cne ([regex]::Unescape('\u539f\u6709\u878d\u5408\uff08\u9ed8\u8ba4\uff09'))) { throw 'Fresh Runtime fusion selection is not legacy' }
+        $report.core_query.call_site = 'fusion_combo_patterns'
+        $report.core_query.control_type = $combo.Current.ControlType.ProgrammaticName
+        $report.core_query.supported_patterns = @($combo.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+        $report.core_query.call_site = 'fusion_combo_focus'
         Focus-OfflineControl $combo
-        # One selection change, followed by one save; never replay these effects.
-        $combo.GetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-        Send-OfflineKey 0x24
-        Send-OfflineKey 0x28
-        Send-OfflineKey 0x0D
-        $selected = @($combo.GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern).GetCurrentSelection())
-        if ($selected.Count -ne 1 -or $selected[0].Current.Name -cne ([regex]::Unescape('\u4e94\u8f74\u6ce8\u610f\u529b\u878d\u5408'))) { throw 'Fusion selection did not become attention' }
+        $comboId = $combo.GetRuntimeId() -join '.'
+        # The sealed HTML select orders legacy, attention. Runtime receipt proves the selection.
+        $report.core_query.call_site = 'fusion_combo_home'
+        Send-OfflineKey 0x24 $comboId
+        $report.core_query.call_site = 'fusion_combo_down'
+        Send-OfflineKey 0x28 $comboId
+        $report.core_query.call_site = 'fusion_combo_tab'
+        Send-OfflineKey 0x09 $comboId
+        $report.core_query.selection_screenshot = Capture-Target (Assert-Target $true).client_bounds
+        Copy-Item -LiteralPath (Join-Path $OutputDirectory 'workspace.png') -Destination (Join-Path $OutputDirectory 'core-selection.png')
+        $report.core_query.call_site = 'fusion_arm_reply_loss'
         $null = Read-CoreQueryControl 'lose_reply'
         $mismatch = $null
-        $prepared = Prepare-OfflineButtonInvoke (Find-CoreQuerySave) ([ref]$mismatch)
+        $report.core_query.call_site = 'fusion_save_focus'
+        $save = Find-CoreQuerySave
+        Focus-OfflineControl $save ([ref]$mismatch)
+        $report.core_query.call_site = 'fusion_save_prepare'
+        $prepared = Prepare-OfflineButtonInvoke $save ([ref]$mismatch)
+        $report.core_query.call_site = 'fusion_save_invoke'
         $prepared.pattern.Invoke()
     } elseif ($binding.core_query.phase -cne 'core-resume') { throw 'Unknown core query phase' }
+    $report.core_query.call_site = 'await_unknown'
     $querySelector = [regex]::Unescape('\u005e\u67e5\u8be2\u539f\u8bf7\u6c42\u0024')
     $null = Find-OfflineControl 'ControlType.Button' $querySelector -Seconds 60
     $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u6838\u5fc3\u914d\u7f6e\u7ed3\u679c\u672a\u786e\u8ba4\uff1b\u8bf7\u67e5\u8be2\u539f\u8bf7\u6c42\uff0c\u4e0d\u8981\u91cd\u65b0\u4fdd\u5b58\u3002\u0024')) -Seconds 30
@@ -1307,6 +1322,7 @@ function Invoke-CoreQueryAcceptance {
     $state = Read-CoreQueryControl
     if ($job.state -cne 'unconfirmed' -or @($state.apply_ids).Count -ne 1 -or
         $state.apply_ids[0] -cne $job.transaction.operation_id -or $state.dropped_apply_replies -ne 1 -or
+        $state.apply_fusion -cne 'attention' -or $state.effective_fusion -cne 'attention' -or
         ($job.transaction.scope | ConvertTo-Json -Compress) -cne ($state.scope | ConvertTo-Json -Compress)) { throw 'Unknown is not the single real applied operation' }
     $report.core_query.transaction = $job.transaction
     $report.core_query.unknown_screenshot = Capture-Target (Assert-Target $true).client_bounds
@@ -1315,6 +1331,7 @@ function Invoke-CoreQueryAcceptance {
         $before = @($state.result_ids).Count
         $beforeForwarded = $state.result_forwarded
         $beforeLost = $state.result_response_lost
+        $report.core_query.call_site = 'query_original_lost_reply'
         Press-OfflineButton $querySelector
         $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u6838\u5fc3\u914d\u7f6e\u7ed3\u679c\u4ecd\u672a\u786e\u8ba4\uff1b\u4fdd\u7559\u539f\u8bf7\u6c42\uff0c\u4e0d\u4f1a\u91cd\u65b0\u5e94\u7528\u3002\u0024')) -Seconds 60
         $failed = Read-CoreQueryRecord
@@ -1323,6 +1340,7 @@ function Invoke-CoreQueryAcceptance {
             $state.result_forwarded -le $beforeForwarded -or $state.result_response_lost -le $beforeLost -or
             $state.result_forwarded -ne $state.result_issued -or (Find-CoreQuerySave).Current.IsEnabled) { throw 'Failed button query erased Unknown or did not lose a real Runtime result response' }
         $null = Read-CoreQueryControl 'pass'
+        $report.core_query.call_site = 'query_original_applied'
         Press-OfflineButton $querySelector
         $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u4e94\u8f74\u878d\u5408\u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u6838\u5fc3\u5df2\u5e94\u7528\uff1b\u4e0b\u4e00\u6b21\u53ec\u56de\u4f7f\u7528\u5df2\u786e\u8ba4\u7684\u8fd0\u884c\u914d\u7f6e\u3002\u0024')) -Seconds 60
         $done = Read-CoreQueryRecord
@@ -1975,7 +1993,14 @@ public static class RespireNativeInput {
     elseif ($OfflineAcceptance) {
         if ($ExistingKeys) { Invoke-ExistingKeysAcceptance } else { Invoke-OfflineGuiAcceptance }
     }
-} catch { $report.error = $_.Exception.Message }
+} catch {
+    $report.error = $_.Exception.Message
+    if ($CoreConfigQuery -and $report.core_query) {
+        $report.core_query.failure_script_line = $_.InvocationInfo.ScriptLineNumber
+        try { $report.core_query.failure_counts = Read-CoreQueryControl -FailureEvidence }
+        catch { $report.core_query.failure_counts_error = 'Could not read real forwarding counters' }
+    }
+}
 finally {
     $json = $report | ConvertTo-Json -Depth 12
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'), $json + "`n", [Text.UTF8Encoding]::new($false))
