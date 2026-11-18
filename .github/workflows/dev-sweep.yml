@@ -77,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: [{os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu}]
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -383,6 +383,24 @@ jobs:
           else
             dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-legacy-vault-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
           fi
+      - name: Report the historical failure stage and structured error
+        if: ${{ !cancelled() && inputs.database_sync_only }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'dev-supplements/historical-database'
+          for path in sorted(evidence.glob('*/results/*/historical-sync/legacy-vault-coverage.json')):
+              report = json.loads(path.read_text(encoding='utf-8'))
+              print(json.dumps({
+                  'source': path.relative_to(evidence).parts[0],
+                  'stage': report['stage'],
+                  'cli_failure': report.get('cli_failure'),
+                  'provider_observation': report.get('provider_observation'),
+                  'cleanup_passed': report['cloud_cleanup']['passed'],
+              }))
+          PY
       - name: Diagnose runtime contracts without a full release claim
         if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
