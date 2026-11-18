@@ -1,0 +1,58 @@
+name: Compose verified CLI3930 full preparation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  GH_TOKEN: ${{ github.token }}
+  CLI_PRODUCER_RUN_ID: '44276673815'
+  CLI_PRODUCER_ATTEMPT: '1'
+  CLI_VERSION: 2.0.0-dev.19
+  VALIDATION_PROFILE: full
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Revalidate twelve sources with their exact original contracts
+        run: CLI_SHA="$(git rev-parse 3930ba5)" node npm/scripts/release-recovery3930.mjs musl-compose '${{ runner.temp }}/composition-check' composition
+      - uses: actions/upload-artifact@v4
+        with:
+          name: musl3930-composition-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            composition/published-upgrades.json
+            composition/composition-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+  preparation-receipt:
+    needs: compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify persisted composition, every original scope and actual byte identities
+        run: CLI_SHA="$(git rev-parse 3930ba5)" node npm/scripts/release-recovery3930.mjs musl-attest '${{ runner.temp }}/full-check' release-prepared.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-prepared.json
+          if-no-files-found: error
+          retention-days: 1
