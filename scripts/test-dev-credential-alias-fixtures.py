@@ -944,6 +944,8 @@ class SnapshotTests(unittest.TestCase):
             self.keys.read('rsrs', 'pass:' + ALIAS)
         report = self.keys.cleanup()
         self.assertTrue(report['passed'])
+        self.assertEqual(report['provider_daemon'],
+                         {'started': False, 'exit_code_at_cleanup_start': None})
         baseline = report['provider_schema_baseline']
         self.assertEqual(baseline['scope'],
                          'verified_registration_pairs_and_verified_recovered_super_only')
