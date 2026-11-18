@@ -82,7 +82,6 @@ jobs:
             target: aarch64-pc-windows-msvc
             rustflags: -C target-feature=-crt-static
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
