@@ -1180,6 +1180,41 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                         json.loads((profile / 'session.json').read_text()), namespace['recovery_factors'][str(profile)])
                     self.assertEqual(recovered, namespace['expected_urks'][str(profile)])
 
+        seed_command = next(node for node in ast.walk(tree)
+                            if isinstance(node, ast.FunctionDef) and node.name == 'seed_command')
+        version = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == 'seed_version' for target in node.targets))
+        policy = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                      and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name)
+                      and node.test.left.id == 'seed_version')
+        version_code = compile(ast.Module(body=[seed_command, version, policy], type_ignores=[]),
+                               '<actual-historical-version>', 'exec')
+        for released in ('1.0.11', '1.0.11-dev.1', '1.0.12', '1.0.10'):
+            with self.subTest(version=released), tempfile.TemporaryDirectory() as directory:
+                calls = []
+                def captured_run(argv, **kwargs):
+                    self.assertEqual(argv[1:3], ['--json', '--direct'])
+                    self.assertEqual(kwargs['env'], {'isolated': 'fixture'})
+                    calls.append(argv[3:])
+                    # Clap --version is text even with --json; the v command uses the JSON envelope.
+                    stdout = ('rsrs ' + released).encode() if argv[3:] == ['--version'] else \
+                        json.dumps(dict(summary=dict(version=released))).encode()
+                    return SimpleNamespace(returncode=0, stdout=stdout, stderr=b'')
+                namespace = dict(json=json, pathlib=SimpleNamespace(Path=Path), captured_run=captured_run,
+                                 args=SimpleNamespace(seed_binary='historical-cli'), seed_env={'isolated': 'fixture'},
+                                 profile=Path(directory))
+                exec(version_code, namespace)
+                self.assertEqual(calls, [['v']] + ([['model', 'activate', 'm3']] if released == '1.0.10' else []))
+                for reply, error in ((SimpleNamespace(returncode=17, stdout=b'', stderr=b''), AssertionError),
+                                     (SimpleNamespace(returncode=0, stdout=b'not json', stderr=b''), json.JSONDecodeError),
+                                     (SimpleNamespace(returncode=0, stdout=b'{}', stderr=b''), KeyError)):
+                    with self.assertRaises(error):
+                        exec(version_code, dict(namespace, captured_run=lambda *a, **kw: reply))
+                if released != '1.0.10':
+                    (Path(directory) / 'rsrs.db').touch()
+                    with self.assertRaisesRegex(AssertionError, '^historical seed profile is not empty$'):
+                        exec(version_code, namespace)
+
     def test_legacy_session_slot_changes_and_rebuilt_indexes_preserve_real_library_state(self):
         from contextlib import closing
         import sqlite3
