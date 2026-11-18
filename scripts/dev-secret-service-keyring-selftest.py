@@ -286,11 +286,28 @@ def self_test():
         roundtrips(manager, cases)
 
     manager = FakeManager()
+    manager.daemon = SimpleNamespace(poll=lambda: -6)
     code, report = business_check(manager, {}, ["fake-business"], failed_after,
         lambda *args, **kwargs: SimpleNamespace(returncode=17))
     assert code == 17 and manager.cleaned and report["stage"] == "credential_after"
     assert report["business_credential_cleanup_passed"] and not report["passed"]
+    assert report["failure_code"] == "fixture_diagnostic_failed"
+    assert report["secret_service_daemon"] == {"state": "exited", "exit_code": -6}
+    assert type(report["secret_service_daemon"]["exit_code"]) is int
     assert "sensitive-after" not in json.dumps(report)
+
+    manager = FakeManager()
+    manager.daemon = SimpleNamespace(poll=lambda: -6)
+    with patch.object(manager, "verify_owner", side_effect=[None,
+            RuntimeError("fixture_secret_service_daemon_exited")]):
+        code, report = business_check(manager, {}, ["fake-business"], roundtrips,
+            lambda *args, **kwargs: SimpleNamespace(returncode=17))
+    assert code == 17 and manager.cleaned and report["stage"] == "credential_after"
+    assert report["failure_code"] == "fixture_secret_service_daemon_exited"
+    assert report["secret_service_daemon"] == {"state": "exited", "exit_code": -6}
+    assert type(report["secret_service_daemon"]["exit_code"]) is int
+    assert report["diagnostic_failed"] and not report["passed"]
+    assert report["business_credential_cleanup_passed"]
     print(json.dumps({"stage": "pure_selftest", "passed": True}))
     return 0
 
