@@ -12,6 +12,8 @@ jobs:
     env:
       CLI_SHA: 91aa3b1410fdc9c26b6d741141035f01cdc55e9d
       CLI_VERSION: 2.0.0-dev.19
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
       RSRS_RUNTIME_TRIPLE: x86_64-pc-windows-msvc
       RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
       RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
@@ -178,6 +180,63 @@ jobs:
             python scripts/diagnose-db-model-preparation.py download_legacy_fp16 curl --fail --location 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' --output "$RUNNER_TEMP/db-legacy-model/onnx/model_fp16.onnx"
           fi
           python scripts/diagnose-db-model-preparation.py verify_model_bytes python scripts/native-model-cache.py verify --model-dir "$RSRS_M3_DIR" --legacy-dir "$RUNNER_TEMP/db-legacy-model"
+      - name: Bind the verified real managed Runtime installation to database fixtures
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync,appendFileSync,realpathSync,lstatSync,readdirSync} from 'node:fs';
+          import {join} from 'node:path';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          import {verifyCorePayload} from './npm/scripts/extract-artifact.mjs';
+          import {verifyBinary} from './npm/scripts/verify-binary.mjs';
+          const hash=b=>createHash('sha256').update(b).digest('hex'),target=process.env.RSRS_RUNTIME_TRIPLE;
+          const proof=JSON.parse(readFileSync('db-runtime-identity.json'));
+          const root=join(process.env.RUNNER_TEMP,'db-model');
+          const receiptFile=join(root,'bin/runtime.json');
+          assert.ok(lstatSync(receiptFile).isFile()&&!lstatSync(receiptFile).isSymbolicLink());
+          const receiptBytes=readFileSync(receiptFile),receipt=JSON.parse(receiptBytes);
+          const original=readFileSync(`official-runtime/runtime-build-${target}.json`,'utf8');
+          assert.equal(receipt.release.metadata_json,original);
+          assert.equal(receipt.release.metadata_sha256,proof.metadata_sha256);
+          assert.equal(hash(original),proof.metadata_sha256);
+          const metadata=JSON.parse(original);
+          assert.equal(metadata.source_commit,proof.source);
+          assert.equal(metadata.target_triple,target);assert.equal(metadata.runtime_version,proof.version);
+          assert.equal(receipt.version,proof.version);assert.equal(receipt.sha256,proof.binary_sha256);
+          const directory=join(root,'bin/runtime',proof.version),binary=join(directory,'rsrs-runtime.exe');
+          assert.ok(lstatSync(binary).isFile()&&!lstatSync(binary).isSymbolicLink());
+          assert.equal(hash(readFileSync(binary)),proof.binary_sha256);verifyBinary(binary,target);
+          const content=JSON.parse(execFileSync('gh',['api',`repos/risense-ai/respire-runtime/contents/crates/core-sdk/core-sdk.lock.json?ref=${proof.source}`],{encoding:'utf8'}));
+          const lock=JSON.parse(Buffer.from(content.content,'base64')).targets[target];
+          const sdk=verifyCorePayload('runtime-payload',target,lock,metadata.files);assert.deepEqual(sdk,proof.sdk);
+          // Production compacts notices after full archive verification; all installed loader bytes remain pinned.
+          const inventory=metadata.files.filter(file=>!file.path.startsWith('core-notices/'))
+            .map(file=>({...file,path:file.path===metadata.binary_file?'rsrs-runtime.exe':file.path}));
+          const files=(base,prefix='')=>readdirSync(join(base,prefix)).flatMap(name=>{
+            const relative=prefix?`${prefix}/${name}`:name,info=lstatSync(join(base,relative));
+            assert.ok(!info.isSymbolicLink());
+            if(info.isDirectory())return files(base,relative);
+            assert.ok(info.isFile());return [relative];
+          });
+          assert.deepEqual(files(directory).sort(),inventory.map(file=>file.path).sort());
+          for(const file of inventory){
+            const bytes=readFileSync(join(directory,file.path));
+            assert.equal(bytes.length,file.size);assert.equal(hash(bytes),file.sha256);
+          }
+          const managed=realpathSync(binary);
+          assert.equal(realpathSync(join(directory,'..','..','..')),realpathSync(root));
+          assert.ok(!/[\r\n]/.test(managed));
+          appendFileSync(process.env.GITHUB_ENV,`NATIVE_RUNTIME_BIN=${managed}\n`);
+          writeFileSync('db-managed-runtime-identity.json',JSON.stringify({diagnostic_only:true,source:proof.source,
+            version:proof.version,target,binary_sha256:proof.binary_sha256,metadata_sha256:proof.metadata_sha256,
+            original_receipt_sha256:hash(receiptBytes),sdk,managed_files_verified:inventory.length,
+            managed_installation_verified:true},null,2)+'\n');
+          NODE
       - name: Run unchanged two-source historical database harness
         shell: bash
         env:
@@ -231,6 +290,7 @@ jobs:
             db-producer.json
             db-cli-identity.json
             db-runtime-identity.json
+            db-managed-runtime-identity.json
             db-safe-results.json
             db-model-preparation.json
             ${{ runner.temp }}/db-upgrades/published-upgrades.json
