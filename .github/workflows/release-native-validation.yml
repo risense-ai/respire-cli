@@ -41,6 +41,13 @@ on:
       recovery_suffix:
         default: ''
         type: string
+      musl_source_recovery:
+        description: Fixed CLI3930 continuation; only v1.0.8 and missing resident
+        default: false
+        type: boolean
+      musl_fixture_commit:
+        default: ''
+        type: string
       client2_release:
         description: Explicit public Client2 tag for product upgrade acceptance; empty selects CI candidate evidence
         default: ''
@@ -188,12 +195,22 @@ jobs:
         if: inputs.recovery_run != ''
         shell: bash
         run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
+      - name: Load fixed musl continuation and bind the reviewed fixture revision
+        if: inputs.musl_source_recovery
+        shell: bash
+        env:
+          MUSL_FIXTURE_COMMIT: ${{ inputs.musl_fixture_commit }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: |
+          cp .recovery-harness/npm/scripts/release-musl3930.mjs npm/scripts/
+          node npm/scripts/release-musl3930.mjs fixtures '${{ runner.temp }}/musl-fixture-identity.json'
       - name: Verify original producer job, ZIP and metadata without replacing its identity
         if: inputs.recovery_run != ''
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TARGET: ${{ matrix.target }}
-        run: node npm/scripts/release-recovery3930.mjs native validated-cli
+          MUSL_FIXTURE_COMMIT: ${{ inputs.musl_fixture_commit }}
+        run: node npm/scripts/${{ inputs.musl_source_recovery && 'release-musl3930' || 'release-recovery3930' }}.mjs native validated-cli
       - uses: actions/download-artifact@v4
         if: inputs.artifact_source == 'published-assets'
         with:
@@ -305,7 +322,7 @@ jobs:
           test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
           printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
       - name: Verify OS autostart registration from verified release bytes
-        if: inputs.validation_profile == 'full'
+        if: inputs.validation_profile == 'full' && !inputs.musl_source_recovery
         shell: bash
         run: |
           set -euo pipefail
@@ -351,6 +368,7 @@ jobs:
           test "$MATCHED_KEY" = "$EXPECTED_KEY"
           python scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
       - name: Install and probe BGE CPU inference
+        id: bge-probe
         shell: bash
         env:
           RSRS_ENGINE: cpu
@@ -451,6 +469,7 @@ jobs:
         shell: bash
         env:
           UPGRADE_PROFILE: ${{ inputs.validation_profile }}
+          MUSL_SOURCE_RECOVERY: ${{ inputs.musl_source_recovery }}
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ inputs.ref }}
           CLI_VERSION: ${{ inputs.version }}
@@ -484,13 +503,15 @@ jobs:
               --output native-legacy-model/onnx/model_fp16.onnx
           fi
           "$py" scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
-          "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
+          source_args=()
+          if [ "$MUSL_SOURCE_RECOVERY" = true ]; then source_args=(--source v1.0.8); fi
+          "$py" scripts/test-published-upgrades.py "${source_args[@]}" --binary "$exe" --target '${{ matrix.target }}' \
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
             --legacy-model-dir native-legacy-model \
             --output-dir "$RUNNER_TEMP/published-upgrades" --profile "$UPGRADE_PROFILE"
       - name: Verify resident foreground and background inference under concurrent CLI load
-        if: inputs.validation_profile == 'full'
+        if: ${{ !cancelled() && inputs.validation_profile == 'full' && ((!inputs.musl_source_recovery && success()) || (inputs.musl_source_recovery && steps.bge-probe.outcome == 'success')) }}
         shell: bash
         env:
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
@@ -517,6 +538,7 @@ jobs:
           retention-days: 1
           name: resident-concurrency-${{ matrix.target }}${{ inputs.recovery_suffix }}
           path: |
+            ${{ runner.temp }}/musl-fixture-identity.json
             ${{ runner.temp }}/resident-concurrency/real-account-return-verification.json
             ${{ runner.temp }}/resident-concurrency/resident-stress-metrics.json
             ${{ runner.temp }}/resident-concurrency/fixture-dependencies.json
