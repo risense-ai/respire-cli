@@ -12,7 +12,7 @@ pub fn run_capabilities() -> Result<()> {
             "schema_version": 1,
             "cli_version": crate::app_version::embedded(),
             "capabilities": {
-                "host_rpc": {"version":1,"transport":"stdio","flag":"--host-rpc-stdio","methods":["auth.register","auth.login","auth.recover","auth.reset","auth.login.continue","auth.key.continue","auth.login.browser"]},
+                "host_rpc": {"version":1,"transport":"stdio","flag":"--host-rpc-stdio","methods":["auth.register","auth.login","auth.recover","auth.reset","auth.login.continue","auth.key.continue","auth.login.browser","core_config.set","core_config.result"]},
                 "memory_list_metadata": true,
                 "memory_metadata_flags": true,
                 "memory_metadata_gate_default": false,
