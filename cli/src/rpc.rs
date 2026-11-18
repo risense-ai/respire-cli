@@ -1410,7 +1410,6 @@ mod tests {
             std::env::set_var("RSRS_DATA_DIR", root.path());
             std::env::set_var("RSRS_BIN_DIR", root.path().join("bin"));
             std::env::set_var("RSRS_RPC_PORT", port.to_string());
-            std::env::set_var("RSRS_CORE_TEST_MODE", "1");
             std::env::set_var("RSRS_NO_AUTOSYNC", "1");
             let executable = crate::runtime_fetch::managed_runtime_path()?
                 .context("copied official Runtime fixture is not installed")?;
@@ -1422,7 +1421,10 @@ mod tests {
                 &executable, &arguments, None)?;
             let mut runtime = Self { child, port, _environment: environment, _root: root };
             wait_daemon_ready(&mut runtime.child, &executable, &instance_id,
-                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)?;
+                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)?;
+            let health = crate::net_rpc::health()?;
+            anyhow::ensure!(!health.store_ready && health.credential_state == "required",
+                "transport fixture must remain keyless and locked");
             Ok(runtime)
         }
 
@@ -1635,9 +1637,9 @@ mod tests {
         let _serial = crate::TEST_ENV_LOCK.lock()
             .map_err(|error| anyhow::anyhow!("test environment lock poisoned: {error}"))?;
         let mut runtime = OfficialRuntime::start()?;
-        let request = runtime.request("cli.exec", vec!["--json", "status"])?;
+        let request = runtime.request("core_config.read", vec![r#"{"schema_version":1}"#])?;
         let first = runtime.post(&request)?;
-        anyhow::ensure!(first["ok"] == true, "official Runtime status failed: {first}");
+        anyhow::ensure!(first["ok"] == true, "official Runtime core configuration read failed: {first}");
         let mut replay = request.clone();
         replay["id"] = json!(uuid::Uuid::new_v4().to_string());
         let repeated = runtime.post(&replay)?;
@@ -1653,7 +1655,8 @@ mod tests {
         assert_eq!(result["envelope"]["summary"]["state"], "completed");
         assert_eq!(result["envelope"]["summary"]["response"]["envelope"], first["envelope"]);
         replay["id"] = json!(uuid::Uuid::new_v4().to_string());
-        replay["args"] = json!(["--json", "memory-revision"]);
+        replay["method"] = json!("cli.exec");
+        replay["args"] = json!(["--json", "status"]);
         assert_eq!(runtime.post(&replay)?["code"], "idempotency_conflict");
         // Final drain must retain the original operation binding and prove release.
         let _takeover = crate::runtime_policy::takeover_lock()?;
@@ -1677,8 +1680,8 @@ mod tests {
         let _serial = crate::TEST_ENV_LOCK.lock()
             .map_err(|error| anyhow::anyhow!("test environment lock poisoned: {error}"))?;
         let runtime = OfficialRuntime::start()?;
-        let first = runtime.request("cli.exec", vec!["--json", "status"])?;
-        let second = runtime.request("cli.exec", vec!["--json", "status"])?;
+        let first = runtime.request("core_config.read", vec![r#"{"schema_version":1}"#])?;
+        let second = runtime.request("core_config.read", vec![r#"{"schema_version":1}"#])?;
         let mut pipeline = std::net::TcpStream::connect(("127.0.0.1", runtime.port))?;
         pipeline.set_read_timeout(Some(Duration::from_secs(15)))?;
         for (body, close) in [(&first, false), (&second, true)] {
@@ -1697,7 +1700,10 @@ mod tests {
         assert!(first_at < second_at, "HTTP pipeline replies reordered");
         assert_eq!(wire.matches("HTTP/1.1 200").count(), 2, "pipeline response failed: {wire}");
         let response = call_method("cli.exec", vec!["--json".into(), "status".into()], false)?;
-        assert!(response.ok);
+        assert!(!response.ok && response.exit == 2);
+        let envelope = response.envelope.as_ref().context("locked status envelope missing")?;
+        assert_eq!(envelope.summary["credential_state"], "required");
+        assert_eq!(envelope.summary["store_ready"], false);
         assert!(response.scope.is_some() && response.operation_id.is_some()
             && response.idempotency_key == response.operation_id);
         Ok(())
