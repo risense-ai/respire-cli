@@ -78,6 +78,21 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertIsNone(namespace['cli'](instance, 'remember', SECRET, ok=False))
                 self.assertEqual(call.call_count, 1)
             self.assertEqual(instance.report, {})
+            instance.report.clear()
+            envelope = {'status': 'fail', 'items': [
+                {'name': 'inject', 'status': 'fail', 'note': SECRET},
+                {'name': 'model index', 'status': 'ok', 'path': SECRET},
+                {'name': SECRET, 'status': 'fail'},
+                {'name': 'store', 'status': SECRET},
+                {'name': {'token': SECRET}, 'status': ['fail']}, None]}
+            result = types.SimpleNamespace(returncode=1,
+                stdout=json.dumps(envelope).encode(), stderr=SECRET.encode())
+            with patch.object(subprocess, 'run', return_value=result):
+                with self.assertRaisesRegex(RuntimeError, 'cli_failed_doctor'):
+                    namespace['cli'](instance, 'doctor')
+            self.assertEqual(instance.report['cli_failure']['doctor_items'], [
+                {'name': 'inject', 'status': 'fail'}, {'name': 'model index', 'status': 'ok'}])
+            self.assertNotIn(SECRET, json.dumps(instance.report))
 
         for reason in (SECRET, {'token': SECRET}, [SECRET], None, 'invalid_input', 'runtime_error', 'request_outcome_unknown'):
             value = {'summary': {'reason': reason, 'password': SECRET}, 'errors': [SECRET], 'details': {'token': SECRET}}
