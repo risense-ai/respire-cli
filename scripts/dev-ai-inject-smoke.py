@@ -340,6 +340,17 @@ class Smoke:
                     item = part.get(field) if isinstance(part, dict) else None
                     if type(item) is str and item in allowed:
                         diagnostic[target] = item
+                if command == ("doctor",) and isinstance(value.get("items"), list):
+                    names = {"migration", "store", "data dir", "mcp bin", "mcp http", "session",
+                        "embedder", "model index", "lock", "remote", "inject", "memory status",
+                        "tidy counter", "CLI version", "Runtime version"}
+                    diagnostic["doctor_items"] = [
+                        {"name": item["name"], "status": item["status"]}
+                        for item in value["items"] if isinstance(item, dict)
+                        and type(item.get("name")) is str and item["name"] in names
+                        and type(item.get("status")) is str
+                        and item["status"] in ("ok", "warn", "fail", "skip", "pending")
+                    ]
             self.report["cli_failure"] = diagnostic
             self.save()
             raise RuntimeError(failure + command[0]) from None
@@ -523,6 +534,10 @@ class Smoke:
             require(target.read_text() == expected_user, "legacy_remove_changed_user_content")
         self.passed("inject_legacy_marker_contract", migration_supported=True,
             shapes=3, legacy_removed=True, user_content_preserved=True)
+        # Doctor also checks injection freshness; the roundtrip cases above removed it.
+        self.cli("inject", "--id", "codex")
+        require(self.cli("inject", "--id", "codex", "--preview")["details"]["changed"] is False,
+            "doctor_agent_injection_not_fresh")
 
     def run(self):
         self.provider_keys = RuntimeProviderKeys(self.env)
