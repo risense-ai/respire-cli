@@ -255,8 +255,8 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
     const current=[{...failed,id:1000,conclusion:'success',run_id:701,head_sha:consumer.workflow_head_sha},
       {id:1001,name:'preparation-receipt',status:'in_progress',started_at:time(3)}];
     const joined=recoveryJobs(original,current,source,consumer,manifest);
-    const multi=structuredClone(original),additional=multi.filter(j=>j.name.startsWith('cloud-sweep (')).slice(0,3)
-      .concat(multi.filter(j=>j.name.startsWith('native-regression / Native (')&&j.name!==failed.name).slice(0,2));
+    const multi=structuredClone(original),additional=multi.filter(j=>j.name.startsWith('cloud-sweep (')&&['x86_64-unknown-linux-musl',windowsTarget,'x86_64-apple-darwin'].some(t=>j.name.endsWith(', '+t+')')))
+      .concat(multi.filter(j=>['native-regression / Native (x86_64-apple-darwin)','native-regression / Native (aarch64-apple-darwin)'].includes(j.name)));
     for(const j of additional)j.conclusion='failure';
     const multiCurrent=[...current.slice(0,1),...additional.map((j,i)=>({...j,id:1100+i,conclusion:'success',run_id:701,head_sha:consumer.workflow_head_sha}))];
     assert.equal(recoveryJobs(multi,multiCurrent,source,consumer,manifest).jobs.length,25);
@@ -278,6 +278,20 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
       consumerArtifacts:replaced.map((n,i)=>metadata(n+'-recovery-701-1',100+i,true))};
     const options={evidenceOwners:joined.evidenceOwners,env:{...env,CLI_PRODUCER_RUN_ID:'44276673815',CLI_PRODUCER_ATTEMPT:'1',GITHUB_RUN_ID:'701',GITHUB_SHA:consumer.workflow_head_sha}};
     const full=()=>completeCandidate(candidate,inventory,reports,ctx.jobs,consumer,options);
+    const mixed=recoveryJobs(multi,multiCurrent,source,consumer,manifest);
+    assert.equal(completeCandidate(candidate,inventory,reports,mixed.jobs,consumer,{...options,evidenceOwners:mixed.evidenceOwners}).full_passed,true);
+    const newNames=[];
+    for(const j of multi.filter(j=>j.conclusion==='failure')){
+      const t=j.name.startsWith('native-regression')?j.name.match(/Native \(([^)]+)\)/)[1]:j.name.match(/, ([^)]+)\)/)[1];
+      if(j.name.startsWith('native-regression'))newNames.push(...['candidate-assets-','resident-concurrency-','published-upgrades-'].map(p=>p+t),...(t===windowsTarget?['client2-published-online-'+t]:[]));
+      else newNames.push('base-release-sweep-'+t,...(t.includes('linux')?['release-sweep-'+t,'secret-service-profile-migration-'+t]:[]));
+    }
+    const mixedContext={...ctx,original:multi,current:multiCurrent,...mixed,consumerArtifacts:newNames.map((name,i)=>metadata(name+'-recovery-701-1',300+i,true))};
+    const mixedAnchors=recoveryArtifacts(mixedContext);
+    assert.equal(mixedAnchors.filter(a=>a.owner.run_id===701).length,newNames.length);
+    for(const change of [c=>c.consumerArtifacts[0].workflow_run.id=44276673815,c=>c.consumerArtifacts[0].updated_at=time(4),c=>c.current[0].run_attempt++]){
+      const c=structuredClone(mixedContext);change(c);assert.throws(()=>recoveryArtifacts(c));
+    }
     const full_result=full();assert.equal(full_result.full_passed,true);assert.equal(full_result.historical_upgrades.length,8);
     assert.equal(Object.keys(joined.evidenceOwners).filter(n=>n.startsWith('cloud-sweep')).length,7);
     full_result.continuation={producer:source,consumer:{run_id:'701',run_attempt:1,sha:consumer.workflow_head_sha},scripts:ctx.scripts,
@@ -350,6 +364,7 @@ const original=cp.execFileSync;cp.execFileSync=(command,a,options)=>{
     writeFileSync(join(gitFolder,'.github','workflows','release-recovery3930.yml'),inputs['.github/workflows/release.yml']);
     git('add','.');git('commit','-qm','CI');const ciSHA=git('rev-parse','HEAD');
     assert.match(recoveryScripts(originalSHA,ciSHA,{cwd:gitFolder}).unchanged_tree_sha256,/^[a-f0-9]{64}$/);
+    assert.throws(()=>cloudScope(inputs['.github/workflows/release.yml'],inputs['.github/workflows/release.yml'].replace('original-cloud-scope','reduced-cloud-scope')),/Cloud scope, environment or commands changed/);
     writeFileSync(join(gitFolder,'.github','workflows','release-native-validation.yml'),inputs['.github/workflows/release-native-validation.yml'].replace('original-native-scope','reduced-native-scope'));
     git('add','.');git('commit','-qm','changed native scope');
     assert.throws(()=>recoveryScripts(originalSHA,git('rev-parse','HEAD'),{cwd:gitFolder}),/Windows native scope or commands changed/);
