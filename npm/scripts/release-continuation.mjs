@@ -38,8 +38,8 @@ export function validateContinuationRuns(producerRun,consumerRun,producer,consum
 export function continuationScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
   const allowed=new Set([continuationWorkflow,'.github/workflows/release-native-validation.yml','.github/workflows/release.yml',
     'npm/scripts/release-continuation.mjs','npm/scripts/release-preparation.mjs','npm/scripts/candidate-artifact.mjs',
-    'npm/scripts/extract-artifact.mjs','npm/scripts/test-release-preparation.mjs','npm/scripts/test-prepared-import.mjs',
-    'npm/scripts/test-release-regression-contract.mjs']);
+    'npm/scripts/extract-artifact.mjs','npm/scripts/test-release-preparation.mjs',
+    'npm/scripts/test-release-regression-contract.mjs','scripts/test-native-runtime-install.py']);
   execFileSync('git',['merge-base','--is-ancestor',producerSHA,consumerSHA],{cwd});
   const changed=execFileSync('git',['diff','--name-only',producerSHA,consumerSHA],{cwd,encoding:'utf8'}).trim().split(/\r?\n/).filter(Boolean);
   assert.ok(changed.every(file=>allowed.has(file)),'Product, fixture or unrelated CI source changed since producer');

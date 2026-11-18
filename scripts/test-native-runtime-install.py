@@ -20,7 +20,15 @@ class FixtureInstallationTests(unittest.TestCase):
     def test_published_autostart_uses_verified_archive_and_requires_hosted_registration(self):
         scripts = Path(__file__).resolve().parent
         workflow = (scripts.parent / '.github/workflows/release-native-validation.yml').read_text(encoding='utf-8')
-        self.assertIn('os: macos-15\n            target: aarch64-apple-darwin', workflow)
+        expression = re.search(r'include: \$\{\{ fromJSON\((.*)\) \}\}', workflow)
+        self.assertIsNotNone(expression)
+        windows, full = [json.loads(value) for value in re.findall(r"'(\[.*?\])'", expression[1])]
+        self.assertEqual(windows, [{'os': 'windows-latest', 'target': 'x86_64-pc-windows-msvc',
+                                    'rustflags': '-C target-feature=-crt-static'}])
+        manifest = json.loads((scripts.parent / 'npm/artifact-manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(sorted(row['target'] for row in full), sorted(row['triple'] for row in manifest['targets']))
+        self.assertEqual([row for row in full if row['target'] == 'aarch64-apple-darwin'],
+                         [{'os': 'macos-15', 'target': 'aarch64-apple-darwin'}])
         name = 'Verify OS autostart registration from verified release bytes'
         step = workflow.split('      - name: ' + name + '\n')[1].split('\n      - ')[0]
         self.assertIn("if: inputs.validation_profile == 'full'\n", step)
