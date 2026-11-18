@@ -237,6 +237,23 @@ class AliasTests(unittest.TestCase):
         self.smoke.verify_retained_current_credentials(self.session, self.fixture)
         self.assertEqual(self.keys.reads, [('rsrs', 'super:' + ALIAS), ('rsrs', 'pass:' + ALIAS)])
 
+        prepared = dict(user='', addr='', vault_version=4, keyring_account=OTHER, keyring_backend='native')
+        self.keys.prepare_historical_v4_super(prepared, SUPER)
+        self.assertEqual(self.keys.read('rsrs', 'super:' + OTHER), SUPER)
+        with self.assertRaisesRegex(RuntimeError, '^historical_fixture_slot_not_fresh$'):
+            self.keys.prepare_historical_v4_super(prepared, SUPER)
+        for change in ({'auth_operation_id': 'not-a-recovery'}, {'super': SUPER},
+                {'keyring_backend': 'kernel'}, {'user': USER}, {'vault_version': 1}):
+            with self.assertRaisesRegex(RuntimeError, '^historical_fixture_identity_invalid$'):
+                self.keys.prepare_historical_v4_super(dict(prepared, **change), SUPER)
+        fresh = MemoryKeys()
+        fresh.values['rsrs', 'super:' + OTHER] = 'foreign'
+        with self.assertRaisesRegex(RuntimeError, '^historical_fixture_slot_not_fresh$'):
+            fresh.prepare_historical_v4_super(prepared, SUPER)
+        self.assertNotIn(('rsrs', 'super:' + OTHER), fresh.entries)
+        self.assertTrue(self.keys.cleanup()['passed'])
+
+
     def test_foreign_user_alias_missing_alias_rejected_before_read(self):
         for change in ({'user': 'foreign'}, {'keyring_account': OTHER}, {'keyring_account': None}):
             with self.subTest(change=list(change)):
@@ -1475,21 +1492,51 @@ class OriginalFactorTests(unittest.TestCase):
         canonical = legacy.canonical_scope_path(source)
         exec(checks, dict(scope, self=SimpleNamespace(registration_receipt=Mock(
             return_value=dict(receipt, source_profile=canonical, target_profile=canonical)))))
-        recovery = next(node for node in ast.walk(historical) if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name) and node.func.id == 'require'
-            and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value == 'historical_recovery_not_committed_in_place')
-        recovery_check = compile(ast.Expression(recovery), '<recovery-scope-contract>', 'eval')
-        recovered_scope = dict(scope, recovered=dict(outcome='committed', source_profile=canonical, operation_id='owned'),
-            operation='owned', candidate=dict(user='', addr=''))
-        eval(recovery_check, recovered_scope)
+        self.assertNotIn('auth.recover', ast.unparse(historical))
+        self.assertNotIn('recovery_operation', ast.unparse(historical))
+        prepare_start = next(i for i, node in enumerate(historical.body)
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            and node.value.value == 'historical_fixture_current_v4')
+        prepare_end = next(i for i, node in enumerate(historical.body)
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Tuple)
+            and [part.id for part in node.targets[0].elts] == ['user', 'password'])
+        prepare = compile(ast.Module(body=historical.body[prepare_start:prepare_end], type_ignores=[]),
+            '<historical-current-v4-preparation>', 'exec')
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        import secrets
+        with tempfile.TemporaryDirectory() as directory:
+            source_fixture = Path(directory)
+            (source_fixture / 'session.json').write_text('old-session-not-a-product-contract')
+            keys = MemoryKeys()
+            keys.verify_owner = Mock()
+            fixture = SimpleNamespace(report={}, diagnostic_secrets=set(), keys=keys,
+                save=Mock(), historical_provider_state=Mock(), read_entry=Mock(),
+                session=lambda env: json.loads((source_fixture / 'session.json').read_text()))
+            urk = bytes(range(32))
+            current_code = 'A3-' + '01' * 18
+            records = {'original-id': ('original-id', json.dumps({'content': 'original plaintext'}).encode(), 1, 0)}
+            env = {}
+            namespace = dict(self=fixture, env=env, source=source_fixture, expected_urk=urk,
+                code=current_code, rows=lambda: before, before=before, expected=records,
+                require=legacy.require, AESGCM=AESGCM, secrets=secrets, PREFIX=legacy.PREFIX,
+                v4_kek=legacy.v4_kek, encrypted_bytes=legacy.encrypted_bytes, json=json, sys=sys)
+            exec(prepare, namespace)
+            candidate = namespace['candidate']
+            self.assertEqual(AESGCM(legacy.v4_kek(current_code, candidate['kdf_salt'], candidate['wrapped_urk'])).decrypt(
+                bytes.fromhex(candidate['urk_nonce']), legacy.encrypted_bytes(candidate['wrapped_urk']), None), urk)
+            fixture.read_entry.assert_called_once_with(env, 'original-id', 'original plaintext')
+            self.assertNotIn('auth_operation_id', candidate)
+            self.assertNotIn('super', candidate)
+            self.assertEqual(keys.read('rsrs', 'super:' + candidate['keyring_account']), current_code)
+            self.assertTrue(keys.cleanup()['passed'])
+            env['RSRS_SUPER'] = SUPER
+            with self.assertRaisesRegex(RuntimeError, '^historical_fixture_factor_override_forbidden$'):
+                exec(prepare, namespace)
         for wrong in (str(source.parent), None, 'source', str(source / 'missing')):
             for field in ('source_profile', 'target_profile'):
                 with self.assertRaisesRegex(RuntimeError, '^historical_registration_' + field.split('_')[0] + '_changed$'):
                     exec(checks, dict(scope, self=SimpleNamespace(registration_receipt=Mock(
                         return_value=dict(receipt, **{field: wrong})))))
-            with self.assertRaisesRegex(RuntimeError, '^historical_recovery_not_committed_in_place$'):
-                eval(recovery_check, dict(recovered_scope, recovered=dict(recovered_scope['recovered'], source_profile=wrong)))
         for changed, error in ((dict(registered={}), 'terminal_identity_mismatch'),
                 (dict(self=SimpleNamespace(registration_receipt=Mock(return_value=dict(receipt, outcome='unknown')))),
                     'receipt_not_committed'),

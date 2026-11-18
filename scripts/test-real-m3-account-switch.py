@@ -1084,11 +1084,17 @@ for binary in BINARIES:
             except Exception as error:
                 cleanup_errors.append('cloud: '+str(error))
             reports[-1]['post_upgrade_sync_diagnostic']={field:network_smoke.report[field]
-                for field in ('stage','server_sha','cli_failure') if field in network_smoke.report}
+                for field in ('stage','server_sha','cli_failure','provider_observation',
+                    'historical_identity_preparation') if field in network_smoke.report}
         if keys is not None:
             try:
                 expected_slots=len(keys.entries) if network_smoke is not None else None
                 reports[-1]['native_credential_cleanup']=keys.cleanup()
+                provider=reports[-1]['native_credential_cleanup'].get('provider_daemon')
+                if network_smoke is not None and provider is not None and (provider.get('started') is not True
+                        or provider.get('exit_code_at_cleanup_start') is not None):
+                    reports[-1]['native_credential_cleanup'].update(passed=False,
+                        failure_code='original_provider_not_running_at_cleanup')
                 assert reports[-1]['native_credential_cleanup'].get('passed') is True \
                     and not reports[-1]['native_credential_cleanup'].get('remaining_entries'), 'native credential cleanup failed'
                 custody=reports[-1].get('host_credential_custody')

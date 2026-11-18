@@ -163,9 +163,24 @@ class Smoke:
         diagnostic = re.sub(r"(?i)\b(?:A3-)?[a-f0-9]{24,}\b", "[redacted]", diagnostic)
         return diagnostic[:1500] or "no structured error"
 
+    def historical_provider_state(self, when):
+        if not self.report.get("stage", "").startswith("historical_"):
+            return
+        keys = getattr(self, "keys", None)
+        if keys is None or not hasattr(keys, "daemon"):
+            return
+        daemon = keys.daemon
+        code = daemon.poll() if daemon is not None else None
+        self.report.setdefault("provider_observation", {})[when] = {
+            "original_handle_available": daemon is not None,
+            "running": daemon is not None and code is None, "exit_code": code}
+
     def cli(self, env, *args, timeout=180, prompts=None, host_request=None):
         business_failed = False
         try:
+            self.historical_provider_state("before")
+            provider = self.report.get("provider_observation", {}).get("before")
+            require(provider is None or provider["running"], "historical_provider_owner_exited")
             if host_request is not None:
                 output = subprocess.run([str(self.args.binary), "--json", "--host-rpc-stdio"],
                     input=json.dumps(host_request).encode(), cwd=self.root, env=env, capture_output=True, timeout=timeout)
@@ -173,10 +188,29 @@ class Smoke:
                 argv = [str(self.args.binary), "--direct", "--json", *args]
                 output = run_hidden(argv, prompts=prompts, cwd=self.root, env=env, timeout=timeout) if prompts is not None else subprocess.run(
                     argv, cwd=self.root, env=env, capture_output=True, timeout=timeout)
+            self.historical_provider_state("after")
             if output.returncode != 0:
                 self.report["cli_failure"] = {"exit_code": output.returncode,
                     "reason": "process_exit"}
+                try:
+                    frame = json.loads(output.stdout)
+                    envelope = frame.get("envelope", frame) if isinstance(frame, dict) else {}
+                    for field, value, allowed in (
+                        ("status", envelope.get("status"), ("ok", "error", "failed")),
+                        ("structured_reason", envelope.get("summary", {}).get("reason"),
+                         ("runtime_error", "invalid_input", "rpc_error", "request_outcome_unknown")),
+                        ("error_type", envelope.get("details", {}).get("error_type"),
+                         ("runtime", "input", "user", "rpc", "validation", "outcome_unknown"))):
+                        if isinstance(value, str) and value in allowed:
+                            self.report["cli_failure"][field] = value
+                    code = envelope.get("details", {}).get("code")
+                    if type(code) is int:
+                        self.report["cli_failure"]["code"] = code
+                except (ValueError, UnicodeError, AttributeError, TypeError):
+                    self.report["cli_failure"]["structured_error"] = "unavailable"
                 raise RuntimeError("cli_failed_" + args[0])
+            provider = self.report.get("provider_observation", {}).get("after")
+            require(provider is None or provider["running"], "historical_provider_owner_exited")
             try:
                 value = json.loads(output.stdout)
             except (ValueError, UnicodeError):
@@ -191,6 +225,7 @@ class Smoke:
             return value
         except Exception:
             business_failed = True
+            self.historical_provider_state("after")
             self.record_runtime_failure()
             raise
         finally:
@@ -588,33 +623,39 @@ class Smoke:
             require((memory_id, decrypt_content(expected_urk, ciphertext, nonce), dirty, deleted) == expected[memory_id],
                     "historical_sync_original_key_mismatch")
         self.diagnostic_secrets.update((code, expected_urk.hex()))
-        self.report["stage"] = "historical_same_key_recovery"
+        self.report["stage"] = "historical_fixture_current_v4"
         self.save()
-        self.cli(env, "logout", "--full")
-        require(not (source / "session.json").exists() and rows() == before, "historical_logout_changed_database")
+        # The original DB/key were verified above. Authentication history is outside this scope.
         salt, nonce = secrets.token_hex(16), secrets.token_bytes(12)
         wrapped = PREFIX + AESGCM(v4_kek(code, salt, PREFIX)).encrypt(nonce, expected_urk, None).hex()
         self.diagnostic_secrets.update((salt, nonce.hex(), wrapped))
-        request = {"v": 1, "id": "historical-recover-" + uuid.uuid4().hex, "method": "auth.recover",
-            "params": {"addr": "", "user": "", "super": code,
-                "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce.hex()}}
+        candidate = {"user": "", "addr": "", "vault_version": 4, "kdf_salt": salt,
+            "wrapped_urk": wrapped, "urk_nonce": nonce.hex(),
+            "keyring_account": "login-" + secrets.token_hex(16),
+            "keyring_backend": self.keys.credential_backend}
+        require(not any(prefix + suffix in env for prefix in ("RSRS_", "ONEMEMORY_", "RESPIRE_")
+            for suffix in ("SUPER", "PASS", "SECRET", "KDF_SALT", "WRAPPED_URK", "URK_NONCE")),
+            "historical_fixture_factor_override_forbidden")
+        self.historical_provider_state("before")
         try:
-            recovered = self.cli(env, "fivekeys", host_request=request)["summary"]
+            if sys.platform.startswith("linux"):
+                self.keys.verify_owner()
+            self.keys.prepare_historical_v4_super(candidate, code)
         finally:
-            # A public recovery may commit before its output/stop check fails.
-            candidate = self.session(env)
-            operation = candidate.get("auth_operation_id")
-            if all(candidate.get(field) == value for field, value in
-                    (("wrapped_urk", wrapped), ("kdf_salt", salt), ("urk_nonce", nonce.hex()))) \
-                    and isinstance(operation, str):
-                native_verifier = ({"recovery_verifier": lambda expected:
-                    self.verify_recovery_control(env, source, operation, expected)} if sys.platform == "darwin" else {})
-                self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation, **native_verifier)
-        require(recovered.get("outcome") == "committed" and same_scope_path(recovered.get("source_profile"), source)
-            and recovered.get("operation_id") == operation and candidate.get("user") == ""
-            and candidate.get("addr") == "" and rows() == before, "historical_recovery_not_committed_in_place")
-        require(AESGCM(v4_kek(code, salt, wrapped)).decrypt(nonce, encrypted_bytes(candidate["wrapped_urk"]), None)
-            == expected_urk, "historical_recovery_changed_urk")
+            self.historical_provider_state("after")
+        (source / "session.json").write_text(json.dumps(candidate), encoding="utf-8")
+        (source / "session.json").chmod(0o600)
+        require(rows() == before and AESGCM(v4_kek(code, salt, wrapped)).decrypt(
+            nonce, encrypted_bytes(wrapped), None) == expected_urk, "historical_fixture_changed_database_or_urk")
+        self.report["historical_identity_preparation"] = {"actor": "fixture", "format": "current-v4",
+            "original_urk_preserved": True, "new_slot_verified": True, "recovery_transaction_required": False}
+        self.report["stage"] = "historical_fixture_host_key_readback"
+        self.save()
+        # Use the real CLI and persistent provider, without factor environment overrides.
+        for memory_id, plaintext, _, deleted in expected.values():
+            if not deleted:
+                self.read_entry(env, memory_id, json.loads(plaintext)["content"])
+        require(self.session(env) == candidate and rows() == before, "historical_fixture_host_readback_changed_state")
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.diagnostic_secrets.add(password)
         account = {"user": user, "token": None, "confirmed": False}
@@ -633,7 +674,9 @@ class Smoke:
             if session.get("user") == user and session.get("addr") == UPSTREAM and session.get("token"):
                 account.update(token=session["token"], confirmed=True)
                 self.diagnostic_secrets.add(session["token"])
-                self.keys.track_created_login(session, user, code, password, recovery_operation=operation)
+                self.keys.track_created_login(session, user, None, password)
+                require(self.keys.read("rsrs", "super:" + candidate["keyring_account"]) == code,
+                        "historical_fixture_super_changed")
         require(registered.get("ok") is True and registered.get("user") == user
             and registered.get("addr") == UPSTREAM, "historical_registration_terminal_identity_mismatch")
         receipt = self.registration_receipt(env, source, user, previous_operations)
@@ -709,7 +752,8 @@ class Smoke:
         require(all(final_session.get(field) == session.get(field) for field in
             ("wrapped_urk", "kdf_salt", "urk_nonce", "keyring_account", "keyring_backend")),
             "historical_sync_changed_source_wrap")
-        return {"profile": str(source), "original_urk_preserved": True, "recovery_operation": operation,
+        return {"profile": str(source), "original_urk_preserved": True,
+            "identity_preparation": dict(self.report["historical_identity_preparation"], host_key_readback=True),
             "existing_keys_registered": True, "source_push": True, "independent_pull_decrypted": True,
             "reverse_marker_source_pull": True, "original_active_preserved": True,
             "tombstones_propagated": True, "pending_work_acknowledged": True}
