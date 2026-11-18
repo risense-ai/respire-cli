@@ -67,6 +67,14 @@ def seed_local_credentials(binary, env, keys, profile):
         text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
         text += "\n" + result.stderr
         categories = (
+            ("legacy_host_spawn", "compatibility startup failed at Runtime spawn"),
+            ("legacy_host_readiness", "compatibility startup failed at Runtime readiness"),
+            ("legacy_host_listen", "compatibility startup failed at public listener bind"),
+            ("legacy_host_identity", "compatibility startup failed at compatibility host"),
+            ("legacy_host_child_exit", "owned Runtime exited before readiness"),
+            ("legacy_host_unverified", "compatibility startup is uncertain for child"),
+            ("legacy_host_os_listener", "compatibility loopback listener is unavailable or ambiguous"),
+            ("legacy_host_account", "compatibility Runtime did not open the intended store"),
             ("original_operation_changed", "offline keygen original operation changed"),
             ("handoff_unsupported", "offline_keygen_handoff_unsupported"),
             ("runtime_repair_required", "repair required"),
@@ -90,6 +98,11 @@ def seed_local_credentials(binary, env, keys, profile):
                       "stdout_json": isinstance(value, dict), "stderr_present": bool(result.stderr),
                       "offline_stage": stage, "material_tracked": alias is not None,
                       "session_present": session_path.exists()}
+        diagnostic["owned_marker_present"] = (root / "runtime/autostart/maintenance.json").exists()
+        diagnostic["endpoint_present"] = (root / "runtime/endpoint.json").exists()
+        with socket.socket() as probe:
+            probe.settimeout(1)
+            diagnostic["rpc_has_listener"] = probe.connect_ex(("127.0.0.1", int(env["RSRS_RPC_PORT"]))) == 0
         raise AssertionError(f"synthetic {action} failed: {json.dumps(diagnostic, sort_keys=True)}")
 
     try:
