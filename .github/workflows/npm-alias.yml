@@ -76,7 +76,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Load the current trusted preparation reader for frozen product bytes
-        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt}.mjs | tar -x
+        run: git archive "$GITHUB_SHA" npm/scripts/{release-recovery3930,release-recovery-sources,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt}.mjs | tar -x
       - uses: actions/setup-node@v5
         with:
           node-version: '24'

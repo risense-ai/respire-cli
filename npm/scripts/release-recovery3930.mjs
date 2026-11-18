@@ -1,4 +1,4 @@
-// One recovery for CLI3930/run44276673815; producer bytes and original evidence stay immutable.
+// Recheck failed gates for approved candidates while preserving their original bytes and evidence.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -10,6 +10,7 @@ import {api,pages,output} from './release-publication.mjs';
 import {validateCandidate,completeCandidate} from './candidate-artifact.mjs';
 import {preparationInputs,preparedAssets,preparedPacks,createPreparation,validatePreparationHistory,validatePreparationFull} from './release-preparation.mjs';
 import {readFence} from './publication-fence.mjs';
+import {approvedRecoveryProducer} from './release-recovery-sources.mjs';
 
 export const recoveryWorkflow='.github/workflows/release-recovery3930.yml';
 export const muslPreparationWorkflow='.github/workflows/release-musl3930-preparation.yml';
@@ -56,7 +57,7 @@ export function validateRecoveryRuns(producerRun,consumerRun,producer,consumer){
 // All product files, fixture scripts, locks, model keys and other workflows must be identical.
 export function recoveryScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
   const allowed=new Set([recoveryWorkflow,'.github/workflows/release-native-validation.yml','.github/workflows/release.yml','.github/workflows/npm-alias.yml','.github/workflows/ci.yml',
-    'npm/scripts/release-recovery3930.mjs','npm/scripts/release-preparation.mjs','npm/scripts/candidate-artifact.mjs',
+    'npm/scripts/release-recovery3930.mjs','npm/scripts/release-recovery-sources.mjs','npm/scripts/release-preparation.mjs','npm/scripts/candidate-artifact.mjs',
     'npm/scripts/extract-artifact.mjs','npm/scripts/test-release-preparation.mjs',
     'npm/scripts/test-release-regression-contract.mjs','npm/scripts/test-publication-acceptance.mjs',
     'npm/scripts/publication-acceptance.mjs','npm/scripts/release-publication.mjs','npm/scripts/cleanup-release-artifacts.mjs','scripts/create-published-assets.mjs','scripts/test-native-runtime-install.py']);
@@ -68,7 +69,10 @@ export function recoveryScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
     const start=text.indexOf('      - name: Verify and extract the release binary\n');assert.ok(start>=0,'Missing original native entry');
     return text.slice(start);
   };
-  const originalSteps=nativeTail(producerSHA);assert.equal(nativeTail(consumerSHA).replaceAll('${{ inputs.recovery_suffix }}',''),originalSteps,'Windows native scope or commands changed');
+  const originalSteps=nativeTail(producerSHA);
+  const withoutArtifactSuffix=value=>value.replaceAll('${{ inputs.recovery_suffix }}','');
+  assert.equal(withoutArtifactSuffix(nativeTail(consumerSHA)),withoutArtifactSuffix(originalSteps),
+    'Native regression scope or commands changed');
   const show=(sha,file)=>execFileSync('git',['show',`${sha}:${file}`],{cwd,encoding:'utf8'});
   const cloud_steps_sha256=cloudScope(show(producerSHA,'.github/workflows/release.yml'),show(consumerSHA,recoveryWorkflow));
   const tree=execFileSync('git',['ls-tree','-r',producerSHA],{cwd,encoding:'utf8',maxBuffer:16*1024*1024});
@@ -145,7 +149,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
 function currentSource(producer){
   assert.equal(process.env.GITHUB_REPOSITORY,REPO);assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');assert.equal(process.env.GITHUB_REF,'refs/heads/main');
   assert.match(process.env.GITHUB_SHA,/^[a-f0-9]{40}$/);
-  assert.equal(execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),PRODUCT);
+  assert.equal(execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),producer.sha);
   assert.equal(execFileSync('git',['-C','.recovery-harness','rev-parse','HEAD'],{encoding:'utf8'}).trim(),process.env.GITHUB_SHA);
   return {repository:REPO,workflow:recoveryWorkflow,run_id:process.env.GITHUB_RUN_ID,run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),
     sha:producer.sha,version:producer.version,workflow_head_sha:process.env.GITHUB_SHA,producer};
@@ -153,7 +157,7 @@ function currentSource(producer){
 export function recoveryContext(source,{planning=false}={}){
   if(source.workflow===muslPreparationWorkflow)return muslPreparationContext(source);
   const producer=source.producer;
-  assert.equal(producer.sha,PRODUCT);assert.equal(String(producer.run_id),BUILD_RUN);assert.equal(producer.run_attempt,1);assert.equal(producer.version,'2.0.0-dev.19');
+  assert.deepEqual(producer,approvedRecoveryProducer(producer.run_id));
   const producerRun=api(`repos/${REPO}/actions/runs/${producer.run_id}`),run=api(`repos/${REPO}/actions/runs/${source.run_id}`);
   validateRecoveryRuns(producerRun,run,producer,source);
   const scripts=recoveryScripts(producer.sha,source.workflow_head_sha);
@@ -215,9 +219,8 @@ function readCandidate(context,root){
   validateCandidate(c,{CLI_SHA:p.sha,CLI_VERSION:p.version,GITHUB_RUN_ID:p.run_id,GITHUB_RUN_ATTEMPT:p.run_attempt,GITHUB_SHA:p.sha});
   assert.equal(c.source.repository,p.repository);return c;
 }
-function requestedProducer(){
-  return {repository:REPO,workflow:'.github/workflows/release.yml',run_id:BUILD_RUN,run_attempt:1,sha:PRODUCT,version:'2.0.0-dev.19'};
-}
+const requestedProducer=()=>approvedRecoveryProducer(BUILD_RUN);
+const continuationProducer=()=>approvedRecoveryProducer(process.env.CLI_PRODUCER_RUN_ID);
 // Release notes preserve this attestation after temporary Actions artifacts expire.
 const publicPrefix='<!-- rsrs-cli3930-recovery:';
 export const recoveryProofName='cli3930-recovery-proof.json';
@@ -233,7 +236,10 @@ export function recoveryPublicationEvidence(imported,candidate){
   const safe={...pick(c,['schema','kind']),client2:pick(c.client2,['release','source_sha']),source:pick(c.source,['repository','sha','version','run_id','run_attempt']),
     runtime:{...pick(c.runtime,['repository','release_id','version','source_sha']),producer:pick(c.runtime.producer,['run_id','run_attempt']),assets:c.runtime.assets.map(a=>pick(a,['id','name','size','sha256']))}};
   assert.deepEqual(c,safe,'Unknown candidate field');
-  validateCandidate(c,{CLI_SHA:PRODUCT,CLI_VERSION:'2.0.0-dev.19',GITHUB_RUN_ID:BUILD_RUN,GITHUB_RUN_ATTEMPT:1,GITHUB_SHA:PRODUCT});
+  const producer=approvedRecoveryProducer(receipt.source.producer.run_id);
+  assert.deepEqual(receipt.source.producer,producer);
+  validateCandidate(c,{CLI_SHA:producer.sha,CLI_VERSION:producer.version,GITHUB_RUN_ID:producer.run_id,
+    GITHUB_RUN_ATTEMPT:producer.run_attempt,GITHUB_SHA:producer.sha});
   assert.equal(hash(JSON.stringify(evidence.candidate)),receipt.full_result.manifest_sha256,'Candidate preimage differs');
   // Publish a whitelist projection; the original schema1 receipt stays private and unchanged.
   assert.deepEqual(publicRecoveryResult(evidence.acceptance),evidence.acceptance,'Unsafe recovery result');
@@ -272,16 +278,17 @@ function publicRecoveryResult(result){
 }
 export function recoveryPublicationBody(body,imported,publisher,candidate){
   const receipt=imported.receipt.preparation;
-  assert.deepEqual(receipt.source.producer,requestedProducer());
+  const producer=approvedRecoveryProducer(receipt.source.producer.run_id);
+  assert.deepEqual(receipt.source.producer,producer);
   validatePreparationHistory(receipt,imported.history);
   assert.equal(receipt.validation_profile,'full');assert.equal(receipt.full_result.full_passed,true);
-  assert.equal(publisher.sha,PRODUCT);assert.equal(publisher.version,receipt.source.version);
+  assert.equal(publisher.sha,producer.sha);assert.equal(publisher.version,receipt.source.version);
   const fence=readFence(body);
-  assert.equal(String(fence?.run_id),String(publisher.run_id));assert.equal(fence.source_sha,PRODUCT);assert.equal(fence.phase,'fenced');
+  assert.equal(String(fence?.run_id),String(publisher.run_id));assert.equal(fence.source_sha,producer.sha);assert.equal(fence.phase,'fenced');
   assert.equal(fence.version,publisher.version);
   const pick=(v,keys)=>Object.fromEntries(keys.map(k=>[k,v[k]]));
   const proof={schema:1,source:{...pick(receipt.source,['repository','workflow','run_id','run_attempt','sha','version','workflow_head_sha']),
-      ...(receipt.source.workflow===muslPreparationWorkflow?{fixture_commit:receipt.source.fixture_commit,diagnostic:pick(receipt.source.diagnostic,['run_id','run_attempt','sha'])}:{}),producer:requestedProducer()},
+      ...(receipt.source.workflow===muslPreparationWorkflow?{fixture_commit:receipt.source.fixture_commit,diagnostic:pick(receipt.source.diagnostic,['run_id','run_attempt','sha'])}:{}),producer},
     publisher:pick(publisher,['repository','workflow','run_id','run_attempt','sha','version','release_id','workflow_head_sha']),assets:receipt.assets.map(a=>pick(a,['file','size','sha256'])),
     manifest_sha256:receipt.full_result.manifest_sha256,acceptance_sha256:hash(JSON.stringify(publicRecoveryResult(receipt.full_result))),
     scripts:receipt.full_result.continuation.scripts};
@@ -291,18 +298,19 @@ export function recoveryPublicationBody(body,imported,publisher,candidate){
   return body.trimEnd()+'\n\n'+publicPrefix+Buffer.from(JSON.stringify(proof)).toString('base64url')+' -->\n';
 }
 export async function inspectRecoveryPublication(part,release,producerRun,assets,manifest,read,readEvidence){
-  assert.equal(part.repository,REPO);assert.equal(part.source_sha,PRODUCT);assert.equal(part.version,'2.0.0-dev.19');
-  assert.deepEqual(part.producer,{run_id:Number(BUILD_RUN),run_attempt:1});
+  const producer=approvedRecoveryProducer(part.producer.run_id);
+  assert.equal(part.repository,REPO);assert.equal(part.source_sha,producer.sha);assert.equal(part.version,producer.version);
+  assert.deepEqual(part.producer,{run_id:Number(producer.run_id),run_attempt:producer.run_attempt});
   const matches=[...(release.body||'').matchAll(/<!-- rsrs-cli3930-recovery:([A-Za-z0-9_-]+) -->/g)];
   assert.equal(matches.length,1,'Missing or duplicate durable recovery attestation');
   assert.equal((release.body||'').split(publicPrefix).length,2);
   const bytes=Buffer.from(matches[0][1],'base64url');assert.equal(bytes.toString('base64url'),matches[0][1]);
   const proof=JSON.parse(bytes),source=proof.source,publisher=proof.publisher;
   const fence=readFence(release.body);
-  assert.equal(String(fence?.run_id),String(publisher.run_id));assert.equal(fence.source_sha,PRODUCT);
+  assert.equal(String(fence?.run_id),String(publisher.run_id));assert.equal(fence.source_sha,producer.sha);
   assert.equal(fence.version,part.version);assert.equal(fence.phase,'fenced');
-  assert.equal(proof.schema,1);assert.deepEqual(source.producer,requestedProducer());
-  assert.equal(source.sha,PRODUCT);assert.equal(source.version,part.version);assert.equal(source.repository,REPO);
+  assert.equal(proof.schema,1);assert.deepEqual(source.producer,producer);
+  assert.equal(source.sha,producer.sha);assert.equal(source.version,part.version);assert.equal(source.repository,REPO);
   assert.ok([recoveryWorkflow,muslPreparationWorkflow].includes(source.workflow));assert.match(proof.manifest_sha256,/^[a-f0-9]{64}$/);assert.match(proof.acceptance_sha256,/^[a-f0-9]{64}$/);
   const foundProof=assets.filter(a=>a.name===recoveryProofName);assert.equal(foundProof.length,1,'Missing durable recovery preimage');
   assert.ok(positive(foundProof[0].id));assert.equal(foundProof[0].state,'uploaded');
@@ -317,15 +325,15 @@ export async function inspectRecoveryPublication(part,release,producerRun,assets
   validatePreparationFull(result,source,manifest);
   assert.deepEqual(publicRecoveryResult(result),result);
   assert.deepEqual(result.continuation.producer,source.producer);assert.deepEqual(result.continuation.consumer,{run_id:source.run_id,run_attempt:source.run_attempt,sha:source.workflow_head_sha});
-  assert.deepEqual(candidate.source,{repository:REPO,sha:PRODUCT,version:part.version,run_id:Number(BUILD_RUN),run_attempt:1});
+  assert.deepEqual(candidate.source,{repository:REPO,sha:producer.sha,version:part.version,run_id:Number(producer.run_id),run_attempt:producer.run_attempt});
   assert.equal(candidate.kind,'unpublished-cli-candidate');assert.equal(candidate.schema,1);
   assert.deepEqual(result.continuation.scripts,proof.scripts);assert.equal(result.manifest_sha256,proof.manifest_sha256);
   assert.equal(result.full_passed,true);assert.equal(result.gui_passed,true);assert.equal(result.scope,'database-in-place-upgrade');
-  assert.equal(result.product_sources.cli,PRODUCT);assert.equal(result.product_sources.runtime,candidate.runtime.source_sha);
+  assert.equal(result.product_sources.cli,producer.sha);assert.equal(result.product_sources.runtime,candidate.runtime.source_sha);
   assert.ok(result.actual_processes.length>0&&result.actual_processes.every(p=>p.manifest_sha256===proof.manifest_sha256&&manifest.targets.some(({triple:t})=>
     candidate.runtime.assets.some(a=>a.name===`rsrs-runtime-${t}${t.includes('windows')?'.exe':''}`&&a.sha256===p.image_sha256)&&
     candidate.runtime.assets.some(a=>a.name===`rsrs-runtime-${t}.tar.gz`&&a.sha256===p.bundle_sha256))),'Acceptance Runtime hashes differ from the original candidate');
-  assert.equal(proof.scripts.producer_sha,PRODUCT);assert.equal(proof.scripts.consumer_sha,source.workflow_head_sha);
+  assert.equal(proof.scripts.producer_sha,producer.sha);assert.equal(proof.scripts.consumer_sha,source.workflow_head_sha);
   for(const key of ['native_steps_sha256','cloud_steps_sha256','unchanged_tree_sha256'])assert.match(proof.scripts[key],/^[a-f0-9]{64}$/);
   const consumer=await read(`actions/runs/${source.run_id}/attempts/${source.run_attempt}`);
   validateRecoveryRuns(producerRun,consumer,source.producer,source);
@@ -344,8 +352,8 @@ export async function inspectRecoveryPublication(part,release,producerRun,assets
   const receiptJobs=current.filter(j=>j.name==='preparation-receipt');assert.equal(receiptJobs.length,1);
   assert.equal(receiptJobs[0].status,'completed');assert.equal(receiptJobs[0].conclusion,'success');
   assert.equal(publisher.repository,REPO);assert.equal(publisher.workflow,'.github/workflows/release.yml');
-  assert.equal(publisher.sha,PRODUCT);assert.equal(publisher.version,part.version);assert.equal(publisher.release_id,part.release_id);
-  assert.ok(positive(publisher.run_id)&&positive(publisher.run_attempt));assert.notEqual(String(publisher.run_id),String(source.run_id));assert.notEqual(String(publisher.run_id),BUILD_RUN);
+  assert.equal(publisher.sha,producer.sha);assert.equal(publisher.version,part.version);assert.equal(publisher.release_id,part.release_id);
+  assert.ok(positive(publisher.run_id)&&positive(publisher.run_attempt));assert.notEqual(String(publisher.run_id),String(source.run_id));assert.notEqual(String(publisher.run_id),producer.run_id);
   assert.match(publisher.workflow_head_sha,/^[a-f0-9]{40}$/);
   const publication=await read(`actions/runs/${publisher.run_id}/attempts/${publisher.run_attempt}`);
   assert.equal(publication.id,Number(publisher.run_id));assert.equal(publication.run_attempt,Number(publisher.run_attempt));
@@ -370,7 +378,7 @@ export async function inspectRecoveryPublication(part,release,producerRun,assets
     manifest_sha256:proof.manifest_sha256,acceptance_sha256:proof.acceptance_sha256,runtime:candidate.runtime};
 }
 export function planContinuation(root){
-  const producer=requestedProducer(),source=currentSource(producer),context=recoveryContext(source,{planning:true});
+  const producer=continuationProducer(),source=currentSource(producer),context=recoveryContext(source,{planning:true});
   const candidate=readCandidate(context,root);
   output({sha:producer.sha,version:producer.version,producer_run:producer.run_id,producer_attempt:producer.run_attempt,
     candidate:JSON.stringify(candidate),client2_release:candidate.client2.release,client2_commit:candidate.client2.source_sha,
@@ -380,12 +388,12 @@ export function planContinuation(root){
   return context;
 }
 export function nativeContinuation(destination){
-  const producer=requestedProducer(),context=recoveryContext(currentSource(producer),{planning:true});
+  const producer=continuationProducer(),context=recoveryContext(currentSource(producer),{planning:true});
   const t=process.env.CLI_TARGET;assert.ok(context.original.some(j=>retryable(j)&&targetOf(j)===t&&j.conclusion==='failure'));
   downloadRecoveryArtifact(select(context,'cli-release-'+t,`validate / Release (${t})`),destination);
 }
 export function attestContinuation(root,outputFile){
-  const producer=requestedProducer(),source=currentSource(producer),context=recoveryContext(source);
+  const producer=continuationProducer(),source=currentSource(producer),context=recoveryContext(source);
   const candidate=readCandidate(context,join(root,'candidate-selection')),anchors=recoveryArtifacts(context);
   for(const a of anchors)downloadRecoveryArtifact(a,join(root,a.logical_name));
   const assetsFolder=join(root,'release-assets');mkdirSync(assetsFolder);

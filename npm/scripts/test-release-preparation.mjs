@@ -167,7 +167,7 @@ test('Release attests all full candidate consumers and publishes only verified i
   assert.match(release,/release-preparation.mjs attest release-assets full-reports\/npm-release-packages release-prepared.json full-reports/);
   assert.match(release,/prepared_binary_run: \$\{\{ steps.prepared.outputs.prepared_binary_run \}\}/);
   assert.equal((release.match(/run-id: \$\{\{ needs.plan.outputs.prepared_binary_run \}\}/g)||[]).length,2);
-  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt\}.mjs \| tar -x/g)||[]).length,4);
+  assert.equal((release.match(/git archive "\$GITHUB_SHA" npm\/scripts\/\{release-recovery3930,release-recovery-sources,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication,verified-receipt\}.mjs \| tar -x/g)||[]).length,4);
   const continuation=readFileSync(new URL('../../.github/workflows/release-recovery3930.yml',import.meta.url),'utf8');
   assert.match(continuation,/uses: \.\/.github\/workflows\/release-native-validation.yml/);
   assert.match(continuation,/validation_profile: full/);
@@ -593,7 +593,7 @@ const routes=JSON.parse(fs.readFileSync(process.env.INVENTORY_ROUTES));cp.execFi
     assert.throws(()=>cloudScope(inputs['.github/workflows/release.yml'],inputs['.github/workflows/release.yml'].replace('original-cloud-scope','reduced-cloud-scope')),/Cloud scope, environment or commands changed/);
     writeFileSync(join(gitFolder,'.github','workflows','release-native-validation.yml'),inputs['.github/workflows/release-native-validation.yml'].replace('original-native-scope','reduced-native-scope'));
     git('add','.');git('commit','-qm','changed native scope');
-    assert.throws(()=>recoveryScripts(originalSHA,git('rev-parse','HEAD'),{cwd:gitFolder}),/Windows native scope or commands changed/);
+    assert.throws(()=>recoveryScripts(originalSHA,git('rev-parse','HEAD'),{cwd:gitFolder}),/Native regression scope or commands changed/);
     writeFileSync(join(gitFolder,'.github','workflows','release-native-validation.yml'),inputs['.github/workflows/release-native-validation.yml']);
     writeFileSync(join(gitFolder,'scripts','fixture.py'),'changed fixture\n');git('add','.');git('commit','-qm','changed scope');
     assert.throws(()=>recoveryScripts(originalSHA,git('rev-parse','HEAD'),{cwd:gitFolder}),/fixture or unrelated CI source changed/);
