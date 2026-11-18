@@ -4,6 +4,7 @@ import ast
 from contextlib import closing, nullcontext
 import importlib.util
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -117,6 +118,10 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
         session = dict(user=USER, token='synthetic-session')
         for target in (root, child):
             (target / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+            database = target / 'read only # %.db'
+            with closing(sqlite3.connect(database)) as db:
+                db.execute('CREATE TABLE marker(value INTEGER)')
+                db.commit()
             for selected in (str(target), '\\\\?\\' + str(target),
                              ('\\\\?\\' + str(target)).upper().replace('\\', '/')):
                 with self.subTest(selected=selected):
@@ -125,6 +130,11 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
                     self.assertEqual(smoke.session(env), session)
                     self.assertTrue(base_smoke.profile(env).samefile(target))
                     self.assertEqual(base_smoke.session(env), session)
+                    uri = legacy.readonly_database_uri(base_smoke.profile(env) / database.name)
+                    with closing(sqlite3.connect(uri, uri=True)) as db:
+                        self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE name='marker'").fetchone(), ('marker',))
+                        with self.assertRaisesRegex(sqlite3.OperationalError, 'readonly'):
+                            db.execute('CREATE TABLE forbidden(value INTEGER)')
         for target in (self.profile, outside):
             for selected in (str(target), '\\\\?\\' + str(target)):
                 with self.subTest(outside=selected):
