@@ -327,6 +327,8 @@ class SecretServiceKeys(_base.TrackedKeys):
     def cleanup(self):
         # The private collection started empty and every slot was reserved absent.
         # Attribute preservation failures must not prevent exact owned cleanup.
+        daemon_started = self.daemon is not None
+        daemon_exit_code = self.daemon.poll() if daemon_started else None
         events, remaining = [], []
         for index, (service, slot) in enumerate(sorted(self.entries)):
             try:
@@ -343,6 +345,8 @@ class SecretServiceKeys(_base.TrackedKeys):
                 events.append(event)
                 remaining.append(event)
         report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
+        report["provider_daemon"] = {"started": daemon_started,
+                                     "exit_code_at_cleanup_start": daemon_exit_code}
         report["provider_schema_baseline"] = {
             "scope": "verified_registration_pairs_and_verified_recovered_super_only",
             "registered_entries": len(self.current_target_entries),
