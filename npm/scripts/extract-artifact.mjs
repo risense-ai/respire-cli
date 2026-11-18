@@ -10,6 +10,7 @@ import {pipeline} from 'node:stream/promises';
 import {createGunzip} from 'node:zlib';
 import {packPackage, verifyPackFile} from './registry-publication.mjs';
 import {consumeCandidate} from './candidate-artifact.mjs';
+import {hasApprovedRecoveryProducer} from './release-recovery-sources.mjs';
 
 
 const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -321,7 +322,7 @@ export async function inspectPublishedRelease(part, {token, fetcher = fetch} = {
   const run = await readGitHub(`${part.repository}/actions/runs/${producer.run_id}/attempts/${producer.run_attempt}`, token, fetcher);
   requireValue(run.id === producer.run_id && run.run_attempt === producer.run_attempt
     && run.head_sha === part.source_sha && run.status === 'completed' && ['success','failure'].includes(run.conclusion)
-    && (run.conclusion === 'success' || part.repository === 'risense-ai/respire-cli' && producer.run_id === 44276673815 && producer.run_attempt === 1)
+    && (run.conclusion === 'success' || hasApprovedRecoveryProducer(part))
     && run.path === '.github/workflows/release.yml' && run.repository?.full_name === part.repository,
     'Published producer run/source/attempt mismatch');
   let recovery;

@@ -1,12 +1,18 @@
-name: Recover frozen CLI3930 failed acceptance
+name: Recover failed CLI release acceptance
 on:
   workflow_dispatch:
+    inputs:
+      cli_run_id:
+        description: Exact approved unpublished CLI producer
+        type: choice
+        required: true
+        options: ['44276673815', '44362424899']
 permissions:
   contents: read
   actions: read
 env:
-  CLI_VERSION: 2.0.0-dev.19
-  CLI_PRODUCER_RUN_ID: '44276673815'
+  CLI_VERSION: ${{ inputs.cli_run_id == '44362424899' && '2.0.0-dev.20' || '2.0.0-dev.19' }}
+  CLI_PRODUCER_RUN_ID: ${{ inputs.cli_run_id }}
   CLI_PRODUCER_ATTEMPT: '1'
   ARTIFACT_SOURCE: build
   VALIDATION_PROFILE: full
@@ -27,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f
+          ref: ${{ inputs.cli_run_id == '44362424899' && '0acf92481b29b69e6bf9536dc6a13b2c569c5abd' || '3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f' }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -37,7 +43,7 @@ jobs:
           persist-credentials: false
       - name: Load current reviewed orchestration only
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-recovery-sources,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -58,7 +64,7 @@ jobs:
       ref: ${{ needs.plan.outputs.sha }}
       version: ${{ needs.plan.outputs.version }}
       validation_profile: full
-      recovery_run: '44276673815'
+      recovery_run: ${{ inputs.cli_run_id }}
       recovery_attempt: '1'
       recovery_matrix: ${{ needs.plan.outputs.native }}
       recovery_suffix: ${{ needs.plan.outputs.suffix }}
@@ -93,7 +99,7 @@ jobs:
           persist-credentials: false
       - name: Load reviewed orchestration only
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-recovery-sources,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
       - name: Require native Windows ARM64 hardware
         if: matrix.target == 'aarch64-pc-windows-msvc'
         shell: pwsh
@@ -252,7 +258,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f
+          ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v5
@@ -262,7 +268,7 @@ jobs:
           persist-credentials: false
       - name: Load current reviewed orchestration only
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-recovery-sources,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

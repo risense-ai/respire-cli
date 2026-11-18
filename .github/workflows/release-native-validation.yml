@@ -194,7 +194,7 @@ jobs:
       - name: Load reviewed orchestration without changing product or business fixtures
         if: inputs.recovery_run != ''
         shell: bash
-        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
+        run: cp .recovery-harness/npm/scripts/{release-recovery3930,release-recovery-sources,release-preparation,candidate-artifact,extract-artifact,publication-acceptance,release-publication}.mjs npm/scripts/
       - name: Load fixed musl continuation and bind the reviewed fixture revision
         if: inputs.musl_source_recovery
         shell: bash
@@ -208,6 +208,7 @@ jobs:
         if: inputs.recovery_run != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          CLI_PRODUCER_RUN_ID: ${{ inputs.recovery_run }}
           CLI_TARGET: ${{ matrix.target }}
           MUSL_FIXTURE_COMMIT: ${{ inputs.musl_fixture_commit }}
         run: node npm/scripts/${{ inputs.musl_source_recovery && 'release-musl3930' || 'release-recovery3930' }}.mjs native validated-cli

@@ -10,6 +10,7 @@ import {packPackage, publishPackage, readExpectedPacks, waitForPackage} from './
 import {validateRecoverySource, validateRecoveryAuthority} from './dev6-recovery-policy.mjs';
 import {releaseAssetNames,frontendLayout} from './verify-binary.mjs';
 import {validateRegressionContract} from './release-regression-contract.mjs';
+import {approvedRecoveryProducer} from './release-recovery-sources.mjs';
 
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
 // Only new receipts opt into post-consumption temporary artifact deletion.
@@ -106,8 +107,11 @@ export function assertReleaseAssets(release, receipt) {
   let proof=[];
   if(markers.length){
     if(markers.length!==1)throw Error('Duplicate recovery publication attestation');
-    const evidence=JSON.parse(Buffer.from(markers[0][1],'base64url')).evidence;
-    if(source.sha!=='3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f'||source.version!=='2.0.0-dev.19'||evidence?.name!=='cli3930-recovery-proof.json'||!positive(evidence.size)||!HASH.test(evidence.sha256))throw Error('Invalid recovery proof asset');
+    const attestation=JSON.parse(Buffer.from(markers[0][1],'base64url'));
+    const evidence=attestation.evidence;
+    const producer=approvedRecoveryProducer(attestation.source?.producer?.run_id);
+    if(!equal(attestation.source?.producer,producer)||source.sha!==producer.sha||source.version!==producer.version||
+      evidence?.name!=='cli3930-recovery-proof.json'||!positive(evidence.size)||!HASH.test(evidence.sha256))throw Error('Invalid recovery proof asset');
     proof=[evidence];
   }
   const expectedAssets=[...receipt.assets,...proof];
