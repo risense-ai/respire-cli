@@ -590,9 +590,8 @@ fn require_handoff_capability(capabilities: &BTreeMap<String, String>) -> Result
 pub enum ResolvedRuntime {
     /// A verified `rsrs-runtime` executable, ready to spawn.
     Ready(PathBuf),
-    /// A legacy combined `rsrs` binary occupies the old stable location and no
-    /// usable runtime was found first. Automatic replacement requires proving
-    /// this is the current CLI image, not an old combined service.
+    /// A legacy `rsrs` binary occupies the stable location. Install the
+    /// independent Runtime through the regular installer before starting it.
     LegacyCombined(PathBuf),
 }
 
@@ -1796,39 +1795,6 @@ fn verify_install_host() -> Result<()> {
             anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
                 LegacyRuntimeMigrationRequired);
         }
-    }
-    // Compare bytes, not filenames, version strings or the selected account.
-    // A different image needs proof that it is a released frontend-only CLI.
-    let current = std::env::current_exe().context(LegacyRuntimeMigrationRequired)?;
-    let different = crate::mcp::bin_needs_refresh(&current, &legacy)
-        .map_err(anyhow::Error::msg)
-        .context(LegacyRuntimeMigrationRequired)?;
-    if different {
-        // Official dev.3/dev.6 metadata and sealed dev.7 artifacts; these are frontend-only binaries.
-        // shortcut: extend this reviewed predecessor set when publishing a later CLI upgrade.
-        let approved = [
-            "e893ed0df7dc9a18d690c81af2537df85a907c7c033b61c060b7b1ae1a0ef1c1",
-            "7e1af4f989850656b699a67546ecd9cd07a39c9cbf343b9c52d500610294f2e1",
-            "5cd906b94597d273463477b1fc0c09579309e3bb98771f5203ef29881d291d68",
-            "c484f2259f29db7eb4499656d8750ea18ca230ade33f7cbc5a9b812cf09b740d",
-            "903e0595a76d930e82287d27b6c370bebcbbb9d3a4da2905c9fab1244f6c0261",
-            "f506f17fc621edd30fff6bc9be91c9089a9e6f63cfb5fb4d7e23b249226e4625",
-            "67549aa46996988aa91a529e9a42514ce2439a6c86c402dbbb644869b530d710",
-            "789ce0a3b5b127ea0bb6aa17f158f8ded3dc0b3c4f1fac91b2011ccd2650bc93",
-            "74bd5a041e81b3963db4eb7a6a45d0fbf41137b5077df3e6115da9226e9de291",
-            "92f3fdc52031ca7050305c82be0f311a5927a98796a9661159725ac143c203bd",
-            "5a597fd2344846b521b82921fe6e1832bd73d8108c164dafb0c5113042c67a42",
-            "5cba9ee34c744f646386d36cf38de5d4959b2ec03edba06f5fc88fdff597b660",
-            "64d306ea40a5fd49152444b0f81514eb195ef7c9e1d59527058b8545ac241983",
-            "25db4d0583b8d160776052f32a7321ae21cfd10ee227810d5916ec0d15edcf47",
-            "4b6a701479bf3e1186834154791795e4931cfb4bd2d5021315321c85590bcfb6",
-            "9ef1071d5b24966b760e497010d60c426f2bf40495b82775a157728ba69180da",
-            "9e77894484ffd40725036e3fc9c51ad5db22b9c05817c8b83af183ee39c478bf",
-            "78e228184f6adad1b6d2958ca0e997505d1195287e8ba62356280bd080c2122b",
-            "cb54a10918123b91296a7b40424668205572c1ceb3e03c4c4ab7a1947305d6d0",
-        ];
-        let previous = sha256_file(&legacy).context(LegacyRuntimeMigrationRequired)?;
-        anyhow::ensure!(approved.contains(&previous.as_str()), LegacyRuntimeMigrationRequired);
     }
     Ok(())
 }
