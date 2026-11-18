@@ -48,7 +48,13 @@ def private_provider_stderr(root):
 
 
 def provider_abort_type(stderr, exit_code):
-    # Linux SIGABRT only; raw text, paths, assertion values and hashes never leave this parser.
+    # Raw text, paths, assertion values and hashes never leave this parser.
+    if exit_code == -5:
+        if re.search(rb"(?:GLib|GLib-GIO|GLib-GObject|Gkd|Gkm|Egg)-ERROR \*\*", stderr):
+            return "fatal_glib_log"
+        if re.search(rb"(?m)^(?:Bail out! )?(?:[A-Za-z0-9_-]+:)?ERROR:[^\r\n]+: assertion failed", stderr):
+            return "glib_assertion"
+        return "unknown"
     if exit_code != -6:
         return "unknown"
     if re.search(rb"(?m)^(?:Bail out! )?(?:[A-Za-z0-9_-]+:)?ERROR:[^\r\n]+: assertion failed", stderr):
@@ -64,7 +70,7 @@ def provider_abort_type(stderr, exit_code):
 
 
 def provider_abort_location(stderr, exit_code):
-    if exit_code != -6:
+    if exit_code not in (-5, -6):
         return "unknown"
     # Only the static assertion header is public; directories and expressions stay private.
     match = re.search(
