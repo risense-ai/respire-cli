@@ -1142,10 +1142,23 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
         print(f"Failed lifecycle fixture retained for explicit recovery: {temporary}",file=sys.stderr)
         raise
     finally:
+        primary_error = sys.exc_info()[1]
         if keys is not None:
-            cleanup = keys.cleanup()
-            assert cleanup.get("passed") is True and not cleanup.get("remaining_entries"), "synthetic native credential cleanup failed; fixture retained"
-        if sys.exc_info()[0] is None:
+            try:
+                cleanup = keys.cleanup()
+                if cleanup.get("passed") is not True or cleanup.get("remaining_entries"):
+                    diagnostic = {
+                        "remaining_count": len(cleanup.get("remaining_entries", [])),
+                        "provider_daemon": cleanup.get("provider_daemon"),
+                    }
+                    print("isolated credential cleanup diagnostic", json.dumps(diagnostic), file=sys.stderr)
+                    raise RuntimeError("synthetic native credential cleanup failed; fixture retained")
+            except Exception as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note("synthetic credential cleanup also failed; fixture retained")
+                raise primary_error from cleanup_error
+        if primary_error is None:
             shutil.rmtree(temporary)
 
 
