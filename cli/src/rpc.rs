@@ -85,13 +85,18 @@ pub(crate) fn query_existing_json(args: Vec<String>) -> Result<serde_json::Value
 }
 
 fn query_json_with_start(args: Vec<String>, auto_start: bool) -> Result<serde_json::Value> {
+    let (envelope, _) = query_command(args, auto_start)?;
+    serde_json::to_value(envelope).context("runtime envelope could not be encoded")
+}
+
+pub(crate) fn query_command(args: Vec<String>, auto_start: bool) -> Result<(ResultEnvelope, String)> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("--json".to_owned());
     full.extend(args);
     let response = call_method("cli.exec", full, auto_start)?;
     if let Some(mut envelope) = response.envelope {
         envelope.ensure_failure_diagnostics();
-        return Ok(serde_json::to_value(envelope).context("runtime envelope could not be encoded")?);
+        return Ok((envelope, response.bin));
     }
     let err = response
         .error

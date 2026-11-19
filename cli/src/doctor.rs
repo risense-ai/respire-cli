@@ -87,7 +87,7 @@ fn runtime_doctor(remote: bool) -> Result<ResultEnvelope> {
     if let Some(id) = progress::remote_id() {
         args.extend(["--progress-id".to_owned(), id]);
     }
-    let result: ResultEnvelope = serde_json::from_value(rpc::query_json(args)?)?;
+    let (mut result, runtime_version) = rpc::query_command(args, true)?;
     // The off-mode gate returns before doctor dispatch and never opens the store.
     if result.command == "memory" && diagnostics_paused(&result) {
         return Ok(result);
@@ -96,6 +96,17 @@ fn runtime_doctor(remote: bool) -> Result<ResultEnvelope> {
         result.command == "doctor" && result.summary["scope"] == "runtime",
         "doctor requires an independent Runtime with scope=runtime diagnostics; upgrade the Runtime"
     );
+    ensure!(
+        !runtime_version.is_empty(),
+        "Runtime RPC reply omitted its version"
+    );
+    let version_row = result
+        .items
+        .iter_mut()
+        .find(|item| item.name == "Runtime version")
+        .context("Runtime doctor reply omitted its version row")?;
+    version_row.value.clone_from(&runtime_version);
+    result.summary["runtime_version"] = runtime_version.into();
     Ok(result)
 }
 
@@ -341,7 +352,12 @@ mod tests {
     }
 
     fn diagnostic(status: Status) -> ResultEnvelope {
-        ResultEnvelope::new("doctor", status, json!({"scope":"runtime"}), Vec::new())
+        ResultEnvelope::new(
+            "doctor",
+            status,
+            json!({"scope":"runtime","runtime_version":"1.0.20"}),
+            vec![Item::new("Runtime version", Status::Ok, "1.0.20")],
+        )
     }
 
     fn with_runtime(
@@ -408,7 +424,7 @@ mod tests {
                         reply[key] = body[key].clone();
                     }
                     reply["v"] = json!(1);
-                    reply["bin"] = json!("doctor-fixture");
+                    reply["bin"] = json!("2.0.0-dev.25");
                     request.respond(tiny_http::Response::from_string(reply.to_string()))?;
                     requests.push(body);
                     break;
@@ -525,7 +541,9 @@ mod tests {
                 ("memory", json!({"mode":"off","skipped":true}), true),
                 ("memory", json!({"mode":"off","skipped":false}), false),
             ] {
-                let result = ResultEnvelope::new(command, Status::Ok, summary, Vec::new());
+                let mut result = diagnostic(Status::Ok);
+                result.command = command.to_owned();
+                result.summary = summary;
                 let requests = with_runtime(vec![("cli.exec", reply(result))], || {
                     let actual = runtime_doctor(true);
                     assert_eq!(actual.is_ok(), accepted);
@@ -564,6 +582,8 @@ mod tests {
                     .with(|slot| slot.borrow_mut().take())
                     .context("client result missing")?;
                 assert_eq!(result.summary["scope"], "runtime");
+                assert_eq!(result.summary["runtime_version"], "2.0.0-dev.25");
+                assert_eq!(result.items[0].value, "2.0.0-dev.25");
                 assert!(result.summary.get("host_checks").is_none());
                 Ok(())
             })?;
@@ -685,7 +705,7 @@ mod tests {
                     assert_eq!(result.summary["scope"], "host+runtime");
                     assert_eq!(result.summary["version"], respire::VERSION);
                     assert_eq!(result.summary["host_checks"], "completed");
-                    assert_eq!(result.summary["pass"], 3);
+                    assert_eq!(result.summary["pass"], 4);
                     assert_eq!(result.summary["skip"], 1);
                     assert_eq!(result.summary["total"], result.items.len());
                     Ok(())
@@ -694,6 +714,7 @@ mod tests {
             let mut paused = diagnostic(Status::Skip);
             paused.command = "memory".into();
             paused.summary = json!({"mode":"off","skipped":true});
+            paused.items.clear();
             with_runtime(vec![("cli.exec", reply(paused))], || {
                 run(false, false, true)?;
                 let result = output_state::CAPTURED
