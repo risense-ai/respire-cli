@@ -963,10 +963,10 @@ fn ensure_daemon_locked_inner(
         "--data-dir".into(),
         respire_client_host::paths::main_data_dir().into_os_string(),
     ];
-    let (mut child, instance_id) =
-        crate::autostart::spawn_authorized_runtime(&executable, &arguments, None)
-            .context("failed to start host runtime")?;
-    let result = wait_daemon_ready(&mut child, &executable, &instance_id, expectation);
+    let (mut child, runtime_pid, instance_id) =
+        crate::autostart::spawn_detached_runtime(&executable, &arguments)
+            .context("failed to start detached Runtime")?;
+    let result = wait_daemon_ready(&mut child, runtime_pid, &executable, &instance_id, expectation);
     if result.is_err() && child.try_wait()?.is_none() {
         // Do not leave a delayed startup racing the next lock holder.
         child
@@ -1047,6 +1047,7 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
 
 fn wait_daemon_ready(
     child: &mut std::process::Child,
+    runtime_pid: u32,
     executable: &std::path::Path,
     instance_id: &str,
     expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
@@ -1061,7 +1062,7 @@ fn wait_daemon_ready(
         }
         if let Some(health) = probe_runtime()? {
             last_store_ready = Some(health.store_ready);
-            let birth = crate::autostart::process_birth(child.id())?
+            let birth = crate::autostart::process_birth(runtime_pid)?
                 .context("starting runtime process exited")?;
             let birth_prefix = if cfg!(windows) {
                 "windows-filetime-"
@@ -1071,7 +1072,7 @@ fn wait_daemon_ready(
                 "darwin-lstart-"
             };
             anyhow::ensure!(
-                health.pid == child.id()
+                health.pid == runtime_pid
                     && health.process_start_id == format!("{birth_prefix}{birth}")
                     && health.v == PROTOCOL_V
                     && health.generation > 0
@@ -1428,7 +1429,8 @@ mod tests {
             let (child, instance_id) = crate::autostart::spawn_authorized_runtime(
                 &executable, &arguments, None)?;
             let mut runtime = Self { child, port, _environment: environment, _root: root };
-            wait_daemon_ready(&mut runtime.child, &executable, &instance_id,
+            let pid = runtime.child.id();
+            wait_daemon_ready(&mut runtime.child, pid, &executable, &instance_id,
                 respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)?;
             let health = crate::net_rpc::health()?;
             anyhow::ensure!(!health.store_ready && health.credential_state == "required",

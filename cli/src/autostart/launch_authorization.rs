@@ -50,8 +50,40 @@ pub(super) fn spawn(
     arguments: &[OsString],
     managed_id: Option<&str>,
 ) -> Result<(Child, String)> {
+    let (child, _, nonce) = spawn_serving(binary, arguments, managed_id, false)?;
+    Ok((child, nonce))
+}
+
+pub(crate) fn spawn_detached_runtime(
+    binary: &Path,
+    arguments: &[OsString],
+) -> Result<(Child, u32, String)> {
+    spawn_serving(binary, arguments, None, true)
+}
+
+fn spawn_serving(
+    binary: &Path,
+    arguments: &[OsString],
+    managed_id: Option<&str>,
+    detached: bool,
+) -> Result<(Child, u32, String)> {
     let binary = binary.canonicalize()?;
     let (root, profile) = prepare_launch_roots()?;
+    let bridge = if detached {
+        let plugins = respire_commands::hooks::read_config_at(&profile.join("plugins.json"))?;
+        if plugins.hooks.get("post-sync").is_some_and(|hooks| !hooks.is_empty()) {
+            let source = std::env::current_exe()?;
+            let directory = root.join("runtime/plugin-host").join(hash(&fs::read(&source)?));
+            let destination = directory.join(crate::mcp::stable_bin_path().file_name()
+                .context("CLI executable name missing")?);
+            crate::mcp::install_binary(&source, &destination).map_err(anyhow::Error::msg)?;
+            Some(destination)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let (grant, nonce) = prepare_grant(
         &binary,
         &root,
@@ -66,28 +98,96 @@ pub(super) fn spawn(
         .join(format!("launch-{nonce}.json"));
     private_write(&path, &serde_json::to_vec(&grant)?, None)?;
     let token = format!("launch-v1:{nonce}");
-    let mut command = Command::new(&binary);
-    // Stdout carries framed plugin events; suppress Runtime's human startup banner.
-    command.arg("--json").args(arguments).env("RSRS_RUNTIME_BOOT_TOKEN", &token)
-        .env("RSRS_HOST_PLUGIN_CHANNEL", "1").env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    match respire_spawn::spawn_owned_runtime(&mut command) {
-        Ok(mut child) => {
-            if let Err(error) = start_plugin_host(&mut child, profile) {
-                child.kill().context("stop Runtime after plugin channel initialization failure")?;
-                child.wait().context("reap Runtime after plugin channel initialization failure")?;
-                return Err(error);
-            }
-            Ok((child, nonce))
-        },
+    let spawned = match bridge {
+        Some(executable) => spawn_detached_plugin_host(&executable, &binary, arguments, &token, &profile),
+        None => {
+            let child = if detached {
+                respire_spawn::spawn_binary_with_boot_token(&binary, arguments, Some(&token))
+                    .map_err(Into::into)
+            } else {
+                spawn_with_plugin_host(&binary, arguments, &token, &profile)
+            };
+            child.map(|child| {
+                let pid = child.id();
+                (child, pid)
+            })
+        }
+    };
+    match spawned {
+        Ok((child, pid)) => Ok((child, pid, nonce)),
         Err(error) => {
-            fs::remove_file(&path).with_context(|| {
-                format!("unused launch grant cleanup failed after spawn error: {error}")
-            })?;
-            Err(error).context("authorized runtime could not be spawned")
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {}
+                Err(cleanup) => return Err(cleanup).context(error).context("unused launch grant cleanup failed"),
+            }
+            Err(error).context("authorized Runtime could not be spawned")
         }
     }
+}
+
+fn spawn_with_plugin_host(
+    binary: &Path,
+    arguments: &[OsString],
+    token: &str,
+    profile: &Path,
+) -> Result<Child> {
+    let mut command = Command::new(binary);
+    // Stdout carries framed plugin events; suppress Runtime's human startup banner.
+    command.arg("--json").args(arguments).env("RSRS_RUNTIME_BOOT_TOKEN", token)
+        .env("RSRS_HOST_PLUGIN_CHANNEL", "1").env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    let mut child = respire_spawn::spawn_owned_runtime(&mut command)?;
+    if let Err(error) = start_plugin_host(&mut child, profile.to_path_buf()) {
+        if child.try_wait()?.is_none() {
+            child.kill().context("stop Runtime after plugin channel initialization failure")?;
+        }
+        child.wait().context("reap Runtime after plugin channel initialization failure")?;
+        return Err(error);
+    }
+    Ok(child)
+}
+
+fn spawn_detached_plugin_host(
+    executable: &Path,
+    binary: &Path,
+    arguments: &[OsString],
+    token: &str,
+    profile: &Path,
+) -> Result<(Child, u32)> {
+    let diagnostics = executable.parent().context("plugin host directory missing")?.join("plugin-host.log");
+    let log = fs::OpenOptions::new().create(true).append(true).open(&diagnostics)?;
+    let mut command = Command::new(executable);
+    command.arg("--runtime-plugin-host-internal").arg(profile).arg(binary).args(arguments)
+        .env("RSRS_RUNTIME_BOOT_TOKEN", token)
+        .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(log);
+    let mut helper = respire_spawn::spawn_detached_command(&mut command).context("start background plugin host")?;
+    let mut pid = [0; 4];
+    if let Err(error) = helper.stdout.take().context("plugin host readiness pipe missing")?.read_exact(&mut pid) {
+        if helper.try_wait()?.is_none() {
+            helper.kill().context("stop plugin host after failed readiness")?;
+        }
+        helper.wait().context("reap plugin host after failed readiness")?;
+        return Err(error).with_context(|| format!("background plugin host did not start Runtime; see {}", diagnostics.display()));
+    }
+    Ok((helper, u32::from_le_bytes(pid)))
+}
+
+pub(crate) fn run_detached_plugin_host(mut args: impl Iterator<Item = OsString>) -> Result<()> {
+    let profile = args.next().context("Runtime plugin profile missing")?;
+    let binary = args.next().context("Runtime plugin binary missing")?;
+    let token = std::env::var("RSRS_RUNTIME_BOOT_TOKEN").context("Runtime launch grant missing")?;
+    let arguments: Vec<_> = args.collect();
+    let mut child = spawn_with_plugin_host(Path::new(&binary), &arguments, &token, Path::new(&profile))?;
+    let mut output = std::io::stdout().lock();
+    output.write_all(&child.id().to_le_bytes())?;
+    output.flush()?;
+    drop(output);
+    let status = child.wait().context("reap Runtime owned by background plugin host")?;
+    anyhow::ensure!(status.success(), "Runtime owned by background plugin host exited with {status}");
+    Ok(())
 }
 
 fn start_plugin_host(child: &mut Child, root: std::path::PathBuf) -> Result<()> {

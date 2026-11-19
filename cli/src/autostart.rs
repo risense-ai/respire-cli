@@ -42,7 +42,7 @@ pub(crate) use supervise::{control_secret, control_keys_export, control_session_
 pub(crate) use lifecycle::{snapshot_recover_control, snapshot_restore_control};
 pub(crate) use supervise::{
     auth_keygen_locked, auth_result_locked, control_auth_result, control_keygen,
-    control_memory_revision, spawn_authorized_runtime,
+    control_memory_revision, run_detached_plugin_host, spawn_authorized_runtime, spawn_detached_runtime,
     control_account_result, control_account_rollback, control_login, control_register,
     prepare_model_locked, model_install_plan_locked, model_install_verify_locked,
     prepare_auth_account_request, validate_auth_account_receipt, AuthAccountControl, AccountOutcomeUnknown, AuthOutcomeUnknown,

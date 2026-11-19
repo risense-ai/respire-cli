@@ -110,6 +110,12 @@ A `pending` or `unknown` result is not reported as `completed` and does not prov
 that the original write was not committed. An unavailable Runtime or a missing
 response envelope is an error, not a completed result.
 
+A normal detached start leaves the Runtime process listening on its own RPC
+and MCP port after the CLI exits. Manual CLI commands run their configured
+hooks in the calling process. For background sync, a configured post-sync
+hook uses a CLI helper with a private pipe and its own executable copy.
+Restart the Runtime after enabling post-sync for the first time.
+
 ## Opt-in current-user supervision
 
 Startup is **off by default**. Installing or updating the CLI never registers a
