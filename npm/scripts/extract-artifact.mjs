@@ -362,11 +362,14 @@ export async function inspectRuntimeProducer(part, target, {token, fetcher = fet
   const jobs = await list(`runs/${producer.run_id}/attempts/${producer.run_attempt}/jobs`, 'jobs');
   const artifacts = await list(`runs/${producer.run_id}/artifacts`, 'artifacts');
   const evidence = [];
-  for (const [name, jobName, files] of [
-    [`runtime-release-${target}`, `Release (${target})`, expected.filter((_, i) => i !== 1)],
-    [`runtime-smoke-${target}`, `Post-release native regression (${target})`, [{name:`runtime-smoke-${target}.json`}]],
+  // Published Runtime runs keep their original job names. The native report
+  // keeps the same source, run, attempt and byte checks across both layouts.
+  for (const [name, jobNames, files] of [
+    [`runtime-release-${target}`, [`Release (${target})`], expected.filter((_, i) => i !== 1)],
+    [`runtime-smoke-${target}`, [`Pre-release native regression (${target})`, `Post-release native regression (${target})`],
+      [{name:`runtime-smoke-${target}.json`}]],
   ]) {
-    const matches = jobs.filter(job => job.name === jobName), found = artifacts.filter(artifact => artifact.name === name);
+    const matches = jobs.filter(job => jobNames.includes(job.name)), found = artifacts.filter(artifact => artifact.name === name);
     const job = matches[0], artifact = found[0];
     requireValue(matches.length === 1 && job.status === 'completed' && job.conclusion === 'success'
       && positiveID(job.id) && job.run_id === producer.run_id && job.run_attempt === producer.run_attempt

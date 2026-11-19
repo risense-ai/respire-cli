@@ -622,6 +622,11 @@ test('published Runtime producer binds exact attempt reports and build bytes, in
   const fixture=()=>runtimeProducerFixture(part,target,payloads[0],payloads[2]);
   const run=f=>inspectRuntimeProducer(part,target,f);
   const evidence=await run(fixture());
+  const prerelease=fixture();
+  prerelease.jobs[1].name=`Pre-release native regression (${target})`;
+  assert.deepEqual(await run(prerelease),evidence);
+  prerelease.jobs.push(fixture().jobs[1]);
+  await assert.rejects(run(prerelease),/producer job\/source\/attempt mismatch/);
   assert.equal(evidence.metadata_sha256,part.assets[0].sha256);assert.equal(evidence.binary_sha256,part.assets[1].sha256);
   assert.equal(evidence.archive_sha256,part.assets[2].sha256);assert.equal(evidence.run_attempt,2);assert.equal(evidence.artifacts.length,2);
   for(const change of [f=>f.jobs.pop(),f=>f.jobs.push(f.jobs[0]),f=>f.jobs[0].run_attempt=1,
