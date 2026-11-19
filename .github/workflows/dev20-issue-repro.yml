@@ -28,10 +28,18 @@ jobs:
           export RSRS_RPC_PORT=49185
           mkdir -p "$RSRS_DATA_DIR" results
           prefix="$RUNNER_TEMP/isolated-npm"
-          npm install --global --prefix "$prefix" rsrs-cli@2.0.0-dev.20
-          cli="$prefix/bin/rsrs"
+          if [[ "$ISSUE_CASE" == fresh-install ]]; then
+            mkdir -p "$prefix"
+            npm exec --yes --package=pnpm@10.15.0 -- pnpm --dir "$prefix" add --save-exact rsrs-cli@2.0.0-dev.20
+            cli="$prefix/node_modules/.bin/rsrs"
+            module="$prefix/node_modules/rsrs-cli"
+          else
+            npm install --global --prefix "$prefix" rsrs-cli@2.0.0-dev.20
+            cli="$prefix/bin/rsrs"
+            module="$prefix/lib/node_modules/rsrs-cli"
+          fi
           stable="$RSRS_DATA_DIR/bin/rsrs"
-          packaged=$(node -p 'require.resolve("@rsrsai/macos-arm64/bin/rsrs", {paths:[process.argv[1]]})' "$prefix/lib/node_modules/rsrs-cli")
+          packaged=$(node -p 'require.resolve("@rsrsai/macos-arm64/bin/rsrs", {paths:[require("fs").realpathSync(process.argv[1])]})' "$module")
           [[ "$("$cli" --version)" == 'rsrs 2.0.0-dev.20' ]]
           printf '%s  %s\n' 5c5c473f7b004c92f8784c5fa7203dc51b26a5bd089c2b2868bacfcd4876a61c "$packaged" | shasum -a 256 -c
           cleanup() {
