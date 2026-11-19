@@ -58,6 +58,7 @@ jobs:
           fi
           "$cli" keygen --json | jq -e '{command,status, error_count:(.errors|length)} | select(.status=="ok" and .error_count==0)' >results/keygen-summary.json
           if [[ "$ISSUE_CASE" == managed-model ]]; then
+            "$cli" runtime start --json >results/start-before-managed.json
             "$cli" runtime autostart enable --now --json >results/autostart.json
             code=0
             "$cli" model install --json >results/model-install.json || code=$?
