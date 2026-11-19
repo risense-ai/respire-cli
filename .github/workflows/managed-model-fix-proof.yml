@@ -1,0 +1,71 @@
+name: Verify the managed npm launcher fix
+on:
+  push:
+    branches: [codex/cli-dev20-issue-repro-20261119]
+    paths: [.github/workflows/managed-model-fix-proof.yml]
+permissions:
+  contents: read
+jobs:
+  managed-npm-install:
+    runs-on: macos-15
+    env:
+      FIX_SHA: 1905ed2f3d8de0e4840db78f3f1b69dcbed4539b
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 1905ed2f3d8de0e4840db78f3f1b69dcbed4539b
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Compile precisely the reviewed CLI code
+        run: |
+          test "$(git rev-parse HEAD)" = "$FIX_SHA"
+          cargo build --locked --release -p respire --bin rsrs
+      - name: Verify npm model installation with managed startup and Runtime dev.25
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RSRS_DATA_DIR="$RUNNER_TEMP/respire-case"
+          export RSRS_ENGINE=cpu
+          export RSRS_RPC_PORT=49185
+          mkdir -p "$RSRS_DATA_DIR" results
+          prefix="$RUNNER_TEMP/isolated-npm"
+          npm install --global --prefix "$prefix" rsrs-cli@2.0.0-dev.20
+          cli="$prefix/bin/rsrs"
+          stable="$RSRS_DATA_DIR/bin/rsrs"
+          packaged=$(node -p 'require.resolve("@rsrsai/macos-arm64/bin/rsrs", {paths:[process.argv[1]]})' "$prefix/lib/node_modules/rsrs-cli")
+          cp target/release/rsrs "$packaged"
+          shasum -a 256 "$packaged" >results/candidate-sha256.txt
+          cleanup() {
+            rc=$?
+            if [[ -x "$stable" ]]; then
+              "$stable" runtime autostart remove --stop --json >results/cleanup.json || rc=1
+            fi
+            exit "$rc"
+          }
+          trap cleanup EXIT
+          "$cli" runtime install --json >results/install.json
+          [[ "$stable" != "$packaged" ]]
+          cmp "$packaged" "$stable"
+          printf '%s  %s\n' 40618c7c203175dcf4bc4aaed936e1de3279347a932b16a4cd60c3fb0bc150db "$RSRS_DATA_DIR/bin/runtime/2.0.0-dev.25/rsrs-runtime" | shasum -a 256 -c
+          "$cli" keygen --json | jq -e '{command,status,error_count:(.errors|length)} | select(.status=="ok" and .error_count==0)' >results/keygen-summary.json
+          "$cli" runtime start --json >results/start-before-managed.json
+          "$cli" runtime stop --json >results/stop-before-managed.json
+          "$cli" runtime autostart enable --now --json >results/autostart.json
+          code=0
+          "$cli" model install --json >results/model-install.json || code=$?
+          jq '{status,errors}' results/model-install.json
+          "$stable" runtime status --json >results/runtime-after-model.json
+          [[ "$code" == 0 ]]
+          jq -e '.status=="ok" and (.errors|length)==0' results/model-install.json
+          jq -e '.summary | .registered==true and .enabled==true and .runtime.running==true and .runtime.store_ready==true and .runtime.version=="2.0.0-dev.25"' results/runtime-after-model.json
+          [[ ! -e "$RSRS_DATA_DIR/runtime/autostart/maintenance.json" ]]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-managed-npm
+          path: results/
+          if-no-files-found: error
