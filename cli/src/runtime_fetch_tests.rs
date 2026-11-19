@@ -752,7 +752,7 @@ fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> 
 
 #[test]
 fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
-    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RPC_PORT", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
@@ -789,6 +789,11 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     anyhow::ensure!(fs::read(&legacy_cli)? == b"previous CLI outside any release list");
     anyhow::ensure!(fs::read(&endpoint)? == record);
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    std::env::set_var("RSRS_RPC_PORT", url.rsplit_once(':').context("fixture port missing")?.1);
+    let recycled = serde_json::to_vec(&serde_json::json!({
+        "v": 1, "pid": std::process::id(), "bin": "1.0.21-dev.3", "url": url,
+    }))?;
+    fs::write(&endpoint, &recycled)?;
     let _takeover = crate::runtime_policy::takeover_lock()?;
     archive_stopped_endpoint_locked()?;
     anyhow::ensure!(!endpoint.exists());
@@ -796,7 +801,7 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
         .collect::<std::io::Result<Vec<_>>>()?;
     let archive = archived.into_iter().find(|entry| entry.file_name().to_string_lossy().starts_with("endpoint.stopped-"))
         .context("endpoint archive missing")?;
-    anyhow::ensure!(fs::read(archive.path())? == record);
+    anyhow::ensure!(fs::read(archive.path())? == recycled);
     let binary = install_lifecycle_fixture()?;
     let directory = binary.parent().context("fixture directory missing")?;
     let legacy = dir.path().join("runtime").join(required);

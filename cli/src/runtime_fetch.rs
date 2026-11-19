@@ -1802,9 +1802,14 @@ fn verify_stopped_endpoint(path: &Path) -> Result<bool> {
         "Runtime endpoint must specify a local port");
     anyhow::ensure!(crate::autostart::process_birth(endpoint.pid)?.is_none(),
         "recorded Runtime process {} is still running; stop it before upgrading", endpoint.pid);
+    require_runtime_port_closed(address)?;
+    Ok(true)
+}
+
+fn require_runtime_port_closed(address: std::net::SocketAddr) -> Result<()> {
     match crate::net_rpc::check_connection_to(address) {
         Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-            Some(crate::runtime_error::RuntimeError::Unavailable)) => Ok(true),
+            Some(crate::runtime_error::RuntimeError::Unavailable)) => Ok(()),
         Err(error) => Err(error),
         Ok(()) => anyhow::bail!("Runtime port {} is still occupied; stop it before upgrading", address.port()),
     }
@@ -1830,12 +1835,22 @@ pub(crate) fn archive_stopped_endpoint_locked() -> Result<()> {
                 .context("the previous Runtime still holds the profile lock")?);
         }
     }
-    if verify_stopped_endpoint(&path).context(LegacyRuntimeMigrationRequired)? {
-        let archive = path.with_file_name(format!("endpoint.stopped-{}.json", uuid::Uuid::new_v4()));
-        respire_spawn::durable::publish_new_file(&path, &archive)
-            .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))?;
+    anyhow::ensure!(fs::symlink_metadata(&path)?.is_file(), "invalid Runtime endpoint file");
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], crate::net_rpc::rpc_port()));
+    require_runtime_port_closed(address)?;
+    // Old records are untrusted hints about other loopback listeners. A recycled
+    // PID alone proves nothing about either the listener or the locked library.
+    let bytes = fs::read(&path)?;
+    if let Some(recorded) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| value["url"].as_str()?.strip_prefix("http://")?.parse::<std::net::SocketAddr>().ok())
+        .filter(|recorded| recorded.ip().is_loopback() && recorded.port() != 0 && *recorded != address)
+    {
+        require_runtime_port_closed(recorded)?;
     }
-    Ok(())
+    let archive = path.with_file_name(format!("endpoint.stopped-{}.json", uuid::Uuid::new_v4()));
+    respire_spawn::durable::publish_new_file(&path, &archive)
+        .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))
 }
 
 fn verify_install_host() -> Result<()> {
@@ -1884,10 +1899,24 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 /// A damaged selected build requires repair; it never triggers automatic
 /// replacement. An explicit trusted offline install can re-establish proof.
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
+    download_runtime_release(pin, mirror, true)
+}
+
+pub(crate) fn install_published_runtime(mirror: Option<&str>) -> Result<PathBuf> {
+    download_runtime_release(None, mirror, false)
+}
+
+fn download_runtime_release(
+    pin: Option<&str>,
+    mirror: Option<&str>,
+    migrate_existing: bool,
+) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
-    verify_install_host()?;
-    shared::migrate_legacy()?;
+    if migrate_existing {
+        verify_install_host()?;
+        shared::migrate_legacy()?;
+    }
     let required = match pin {
         Some(explicit) => {
             anyhow::ensure!(
@@ -1898,9 +1927,11 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         }
         None => pinned()?.required.clone(),
     };
-    if let Some(binary) = automatic_install_preflight(&required)? {
-        if pin.is_none() || binary == managed_binary_path(&required) {
-            return Ok(binary);
+    if migrate_existing {
+        if let Some(binary) = automatic_install_preflight(&required)? {
+            if pin.is_none() || binary == managed_binary_path(&required) {
+                return Ok(binary);
+            }
         }
     }
     let triple = release_triple()?;
@@ -1910,9 +1941,11 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         "runtime downloads are disabled in core test mode"
     );
     let lock = install_lock()?;
-    if let Some(binary) = automatic_install_preflight(&required)? {
-        if pin.is_none() || binary == managed_binary_path(&required) {
-            return Ok(binary);
+    if migrate_existing {
+        if let Some(binary) = automatic_install_preflight(&required)? {
+            if pin.is_none() || binary == managed_binary_path(&required) {
+                return Ok(binary);
+            }
         }
     }
     let _operation = model_progress::Operation::begin_download()?;
@@ -1954,7 +1987,9 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
             // Release archives carry the full-triple binary name; publish the
             // bare managed name before switching the version directory.
             place_managed_binary(&unpacked, &metadata.binary_file)?;
-            automatic_install_preflight(&required)?;
+            if migrate_existing {
+                automatic_install_preflight(&required)?;
+            }
             adopt_or_verify_version_dir(&unpacked, &manifest)?;
             publish_manifest(&manifest)?;
             Ok(managed_binary_path(&required))

@@ -1771,38 +1771,13 @@ fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mi
             if let Some(origin) = mirror {
                 respire_commands::model_download::validate_mirror(origin)?;
             }
-            (crate::runtime_fetch::download_and_install(None, mirror)?, "download")
+            (crate::runtime_fetch::install_published_runtime(mirror)?, "download")
         }
     };
-    // Keep old images and account data; replace the stable CLI only after an authenticated drain.
-    let _ownership = crate::runtime_policy::takeover_lock()?;
-    let previous = crate::rpc::probe_runtime()?;
-    if previous.is_none() {
-        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
-    }
-    let cli_binary = crate::mcp::stable_bin_path();
-    let refresh_cli = crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &cli_binary)
-        .map_err(anyhow::Error::msg)?;
-    let restart_runtime = previous.as_ref().map(crate::rpc::runtime_acceptable)
-        .transpose()?.is_some_and(|acceptable| !acceptable);
-    let mut restarted = false;
-    if refresh_cli || restart_runtime {
-        let mut maintenance = begin_maintenance_locked()?;
-        if let Some(health) = previous.as_ref() {
-            maintenance.drain_runtime(health)?;
-        }
-        crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
-        maintenance.finish()?;
-        if previous.is_some() {
-            start_explicit_locked(&_ownership).context(
-                "Runtime and CLI installed; restart failed; old data and recovery records were retained; inspect the startup error before running rsrs runtime start")?;
-            restarted = true;
-        }
-    }
     let selected_version = crate::runtime_fetch::read_manifest()?
         .context("Runtime selection missing after installation")?.version;
     emit(command, json!({"source":source,"version":selected_version,
-        "binary":binary,"cli_binary":cli_binary,"restarted":restarted}))
+        "binary":binary,"cli_binary":crate::mcp::stable_bin_path(),"restarted":false}))
 }
 
 fn runtime_inventory() -> Result<Value> {
