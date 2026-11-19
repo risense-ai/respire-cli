@@ -1,4 +1,5 @@
 name: Sealed Runtime Windows migration
+run-name: Sealed Windows migration / ${{ inputs.runtime_run_id }}
 on:
   workflow_dispatch:
     inputs:
