@@ -59,6 +59,7 @@ jobs:
           "$cli" keygen --json | jq -e '{command,status, error_count:(.errors|length)} | select(.status=="ok" and .error_count==0)' >results/keygen-summary.json
           if [[ "$ISSUE_CASE" == managed-model ]]; then
             "$cli" runtime start --json >results/start-before-managed.json
+            "$cli" runtime stop --json >results/stop-before-managed.json
             "$cli" runtime autostart enable --now --json >results/autostart.json
             code=0
             "$cli" model install --json >results/model-install.json || code=$?
@@ -67,6 +68,7 @@ jobs:
             exit "$code"
           fi
           "$cli" runtime start --json >results/start.json
+          [[ ! -e "$RSRS_DATA_DIR/runtime/autostart/offline-keygen.json" ]]
           "$cli" runtime status --json >results/runtime-status.json
           jq -e '.summary.runtime | .version=="2.0.0-dev.25" and .store_ready==true and .credential_state=="available"' results/runtime-status.json
           if [[ "$ISSUE_CASE" == doctor-version ]]; then
