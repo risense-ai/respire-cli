@@ -764,6 +764,20 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     fs::create_dir(dir.path().join("bin"))?;
     let legacy_cli = crate::mcp::stable_bin_path();
     fs::write(&legacy_cli, b"previous CLI outside any release list")?;
+    let endpoint = crate::rpc::endpoint_path();
+    fs::create_dir_all(endpoint.parent().context("endpoint parent missing")?)?;
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let url = format!("http://{}", port.local_addr()?);
+    let mut previous = std::process::Command::new(std::env::current_exe()?)
+        .arg("--list").stdout(std::process::Stdio::null()).spawn()?;
+    let pid = previous.id();
+    anyhow::ensure!(previous.wait()?.success(), "previous process did not exit cleanly");
+    let record = serde_json::to_vec(&serde_json::json!({
+        "v": 1, "pid": pid, "bin": "1.0.21-dev.3", "url": url,
+    }))?;
+    fs::write(&endpoint, &record)?;
+    anyhow::ensure!(automatic_install_preflight(required).is_err(), "occupied port was admitted");
+    drop(port);
     anyhow::ensure!(automatic_install_preflight(required)?.is_none());
     let error = download_and_install(None, None)
         .err()
@@ -771,7 +785,16 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>());
     anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
     anyhow::ensure!(fs::read(&legacy_cli)? == b"previous CLI outside any release list");
+    anyhow::ensure!(fs::read(&endpoint)? == record);
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    let _takeover = crate::runtime_policy::takeover_lock()?;
+    archive_stopped_endpoint_locked()?;
+    anyhow::ensure!(!endpoint.exists());
+    let archived = fs::read_dir(endpoint.parent().context("endpoint parent missing")?)?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let archive = archived.into_iter().find(|entry| entry.file_name().to_string_lossy().starts_with("endpoint.stopped-"))
+        .context("endpoint archive missing")?;
+    anyhow::ensure!(fs::read(archive.path())? == record);
     let binary = install_lifecycle_fixture()?;
     let directory = binary.parent().context("fixture directory missing")?;
     let legacy = dir.path().join("runtime").join(required);

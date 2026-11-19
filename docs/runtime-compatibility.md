@@ -76,9 +76,12 @@ integrity evidence. Missing platform evidence blocks candidate promotion.
 
 Automatic selection and CLI materialization stop before replacing an unbound
 legacy process or startup registration. A different pinned version does not
-bypass verification of the existing Runtime selection. Existing endpoint and
-registration records still require an explicit handoff even if the old executable
-disappeared. Configured profile paths are inspected read-only; they never supply
+bypass verification of the existing Runtime selection. Stop the previous service
+and disable any startup task that can relaunch it. A valid endpoint from the
+stopped process allows installation. The CLI archives the record after checking
+the PID, the recorded loopback port, and the installation and profile locks.
+Unbound startup registrations still require an explicit handoff. Configured profile
+paths are inspected read-only and never supply
 request scope. Existing session and database files do not block installation of
 the new Runtime. Installation does not open the database, migrate it or authorize
 an unlock; those operations still require the host key and Runtime admission.
