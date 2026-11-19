@@ -179,10 +179,7 @@ pub(crate) fn prepare_grant_for_identity(
     if let Some(config) = &registration {
         lifecycle::owned(config)?;
         if managed_id.is_some() {
-            anyhow::ensure!(
-                std::env::current_exe()?.canonicalize()? == config.executable.canonicalize()?,
-                "managed supervisor differs from the registered CLI"
-            );
+            verify_registered_supervisor(&std::env::current_exe()?, &config.executable)?;
         }
         anyhow::ensure!(
             !config.maintenance || maintenance.is_some(),
@@ -225,8 +222,7 @@ pub(super) fn prepare_offline_read_grant(
         anyhow::ensure!(!config.maintenance,
             "offline read cannot replace an active maintenance controller");
         if managed_id.is_some() {
-            anyhow::ensure!(std::env::current_exe()?.canonicalize()? == config.executable.canonicalize()?,
-                "managed supervisor differs from the registered CLI");
+            verify_registered_supervisor(&std::env::current_exe()?, &config.executable)?;
         }
     }
     let (grant, _) = build_grant(binary, root, profile, managed_id, port, account_id, None, registration.as_ref())?;
@@ -598,6 +594,16 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn verify_registered_supervisor(current: &Path, registered: &Path) -> Result<()> {
+    let current = current.canonicalize()?;
+    let registered = registered.canonicalize()?;
+    anyhow::ensure!(
+        current == registered || hash_file(&current)? == hash_file(&registered)?,
+        "managed supervisor differs from the registered CLI"
+    );
+    Ok(())
+}
+
 fn hash_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
@@ -615,6 +621,23 @@ fn hash_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_supervisor_accepts_only_the_registered_image() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let stable = dir.path().join("stable");
+        let npm = dir.path().join("npm");
+        fs::write(&stable, b"installed CLI")?;
+        fs::copy(&stable, &npm)?;
+        verify_registered_supervisor(&stable, &stable)?;
+        verify_registered_supervisor(&npm, &stable)?;
+        fs::write(&npm, b"other CLI")?;
+        let error = verify_registered_supervisor(&npm, &stable)
+            .err()
+            .context("accepted a different CLI image")?;
+        assert!(error.to_string().contains("differs from the registered CLI"));
+        Ok(())
+    }
 
     #[test]
     fn launch_roots_validate_before_creating_fresh_profiles() -> Result<()> {

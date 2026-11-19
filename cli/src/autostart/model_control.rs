@@ -81,6 +81,7 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
         "model preparation has a recorded owner without verifiable health");
     if let Some(config) = managed {
         super::lifecycle::owned(config)?;
+        super::verify_registered_supervisor(&std::env::current_exe()?, &config.executable)?;
         super::lifecycle::ensure_control_endpoint(config)?;
         let state = super::super::super::manager::inspect(config)?;
         anyhow::ensure!(owner.is_some() || !state.running,
