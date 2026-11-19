@@ -734,6 +734,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     profile_import:{required:false,status:'not-run',diagnostic_workflow:'.github/workflows/migration-keyring-check.yml'},
     kind:candidate?'candidate-full':'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
+    ...(client2?.sealed?{sealed_client2:gui.sealed_client2}:{}),
     reports,actual_processes:processes,historical_upgrades:historicalUpgrades,
     full_passed:historicalUpgrades.every(report => report.profile === 'full'),gui_passed:true,g1Passed:false,
     limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms and the existing Windows Client2 GUI subset; real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against official metadata and exact-source SDK locks, not an independent private SDK archive download',candidate?'Candidate installation uses frozen local CLI and Runtime bytes; public-channel discovery remains postpublication evidence':'npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
@@ -753,8 +754,19 @@ export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2}=
   for(const r of [gui.initial_native_gui,gui.restart_native_gui])requireValue(r?.status==='native-connectivity-passed' && r.identity_verified===true
     && r.offline?.status==='offline-subset-passed' && r.offline.recall_hit===true && r.offline.runtime_normal_stop_confirmed===true, 'GUI DB/recall acceptance incomplete');
   requireValue(gui.restart_native_gui.offline.automatic_start===true && gui.restart_native_gui.offline.automatic_key_handoff===true, 'GUI restart key handoff incomplete');
-  if(client2)requireValue(sourcePattern.test(client2.source_sha||'') && gui.source_sha===client2.source_sha
-    && gui.release===client2.release && gui.official_exe_verified===true, 'GUI Client2 source/release differs from the selected product');
+  if(client2) {
+    requireValue(sourcePattern.test(client2.source_sha||'') && gui.source_sha===client2.source_sha
+      && gui.release===client2.release, 'GUI Client2 source/release differs from the selected product');
+    if(client2.sealed) {
+      const proof=gui.sealed_client2, seal=client2.sealed;
+      requireValue(candidate && gui.source_candidate_verified===true && gui.official_exe_verified===false
+        && proof?.repository==='risense-ai/respire-client2' && proof.source_sha===client2.source_sha
+        && `v${proof.version}`===client2.release && proof.six_package_receipts_verified===true
+        && proof.run_id===seal.run_id && proof.run_attempt===seal.run_attempt && proof.artifact_id===seal.artifact_id
+        && proof.artifact_zip_digest===seal.artifact_zip_digest && hashPattern.test(proof.manifest_sha256||'')
+        && proof.exe_sha256===gui.exe_sha256, 'GUI Client2 seal differs from the selected product');
+    } else requireValue(gui.official_exe_verified===true, 'GUI Client2 public executable was not verified');
+  }
   const cliHash=spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256;
   // Earlier PowerShell reports can start with a null from an uninitialized array.
   for(const phase of ['initial','restart'])requireValue(gui.cli_processes?.some(p=>p?.phase===phase && p.sha256===cliHash

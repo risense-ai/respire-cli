@@ -45,11 +45,15 @@ on:
         default: ''
         type: string
       client2_release:
-        description: Final public Client2 tag required for published-assets acceptance
+        description: Expected Client2 tag for the public release or sealed candidate
         default: ''
         type: string
       client2_commit:
-        description: Exact source commit of the final public Client2 release
+        description: Exact source commit of the selected Client2 product
+        default: ''
+        type: string
+      client2_sealed_run:
+        description: Optional Client2 sealed Desktop candidate RUN_ID/ATTEMPT for unpublished full acceptance
         default: ''
         type: string
 permissions:
@@ -92,13 +96,15 @@ jobs:
           REQUIRE_FULL: ${{ inputs.full_regression_before_publish }}
           CLIENT2_RELEASE: ${{ inputs.client2_release }}
           CLIENT2_COMMIT: ${{ inputs.client2_commit }}
+          CLIENT2_SEALED_RUN: ${{ inputs.client2_sealed_run }}
         run: |
           node - <<'NODE'
           const e=process.env;
           if(e.REQUEST_PUBLISH==='true'&&(e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||!e.PREPARED_RUN))throw Error('Publish requires full and a completed prepared_run; first run full with publish=false');
           if(e.PREPARED_RUN&&(e.REQUEST_PUBLISH!=='true'||!/^[1-9]\d*$/.test(e.PREPARED_RUN)||e.DEV_VERSION))throw Error('prepared_run requires publication and forbids version overrides');
           if(e.ARTIFACT_SOURCE==='build'&&(e.VALIDATION_PROFILE==='full'||e.REQUIRE_FULL==='true')&&(e.GITHUB_EVENT_NAME!=='workflow_dispatch'||e.GITHUB_REF!=='refs/heads/main'))throw Error('Full candidates require a trusted main dispatch');
-          if(!e.PREPARED_RUN&&(e.ARTIFACT_SOURCE==='published-assets'||e.VALIDATION_PROFILE==='full')&&(!e.CLIENT2_RELEASE||!/^[a-f0-9]{40}$/.test(e.CLIENT2_COMMIT||'')))throw Error('Full acceptance requires an explicit public Client2 tag and source commit');
+          if(e.CLIENT2_SEALED_RUN&&(e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||e.REQUEST_PUBLISH==='true'||!/^[1-9]\d*\/[1-9]\d*$/.test(e.CLIENT2_SEALED_RUN)))throw Error('Sealed Client2 requires an unpublished full build and exact RUN_ID/ATTEMPT');
+          if(!e.PREPARED_RUN&&(e.ARTIFACT_SOURCE==='published-assets'||e.VALIDATION_PROFILE==='full')&&(!e.CLIENT2_RELEASE||!/^[a-f0-9]{40}$/.test(e.CLIENT2_COMMIT||'')))throw Error('Full acceptance requires an explicit Client2 tag and source commit');
           NODE
           node -e "if(process.env.ARTIFACT_SOURCE==='published-assets'&&(!process.env.CLIENT2_RELEASE||!/^[a-f0-9]{40}$/.test(process.env.CLIENT2_COMMIT||'')))throw Error('Final public Client2 tag and exact commit must be explicit')"
       - name: Reject mixed publication and published-asset modes before planning
@@ -322,6 +328,7 @@ jobs:
           CLI_VERSION: ${{ steps.plan.outputs.version }}
           CLIENT2_RELEASE: ${{ inputs.client2_release }}
           CLIENT2_COMMIT: ${{ inputs.client2_commit }}
+          CLIENT2_SEALED_RUN: ${{ inputs.client2_sealed_run }}
         run: node npm/scripts/candidate-artifact.mjs resolve
 
   validate:

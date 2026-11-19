@@ -22,6 +22,7 @@ $publishedAssets = $env:ARTIFACT_SOURCE -ceq 'published-assets'
 $client2Candidate = $SourceCandidate -or $PSCmdlet.ParameterSetName -ceq 'DesktopCandidate'
 $publishedOnline = $publishedAssets -and -not $client2Candidate
 $candidateAssets = $env:ARTIFACT_SOURCE -ceq 'build' -and -not [string]::IsNullOrEmpty($env:CANDIDATE_ASSETS)
+$candidate = if ($candidateAssets) { $env:CANDIDATE_ASSETS | ConvertFrom-Json }
 $fullFixture = $publishedOnline -or $candidateAssets
 if ($PSCmdlet.ParameterSetName -ne 'SourceCandidate' -and $Client2Commit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Require the exact protocol-compatible Client2 source commit' }
 if ($PSCmdlet.ParameterSetName -eq 'Official' -and $Client2Release -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?\z') { throw 'Require an explicit new protocol-compatible Client2 release' }
@@ -126,6 +127,49 @@ function Assert-DesktopClient2Candidate($Run, $Artifact, [string]$ExpectedCommit
         $Artifact.name -cne 'respire-windows-amd64' -or $Artifact.expired -ne $false -or
         $Artifact.id -le 0 -or $Artifact.size_in_bytes -le 0 -or $Artifact.digest -cnotmatch '\Asha256:[0-9a-f]{64}\z') {
         throw 'Client2 Desktop candidate provenance differs'
+    }
+}
+function Save-SealedClient2([string]$Destination) {
+    $selected = $candidate.client2
+    $seal = $selected.sealed
+    if (-not $OfflineAcceptance -or $PSCmdlet.ParameterSetName -cne 'Official' -or
+        $selected.source_sha -cne $Client2Commit -or $selected.release -cne $Client2Release) {
+        throw 'Sealed Client2 requires matching full offline candidate inputs'
+    }
+    if (-not $env:GH_TOKEN) { throw 'Client2 seal verification requires an authenticated GitHub read token' }
+    $reader = Join-Path $env:GITHUB_WORKSPACE '.client2-seal-verifier/scripts/desktop-candidate.py'
+    $directory = Join-Path $root 'sealed-client2'
+    $verified = @'
+import json, os, runpy, sys
+from pathlib import Path
+reader, root, run, attempt, source, version = sys.argv[1:]
+os.environ.update(GITHUB_REPOSITORY="risense-ai/respire-client2", INPUT_RUN_ID=run,
+                  INPUT_ATTEMPT=attempt, CANDIDATE_SOURCE=source, CANDIDATE_VERSION=version)
+os.chdir(Path(root).parent)
+runpy.run_path(reader)["producer"](Path(root))
+'@ | python - $reader $directory $seal.run_id $seal.run_attempt $Client2Commit $Client2Release.Substring(1)
+    if ($LASTEXITCODE) { throw 'Sealed Client2 producer verification failed' }
+    $verified = $verified | ConvertFrom-Json
+    if ($verified.artifact_id -ne $seal.artifact_id -or $verified.artifact_zip_digest -cne $seal.artifact_zip_digest) {
+        throw 'Client2 package seal differs from the selected artifact'
+    }
+    $manifestPath = Join-Path $directory 'candidate.json'
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $filename = 'respire-windows-amd64.exe'
+    $expected = $manifest.files.$filename
+    Copy-Item -LiteralPath (Join-Path $directory $filename) -Destination $Destination
+    $hash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ((Get-Item -LiteralPath $Destination).Length -ne $expected.size -or $hash -cne $expected.sha256) {
+        throw 'Copied sealed Client2 executable differs'
+    }
+    $report.exe_sha256 = $hash
+    $report.source_candidate_verified = $true
+    $report.sealed_client2 = @{
+        repository = $verified.producer.repository; source_sha = $manifest.source; version = $manifest.version
+        run_id = $seal.run_id; run_attempt = $seal.run_attempt
+        artifact_id = $verified.artifact_id; artifact_zip_digest = $verified.artifact_zip_digest
+        manifest_sha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        exe_sha256 = $hash; six_package_receipts_verified = $true
     }
 }
 function Save-DownloadedClient2([string]$Destination) {
@@ -320,6 +364,8 @@ public static class RespireGuiNative {
         $report.source_candidate_verified=$true
         $report.exe_sha256=$manifest.exe_sha256
         $report.unverified_ui_scenarios=@('pending','error','cancel')
+    } elseif ($candidate.client2.sealed) {
+        Save-SealedClient2 $exe
     } else {
         if ($client2Candidate -and -not $OfflineAcceptance) { throw 'Desktop candidate requires the complete offline GUI subset' }
         Save-DownloadedClient2 $exe
@@ -341,7 +387,6 @@ public static class RespireGuiNative {
         $report.runtime_candidate = $candidateProof
     }
     if ($candidateAssets) {
-        $candidate = $env:CANDIDATE_ASSETS | ConvertFrom-Json
         $manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($env:CANDIDATE_ASSETS))).ToLowerInvariant()
         $consumer = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $cliPath) 'candidate-consumer-identity.json') | ConvertFrom-Json
         $metadataPath = (Resolve-Path -LiteralPath $env:RSRS_PUBLISHED_RUNTIME_METADATA).Path
