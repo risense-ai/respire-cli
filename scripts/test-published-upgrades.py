@@ -12,6 +12,7 @@ parser.add_argument('--binary',required=not download_only)
 parser.add_argument('--target',required=True)
 parser.add_argument('--model-dir',required=not download_only)
 parser.add_argument('--legacy-model-dir',required=not download_only)
+parser.add_argument('--client2-gui-report',type=pathlib.Path,help='Same-run verified desktop used to upgrade the latest Windows 1.x library')
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
 parser.add_argument('--source',action='append',default=[],help='Diagnostic subset only: exact selected tag or latest formal; never full coverage')
@@ -21,6 +22,9 @@ args=parser.parse_args()
 if (args.download_only or args.draft_baseline_cache) and not args.include_legacy_baselines:
     parser.error('Draft baseline diagnostics require --include-legacy-baselines')
 if not args.download_only: runtime_inputs(args,[args.binary])
+if args.client2_gui_report and (args.download_only or args.source or args.profile!='full' or
+        args.target!='x86_64-pc-windows-msvc' or not args.runtime_binary):
+    parser.error('Client2 database acceptance requires the full standalone Windows release gate')
 upgrade_contract='standalone-v1' if args.runtime_binary else 'legacy-shim-v1'
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
 def command(*values):
@@ -71,7 +75,7 @@ report={'passed':False,'target':args.target,'candidate_sha256':None if args.down
         'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
-def verify_upgrade(source):
+def verify_upgrade(source,client2_args=()):
     tag,release=source
     folder=root/tag; folder.mkdir(exist_ok=True)
     extension='.exe' if 'windows' in args.target else ''
@@ -116,14 +120,14 @@ def verify_upgrade(source):
     with tarfile.open(folder/names[1]) as bundle: bundle.extractall(folder,filter='data')
     old=folder/('rsrs'+extension)
     shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
-    result=folder/'results'
+    result=folder/('results-client2' if client2_args else 'results')
     runtime_args=(['--runtime-binary',str(args.runtime_binary),'--runtime-sha256',args.runtime_sha256,
                    '--runtime-version',args.runtime_version] if args.runtime_binary else [])
     checkpoint_args=['--database-dev-checkpoint',tag] if tag in DATABASE_DEV_CHECKPOINTS else []
     architecture_args=[] if args.runtime_binary else ['--expect-supervised-worker']
     subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
         '--binary',args.binary,'--seed-binary',str(old),'--model-dir',args.model_dir,
-        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args,*architecture_args],check=True)
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args,*architecture_args,*client2_args],check=True)
     checks=json.loads((result/'real-account-return-verification.json').read_text())
     assert isinstance(checks,list) and len(checks)==1,'expected one candidate upgrade report'
     check=checks[0]
@@ -181,6 +185,9 @@ def verify_upgrade(source):
             'forced_restart_checked','old_rpc_checked','supervised_worker_checked','global_engine_preserved',
         ]),'required legacy shim upgrade checks missing or failed'
     assert check.get('binary_sha256')==report['candidate_sha256'],'candidate changed during upgrade validation'
+    assert check.get('client2_sha256')==(client2_args[-1] if client2_args else None),'desktop upgrade actor differs'
+    if client2_args:
+        assert check.get('client2_native_credential_migration') is True, 'desktop native credential migration was not exercised'
     assert check.get('engine')=='cpu','upgrade did not verify real CPU inference'
     sequence=check.get('sequence')
     assert isinstance(sequence,list) and [step['account'] for step in sequence]==['main','alternate','main'],'upgrade account sequence differs'
@@ -193,6 +200,7 @@ def verify_upgrade(source):
             'coverage_scope':check.get('coverage_scope'),
             'normal_reopen_checked':check.get('normal_reopen_checked') is True,
             'stale_endpoint_archived':check.get('stale_endpoint_archived') is True,
+            'client2_sha256':check.get('client2_sha256'),
             'host_checks_delegated_to':check.get('host_checks_delegated_to'),
             'post_upgrade_sync_checked':check.get('post_upgrade_sync_checked') is True,
             'report':str(result/'real-account-return-verification.json')}
@@ -223,6 +231,18 @@ try:
         platform_applicability(tag,args.target,[asset['name'] for asset in source['assets']]) is not None
         for tag,source in sources.items()))
     assert first_platform_release or any(item.get('passed') is True for item in report['sources']),'no actual applicable upgrade was exercised'
+    if args.client2_gui_report:
+        desktop=json.loads(args.client2_gui_report.read_text(encoding='utf-8'))
+        executable=args.client2_gui_report.parent/'respire-windows-amd64.exe'
+        digest=desktop['exe_sha256']
+        assert desktop['status']=='connectivity-passed' and desktop['cleanup_exit_confirmed'] is True, 'desktop GUI validation did not pass'
+        assert desktop['cli_sha256']==report['candidate_sha256'], 'desktop validation used a different CLI'
+        assert hashlib.sha256(executable.read_bytes()).hexdigest()==digest, 'validated desktop executable changed'
+        latest=next(tag for tag in reversed(formal_sources) if selected.get(tag) and
+                    any('v'+item['version']==tag and item.get('passed') is True for item in report['sources']))
+        report['client2_historical_upgrade']=verify_upgrade((latest,selected[latest]),
+            ('--client2-binary',str(executable),'--client2-sha256',digest))
+        assert report['client2_historical_upgrade']['passed'] is True, 'desktop historical database upgrade did not pass'
     report['first_platform_release']=first_platform_release
     if first_platform_release:
         report['upgrade_status']='not-applicable: first Intel macOS release; fresh inference is validated separately'

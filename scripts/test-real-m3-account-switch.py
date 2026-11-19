@@ -1,6 +1,6 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
-from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
+from native_fixture_process import (install_official_runtime, install_published_runtime, stage_fixture_cli, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
     add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, canonical_scope_path, same_existing_path)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from contextlib import closing
@@ -182,12 +182,19 @@ architecture.add_argument('--expect-supervised-worker',action='store_true',help=
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
 parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
 parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then verify the database upgrade')
+parser.add_argument('--client2-binary', type=pathlib.Path, help='Install and start Runtime using the verified desktop executable')
+parser.add_argument('--client2-sha256')
 parser.add_argument('--database-dev-checkpoint', choices=['v1.0.11-dev.1', 'v1.0.17-dev.6'])
 add_runtime_arguments(parser)
 args=parser.parse_args()
 if args.database_dev_checkpoint and not args.seed_binary:
     parser.error('--database-dev-checkpoint requires an authenticated historical --seed-binary')
 database_upgrade = bool(args.seed_binary and args.runtime_binary)
+if args.client2_binary or args.client2_sha256:
+    if not (database_upgrade and args.client2_binary and args.client2_sha256 and os.name == 'nt'):
+        parser.error('Client2 requires verified Windows desktop bytes and a historical database source')
+    args.client2_binary = args.client2_binary.resolve(strict=True)
+    assert hashlib.sha256(args.client2_binary.read_bytes()).hexdigest() == args.client2_sha256, 'desktop digest differs'
 if database_upgrade and (args.expect_in_process or args.expect_supervised_worker
         or args.resident_stress or args.expect_background_threads is not None):
     parser.error('historical database upgrades leave worker and lifecycle fault checks to the resident fixture')
@@ -275,6 +282,11 @@ for binary in BINARIES:
         if runtime_config.runtime_binary and result.returncode==0 and command in ('model','remember','recall','show','doctor','status'):
             observe_runtime()
         return envelope
+    def run_client2(action):
+        desktop_env = {key: value for key, value in env.items() if key != 'RSRS_RUNTIME_BIN'}
+        result = captured_run([str(args.client2_binary),'--headless',action],env=desktop_env,timeout=960)
+        assert result.returncode==0, f'Client2 {action} failed with exit {result.returncode}'
+        assert json.loads(result.stdout).get('ok') is True, f'Client2 {action} did not confirm success'
     def wait_index_ready(timeout=180):
         deadline = time.monotonic() + timeout
         while True:
@@ -552,7 +564,21 @@ for binary in BINARIES:
             stale_endpoint = json.dumps({'v':1,'pid':os.getpid(),'url':f'http://127.0.0.1:{port}'}).encode()
             with endpoint.open('xb') as stream:
                 stream.write(stale_endpoint)
-            installed = install_published_runtime(binary, env)
+            if args.client2_binary:
+                obsolete_receipt = main/'runtime.json'
+                with obsolete_receipt.open('xb') as stream:
+                    stream.write(b'obsolete Runtime selection')
+                cli_path = main/'bin/rsrs.exe'
+                assert not cli_path.exists(), 'desktop Runtime preparation must start without a CLI'
+                run_client2('install-runtime')
+                assert not cli_path.exists(), 'desktop Runtime preparation unexpectedly installed the CLI'
+                assert obsolete_receipt.read_bytes()==b'obsolete Runtime selection', 'desktop changed the obsolete receipt'
+                installed = main/'bin/runtime'/args.runtime_version/'rsrs-runtime.exe'
+                assert hashlib.sha256(installed.read_bytes()).hexdigest()==args.runtime_sha256, 'desktop installed different Runtime bytes'
+                env['RSRS_RUNTIME_BIN'] = str(installed)
+                stage_fixture_cli(binary, env, main)
+            else:
+                installed = install_published_runtime(binary, env)
             assert installed is not None, 'database upgrade requires the verified managed or published Runtime artifact'
             args.runtime_binary = installed
             assert endpoint.read_bytes()==stale_endpoint, 'Runtime preparation changed the old endpoint'
@@ -560,16 +586,25 @@ for binary in BINARIES:
             runtime_installed_after_legacy_data = True
             runtime_artifact_reused = True
         if args.seed_binary:
-            # This gate tests historical databases; fixture-owned custody is explicit
-            # before target_start, rather than depending on startup to migrate secrets.
+            # The desktop case leaves the main session for the actual startup host to migrate.
             for profile in [main,alternate]:
+                if args.client2_binary and profile == main:
+                    continue
                 before=snapshot(profile)
                 migrate_fixture_custody(profile,keys,custody_slots[str(profile)],expected_urks[str(profile)])
                 after=snapshot(profile)
                 assert after[:2]==before[:2], 'fixture custody changed historical database or indexes'
                 assert library_state(after,recovery_factors[str(profile)])==original_state[str(profile)], 'fixture custody changed original records, sync work or URK'
         if args.seed_binary and args.runtime_binary:
-            run('runtime','start')
+            if args.client2_binary:
+                run_client2('start')
+                desktop_owner = observe_runtime()
+                assert desktop_owner['store_ready'], 'Client2 did not unlock the historical database'
+                run('--client-only','status')
+                run_client2('rpc-status')
+                assert observe_runtime()['instance_id']==desktop_owner['instance_id'], 'the two hosts changed the serving Runtime'
+            else:
+                run('runtime','start')
             archived = list(endpoint.parent.glob('endpoint.stopped-*.json'))
             assert len(archived)==1 and archived[0].read_bytes()==stale_endpoint, 'startup did not archive the old endpoint'
             assert endpoint.read_bytes()!=stale_endpoint, 'new Runtime still uses the old endpoint record'
@@ -915,10 +950,16 @@ for binary in BINARIES:
             closing_owner=observe_runtime()
             owned=psutil.Process(closing_owner['pid'])
             retired=[(owned.pid,owned.create_time()), *[(child.pid,child.create_time()) for child in owned.children(recursive=True)]]
-            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
-            assert stopped.returncode==0, 'normal database owner stop failed'
+            if args.client2_binary:
+                run_client2('stop')
+            else:
+                stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+                assert stopped.returncode==0, 'normal database owner stop failed'
             confirm_workers_exited(retired)
             assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_close, 'normal close changed records, sync work or URK'
+            if args.client2_binary:
+                run_client2('start')
+                assert observe_runtime()['store_ready'], 'Client2 restart did not unlock the historical database'
             for account,profile in [('main',main),('alternate',alternate),('main',main)]:
                 run('account','use',account)
                 wait_index_ready()
@@ -1049,6 +1090,8 @@ for binary in BINARIES:
             'host_checks_delegated_to':'resident-concurrency' if database_upgrade else None,
             'normal_reopen_checked':normal_reopen_checked,'runtime_artifact_reused':runtime_artifact_reused,
             'stale_endpoint_archived':stale_endpoint_archived,
+            'client2_sha256':args.client2_sha256,
+            'client2_native_credential_migration':bool(args.client2_binary),
             'original_records_preserved':True,'original_sync_work_preserved':True,'urk_preserved':True,
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
             'encrypted_tombstones_preserved':bool(args.seed_binary),

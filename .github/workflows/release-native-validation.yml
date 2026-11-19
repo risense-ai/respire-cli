@@ -514,6 +514,9 @@ jobs:
           "$py" scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
           upgrade_args=(--binary "$exe")
           if [ "$MUSL_SOURCE_RECOVERY" = true ]; then upgrade_args+=(--source v1.0.8); fi
+          if [ "${{ matrix.target }}" = x86_64-pc-windows-msvc ] && [ "$UPGRADE_PROFILE" = full ]; then
+            upgrade_args+=(--client2-gui-report "$RUNNER_TEMP/published-client2-gui/report.json")
+          fi
           "$py" scripts/test-published-upgrades.py "${upgrade_args[@]}" --target '${{ matrix.target }}' \
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \

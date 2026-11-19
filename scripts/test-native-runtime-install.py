@@ -320,7 +320,7 @@ class FixtureInstallationTests(unittest.TestCase):
         calls = [node for node in ast.walk(upgrade) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Name)]
         install = next(node for node in calls if node.func.id == 'install_published_runtime')
-        self.assertFalse(any(node.func.id in ('install_official_runtime', 'stage_fixture_cli') for node in calls))
+        self.assertFalse(any(node.func.id == 'install_official_runtime' for node in calls))
         loop = next(node for node in tree.body if isinstance(node, ast.For))
         session = next(node for node in ast.walk(loop) if isinstance(node, ast.Call)
                        and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text'
@@ -359,8 +359,9 @@ class FixtureInstallationTests(unittest.TestCase):
                         data[str(main)] = 'changed database'
                     return None if fault == 'missing' else main / 'verified-runtime'
                 helper = Mock(side_effect=reuse)
-                scope = dict(args=types.SimpleNamespace(seed_binary=True, runtime_binary='selected-runtime'),
+                scope = dict(args=types.SimpleNamespace(seed_binary=True, runtime_binary='selected-runtime', client2_binary=None),
                     main=main, alternate=alternate, binary='fixture-cli', env={}, runtime_artifact_reused=False,
+                    json=json, os=os, port=15169,
                     snapshot=lambda profile: data[str(profile)], install_published_runtime=helper)
                 code = compile(ast.Module(body=[upgrade], type_ignores=[]), '<reuse-upgrade-artifact>', 'exec')
                 if fault:
