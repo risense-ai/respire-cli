@@ -1,5 +1,5 @@
 name: Sealed Runtime Windows migration
-run-name: Sealed Windows migration / ${{ inputs.runtime_run_id }}
+run-name: Sealed Windows ARM64 migration / ${{ inputs.runtime_run_id }}
 on:
   workflow_dispatch:
     inputs:
@@ -18,15 +18,15 @@ permissions:
 
 jobs:
   encrypted-migration:
-    runs-on: windows-latest
+    runs-on: windows-11-arm
     timeout-minutes: 45
     env:
-      CLI_TARGET: x86_64-pc-windows-msvc
+      CLI_TARGET: aarch64-pc-windows-msvc
       CLI_SHA: 0acf92481b29b69e6bf9536dc6a13b2c569c5abd
       CLI_VERSION: 2.0.0-dev.20
       CLI_PRODUCER_RUN_ID: '44362424899'
       CLI_PRODUCER_ATTEMPT: '1'
-      RSRS_RUNTIME_TRIPLE: x86_64-pc-windows-msvc
+      RSRS_RUNTIME_TRIPLE: aarch64-pc-windows-msvc
       RSRS_PUBLISHED_RUNTIME_VERSION: 2.0.0-dev.25
       RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
       RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
@@ -34,6 +34,12 @@ jobs:
       # metadata and the managed image. It never contacts a release endpoint.
       RSRS_ARTIFACT_SOURCE: published-assets
     steps:
+      - name: Require native Windows ARM64 hardware
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Migration acceptance requires native Windows ARM64'
+          }
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
