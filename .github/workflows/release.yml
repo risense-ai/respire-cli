@@ -104,9 +104,8 @@ jobs:
           if(e.PREPARED_RUN&&(e.REQUEST_PUBLISH!=='true'||!/^[1-9]\d*$/.test(e.PREPARED_RUN)||e.DEV_VERSION))throw Error('prepared_run requires publication and forbids version overrides');
           if(e.ARTIFACT_SOURCE==='build'&&(e.VALIDATION_PROFILE==='full'||e.REQUIRE_FULL==='true')&&(e.GITHUB_EVENT_NAME!=='workflow_dispatch'||e.GITHUB_REF!=='refs/heads/main'))throw Error('Full candidates require a trusted main dispatch');
           if(e.CLIENT2_SEALED_RUN&&(e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||e.REQUEST_PUBLISH==='true'||!/^[1-9]\d*\/[1-9]\d*$/.test(e.CLIENT2_SEALED_RUN)))throw Error('Sealed Client2 requires an unpublished full build and exact RUN_ID/ATTEMPT');
-          if(!e.PREPARED_RUN&&(e.ARTIFACT_SOURCE==='published-assets'||e.VALIDATION_PROFILE==='full')&&(!e.CLIENT2_RELEASE||!/^[a-f0-9]{40}$/.test(e.CLIENT2_COMMIT||'')))throw Error('Full acceptance requires an explicit Client2 tag and source commit');
+          if((e.CLIENT2_RELEASE||e.CLIENT2_COMMIT||e.CLIENT2_SEALED_RUN)&&(!/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(e.CLIENT2_RELEASE||'')||!/^[a-f0-9]{40}$/.test(e.CLIENT2_COMMIT||'')))throw Error('Client2 diagnostics require an explicit tag and source commit');
           NODE
-          node -e "if(process.env.ARTIFACT_SOURCE==='published-assets'&&(!process.env.CLIENT2_RELEASE||!/^[a-f0-9]{40}$/.test(process.env.CLIENT2_COMMIT||'')))throw Error('Final public Client2 tag and exact commit must be explicit')"
       - name: Reject mixed publication and published-asset modes before planning
         id: validated
         run: node npm/scripts/extract-artifact.mjs --validate-published

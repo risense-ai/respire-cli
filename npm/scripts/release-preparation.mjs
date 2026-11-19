@@ -163,17 +163,20 @@ export function createPreparation(context){
     origin_artifacts:preparationArtifacts(artifacts,source,manifest),assets,packs,full_result,prepared_at:now});
 }
 export function validatePreparationFull(result,source,manifest){
+  const guiReports=Array.isArray(result?.reports)
+    ? result.reports.filter(r=>r.artifact==='client2-published-online-x86_64-pc-windows-msvc'&&r.path==='report.json').length
+    : 0;
   requireValue(result?.schema===2&&result.scope==='database-in-place-upgrade'
     &&result.profile_import?.required===false&&result.profile_import.status==='not-run'
     &&result.profile_import.diagnostic_workflow==='.github/workflows/migration-keyring-check.yml'
-    &&result.kind==='candidate-full'&&result.full_passed===true&&result.gui_passed===true
+    &&result.kind==='candidate-full'&&result.full_passed===true
     &&result.harness_sha===preparationHead(source)&&result.product_sources?.cli===source.sha&&HASH.test(result.manifest_sha256||'')
     &&Number(result.run_id)===Number(source.run_id)&&Number(result.run_attempt)===Number(source.run_attempt)
     &&Array.isArray(result.historical_upgrades)&&result.historical_upgrades.length===manifest.targets.length
     &&manifest.targets.every(t=>result.historical_upgrades.filter(r=>r.target===t.triple&&r.profile==='full'&&r.all_published_sources_covered===true).length===1)
     &&Array.isArray(result.reports)&&result.reports.length>0&&result.reports.every(r=>HASH.test(r.sha256||''))
-    &&result.reports.filter(r=>r.artifact==='client2-published-online-x86_64-pc-windows-msvc'&&r.path==='report.json').length===1,
-    'Missing complete candidate GUI/DB/process evidence');
+    &&(result.gui_passed===null ? guiReports===0 : result.gui_passed===true&&guiReports===1),
+    'Missing complete candidate DB/process evidence or selected GUI evidence');
   return result;
 }
 export function validatePreparedBytes(assets,packs,source,manifest){

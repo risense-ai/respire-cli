@@ -49,21 +49,19 @@ All eight CLI SDK pins bind the same reviewed SDK version and its per-target dig
 
 Current frontend releases use eight CLI targets: Linux x64/ARM64 GNU and musl,
 macOS Intel/ARM64, and Windows x64/ARM64. Runtime stays pinned to
-`2.0.0-dev.24`, whose core configuration interfaces are published. The CLI
-download pin and Client2 adaptation are merged; new host DEV publication still
-requires candidate acceptance. Stable publication remains disabled until separate complete G1
-evidence is implemented and authorized.
+`2.0.0-dev.27` for the current CLI release train. Stable publication remains
+disabled until separate complete G1 evidence is implemented and authorized.
 
 `critical` runs build and package checks only and cannot publish. `full` is the
 default Release profile. From an exact main workflow dispatch, run it with
-`publish=false` and explicit `client2_release` / `client2_commit`. It freezes the
+`publish=false`. It freezes the
 candidate CLI Actions bytes and official pinned Runtime asset IDs and hashes,
 then requires all eight native lanes, seven cloud sweeps, historical
-formal/database DEV upgrades, the existing
-Windows Client2 GUI subset (including restart/recovery), packaging and API gates.
-The GUI installs the candidate CLI locally; it cannot download a newer public
-CLI in place of the candidate. Live GUI-owned CLI process paths, parent/session,
-lifetimes and image hashes must match the candidate in initial and restart phases.
+formal/database DEV upgrades, packaging and API gates. Client2 has its own release
+train and validates against the published Runtime protocol and launch contract.
+Explicit `client2_release` / `client2_commit` inputs request the existing Windows
+GUI diagnostic. That diagnostic also verifies the exact CLI image used during
+startup and restart.
 
 Every full result joins raw reports and real Runtime process hashes before
 `release-prepared-RUN-ATTEMPT` is emitted. Exact-source main push CI must also

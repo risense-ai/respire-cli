@@ -572,7 +572,7 @@ print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps,
                  'selected': sorted(select_upgrade_sources(sources, target, report['profile']))}))
 `], {cwd:new URL('../../scripts/',import.meta.url), input:JSON.stringify(report), encoding:'utf8', windowsHide:true}));
 }
-export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners} = {}) {
+export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners,independent=Boolean(candidate && !client2)} = {}) {
   requireValue(sourcePattern.test(context.sha || '') && positiveID(context.run_id) && positiveID(context.run_attempt), 'Invalid full run identity');
   const processes = [], reports = [], historicalUpgrades = [];
   function job(predicate, label) {
@@ -720,8 +720,8 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     && packages.packages?.length===targets.length+1 && new Set(packages.packages.map(p=>p.name)).size===targets.length+1
     && packages.packages.every(p=>p.version===spec.cli.version && hashPattern.test(p.sha256)), 'Published package validation differs');
   for(const packed of packages.packages) verifyFile(join(directory,'npm-release-packages'),{path:packed.file,sha256:packed.sha256});
-  const gui=read('client2-published-online-x86_64-pc-windows-msvc','report.json');
-  validateFullGUI(gui,spec,manifestHash,{candidate:Boolean(candidate),client2});
+  const gui=independent ? null : read('client2-published-online-x86_64-pc-windows-msvc','report.json');
+  if(gui)validateFullGUI(gui,spec,manifestHash,{candidate:Boolean(candidate),client2});
   job(j => j.name === 'api-smoke','API');
   const apiOwner=evidenceOwners?.['api-smoke'] || context;
   const apiIdentity=read('dev-api-coverage','published-api-identity.json');
@@ -739,7 +739,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
     ...(client2?.sealed?{sealed_client2:gui.sealed_client2}:{}),
     reports,actual_processes:processes,historical_upgrades:historicalUpgrades,
-    full_passed:historicalUpgrades.every(report => report.profile === 'full'),gui_passed:true,g1Passed:false,
+    full_passed:historicalUpgrades.every(report => report.profile === 'full'),gui_passed:gui ? true : null,g1Passed:false,
     limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms and the existing Windows Client2 GUI subset; real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against official metadata and exact-source SDK locks, not an independent private SDK archive download',candidate?'Candidate installation uses frozen local CLI and Runtime bytes; public-channel discovery remains postpublication evidence':'npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
 }
 export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2}={}) {
@@ -793,7 +793,8 @@ async function completePublished(spec,targets,directory) {
     if (jobs.length===batch.total_count) break;
     requireValue(batch.jobs.length>0 && jobs.length<batch.total_count,'Incomplete full job inventory');
   }
-  const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context,{client2:{release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT}});
+  const client2 = process.env.CLIENT2_RELEASE ? {release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT} : undefined;
+  const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context,{client2,independent:!client2});
   requireValue(result.full_passed, 'Full acceptance requires full historical upgrade coverage');
   writeFileSync(join(directory,'published-full-result.json'),JSON.stringify(result,null,2)+'\n');
 }

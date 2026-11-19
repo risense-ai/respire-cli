@@ -355,10 +355,11 @@ test('critical cannot publish; full candidate preparation precedes promotion and
   runInNewContext(guard,{channel:'dev'});
   assert.match(release,/validation_profile:[\s\S]*?default: full/);
   assert.match(release,/Require full candidates before publication/);
-  const client2Guard=release.match(/node -e "(if\(process.env.ARTIFACT_SOURCE==='published-assets'.*)"/)[1];
-  for(const env of [{},{CLIENT2_RELEASE:'v2.0.0-dev.6'},{CLIENT2_COMMIT:'c'.repeat(40)},{CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'main'}])assert.throws(()=>runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',...env}}}),/must be explicit/);
-  runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'c'.repeat(40)}}});
-  runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'build'}}});
+  const client2Guard=release.split('\n').find(line=>line.includes('Client2 diagnostics require'));
+  assert.ok(client2Guard);
+  for(const e of [{CLIENT2_RELEASE:'v2.0.0-dev.6'},{CLIENT2_COMMIT:'c'.repeat(40)},{CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'main'}])assert.throws(()=>runInNewContext(client2Guard,{e}),/require an explicit/);
+  runInNewContext(client2Guard,{e:{}});
+  runInNewContext(client2Guard,{e:{CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'c'.repeat(40)}});
   assert.doesNotMatch(release,/^  native-regression-critical(?:-readonly)?:/m);
   assert.match(part('publication-ready'),/prepared-import.mjs readiness/);
   assert.match(part('preparation-receipt'),/Require all full consumers including GUI and historical DB/);

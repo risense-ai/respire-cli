@@ -794,6 +794,13 @@ test('published full joins every existing report and live image identity; copied
     assert.equal(complete.actual_processes.length,f.targets.length+Object.values(f.upgradeReports).reduce((count,r)=>count+r.sources.filter(row=>row.passed).length,0)+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
     assert.equal(complete.historical_upgrades.length,f.targets.length);
     const guiFile=path.join(root,'client2-published-online-x86_64-pc-windows-msvc','report.json'),guiBytes=readFileSync(guiFile);
+    rmSync(guiFile);
+    const independent=validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context,{independent:true});
+    assert.equal(independent.full_passed,true);
+    assert.equal(independent.gui_passed,null);
+    assert.equal(independent.historical_upgrades.length,f.targets.length);
+    assert.throws(run);
+    writeFileSync(guiFile,guiBytes);
     const selected={release:'v2.0.0-dev.6',source_sha:'f'.repeat(40),
       sealed:{run_id:102,run_attempt:2,artifact_id:103,artifact_zip_digest:'sha256:'+'b'.repeat(64)}};
     const sealedGui=JSON.parse(guiBytes);

@@ -27,9 +27,11 @@ export function validateCandidate(candidate, env=process.env) {
     assert.equal(env.GITHUB_EVENT_NAME,'workflow_dispatch');
     assert.match(env.GITHUB_SHA,/^[a-f0-9]{40}$/);
   }else assert.equal(candidate.source.sha,env.GITHUB_SHA,'Candidates must use the exact main harness source');
-  assert.match(candidate.client2.release,/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/);
-  assert.match(candidate.client2.source_sha,/^[a-f0-9]{40}$/);
-  if(Object.hasOwn(candidate.client2,'sealed')){
+  if(Object.hasOwn(candidate,'client2')){
+    assert.match(candidate.client2.release,/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/);
+    assert.match(candidate.client2.source_sha,/^[a-f0-9]{40}$/);
+  }
+  if(candidate.client2 && Object.hasOwn(candidate.client2,'sealed')){
     const {run_id,run_attempt,artifact_id,artifact_zip_digest}=candidate.client2.sealed;
     for(const value of [run_id,run_attempt,artifact_id])assert.ok(Number.isSafeInteger(value)&&value>0);
     assert.match(artifact_zip_digest,/^sha256:[a-f0-9]{64}$/);
@@ -85,9 +87,12 @@ export async function resolveCandidate() {
       return {id:a.id,name,size:a.size,sha256:a.digest.slice(7)};
     })};
   await inspectPublishedRelease(runtime,{token:process.env.GH_TOKEN});
-  const client2={release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT};
-  if(process.env.CLIENT2_SEALED_RUN)client2.sealed=resolveSealedClient2(process.env.CLIENT2_SEALED_RUN,client2.source_sha);
-  const candidate=validateCandidate({schema:1,kind:'unpublished-cli-candidate',client2,source:{repository:'risense-ai/respire-cli',
+  const desktop={};
+  if(process.env.CLIENT2_RELEASE || process.env.CLIENT2_COMMIT || process.env.CLIENT2_SEALED_RUN){
+    desktop.client2={release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT};
+    if(process.env.CLIENT2_SEALED_RUN)desktop.client2.sealed=resolveSealedClient2(process.env.CLIENT2_SEALED_RUN,desktop.client2.source_sha);
+  }
+  const candidate=validateCandidate({schema:1,kind:'unpublished-cli-candidate',...desktop,source:{repository:'risense-ai/respire-cli',
     sha:process.env.CLI_SHA,version:process.env.CLI_VERSION,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT)},runtime});
   appendFileSync(process.env.GITHUB_OUTPUT,`candidate=${JSON.stringify(candidate)}\n`);
 }
