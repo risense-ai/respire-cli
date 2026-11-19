@@ -50,6 +50,12 @@ const LEGACY_BLOCK_END: &str = "<!-- 1memory:end -->";
 fn entity_path() -> Result<std::path::PathBuf> {
     #[cfg(windows)]
     {
+        #[cfg(test)]
+        let base = std::env::var_os("RSRS_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| anyhow!("instruction test does not have an isolated data directory"))?
+            .join("local-app-data");
+        #[cfg(not(test))]
         let base = dirs::data_local_dir()
             .ok_or_else(|| anyhow!("cannot determine local app data directory"))?;
         Ok(base.join("respire").join("docs").join("respire.md"))
