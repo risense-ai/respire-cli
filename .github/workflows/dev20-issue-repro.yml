@@ -1,0 +1,86 @@
+name: Reproduce reported dev.20 host issues
+on:
+  push:
+    branches: [codex/cli-dev20-issue-repro-20261119]
+    paths: [.github/workflows/dev20-issue-repro.yml]
+permissions:
+  contents: read
+jobs:
+  report:
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        issue: [fresh-install, managed-model, doctor-version]
+    env:
+      ISSUE_CASE: ${{ matrix.issue }}
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Reproduce with the public npm CLI and pinned Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RSRS_DATA_DIR="$RUNNER_TEMP/respire-case"
+          export RSRS_ENGINE=cpu
+          export RSRS_RPC_PORT=49185
+          mkdir -p "$RSRS_DATA_DIR" results
+          prefix="$RUNNER_TEMP/isolated-npm"
+          npm install --global --prefix "$prefix" rsrs-cli@2.0.0-dev.20
+          cli="$prefix/bin/rsrs"
+          stable="$RSRS_DATA_DIR/bin/rsrs"
+          packaged=$(node -p 'require.resolve("@rsrsai/macos-arm64/bin/rsrs", {paths:[process.argv[1]]})' "$prefix/lib/node_modules/rsrs-cli")
+          [[ "$("$cli" --version)" == 'rsrs 2.0.0-dev.20' ]]
+          printf '%s  %s\n' 5c5c473f7b004c92f8784c5fa7203dc51b26a5bd089c2b2868bacfcd4876a61c "$packaged" | shasum -a 256 -c
+          cleanup() {
+            rc=$?
+            if [[ -x "$stable" ]] && [[ "$ISSUE_CASE" == managed-model ]]; then
+              "$stable" runtime autostart remove --stop --json >results/cleanup.json || rc=1
+            elif [[ -x "$stable" ]]; then
+              "$stable" runtime stop --json >results/cleanup.json || rc=1
+            fi
+            exit "$rc"
+          }
+          trap cleanup EXIT
+          "$cli" runtime install --json >results/install.json
+          [[ -x "$stable" ]]
+          cmp "$packaged" "$stable"
+          printf '%s  %s\n' 40618c7c203175dcf4bc4aaed936e1de3279347a932b16a4cd60c3fb0bc150db "$RSRS_DATA_DIR/bin/runtime/2.0.0-dev.25/rsrs-runtime" | shasum -a 256 -c
+          if [[ "$ISSUE_CASE" == fresh-install ]]; then
+            code=0
+            "$cli" doctor --json >results/fresh-doctor.json || code=$?
+            jq -e --argjson rc "$code" '
+              ($rc == 0) or ((.errors | length) == 1 and
+              (.errors[0] | contains("supply private key material")))
+            ' results/fresh-doctor.json
+          fi
+          "$cli" keygen --json | jq -e '{command,status, error_count:(.errors|length)} | select(.status=="ok" and .error_count==0)' >results/keygen-summary.json
+          if [[ "$ISSUE_CASE" == managed-model ]]; then
+            "$cli" runtime autostart enable --now --json >results/autostart.json
+            code=0
+            "$cli" model install --json >results/model-install.json || code=$?
+            jq '{status,errors}' results/model-install.json
+            "$stable" runtime status --json >results/runtime-after-model.json
+            exit "$code"
+          fi
+          "$cli" runtime start --json >results/start.json
+          "$cli" runtime status --json >results/runtime-status.json
+          jq -e '.summary.runtime | .version=="2.0.0-dev.25" and .store_ready==true and .credential_state=="available"' results/runtime-status.json
+          if [[ "$ISSUE_CASE" == doctor-version ]]; then
+            code=0
+            "$cli" doctor --json >results/doctor.json || code=$?
+            jq -e --argjson code "$code" '
+              .command=="doctor" and
+              (($code==0) or ((.errors|length)==1 and (.errors[0]|contains("assets_incomplete"))))
+            ' results/doctor.json
+            jq -r '.items[] | select(.name=="Runtime version") | .value' results/doctor.json
+            jq -e '.summary.runtime_version=="2.0.0-dev.25" and any(.items[]; .name=="Runtime version" and .value=="2.0.0-dev.25")' results/doctor.json
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dev20-${{ matrix.issue }}
+          path: results/
+          if-no-files-found: error
