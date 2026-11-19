@@ -216,7 +216,7 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
 }
 
 // The CLI is standalone; Runtime and its native libraries use their own verified installer.
-fn install_binary(src: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn install_binary(src: &Path, dest: &Path) -> Result<(), String> {
     let parent = dest.parent().ok_or("CLI destination has no parent")?;
     std::fs::create_dir_all(parent)
         .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;

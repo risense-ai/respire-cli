@@ -13,6 +13,7 @@ use super::{lifecycle, read_registration, Registration};
 
 #[path = "launch_authorization.rs"]
 mod launch_authorization;
+pub(crate) use launch_authorization::{run_detached_plugin_host, spawn_detached_runtime};
 mod auth_control;
 pub(crate) use launch_authorization::shared_host::{accounts as rpc_accounts, keys as rpc_keys};
 pub(crate) mod offline_keygen;

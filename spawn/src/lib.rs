@@ -121,6 +121,7 @@ fn spawn_detached(exe: &Path, args: &[std::ffi::OsString], token: Option<&str>, 
     let mut command = Command::new(exe);
     command
         .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
+        .env_remove("RSRS_HOST_PLUGIN_CHANNEL")
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN");
     if let Some(token) = token {
@@ -131,6 +132,11 @@ fn spawn_detached(exe: &Path, args: &[std::ffi::OsString], token: Option<&str>, 
         .stdin(Stdio::null())
         .stdout(if readiness { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::null());
+    spawn_detached_command(&mut command)
+}
+
+/// Spawn a same-user child independent of its launching process.
+pub fn spawn_detached_command(command: &mut Command) -> io::Result<std::process::Child> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
