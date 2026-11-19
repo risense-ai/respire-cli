@@ -145,8 +145,9 @@ fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
 #[test]
 fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     let pin = pinned()?;
-    anyhow::ensure!(pin.required == "2.0.0-dev.24", "unexpected pin {pin:?}");
-    anyhow::ensure!(pin.accept.contains("2.0.0-dev.24"));
+    anyhow::ensure!(pin.required == "2.0.0-dev.25", "unexpected pin {pin:?}");
+    anyhow::ensure!(pin.accept.contains("2.0.0-dev.25"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.24"));
     anyhow::ensure!(!pin.accept.contains("2.0.0-dev.23"));
     anyhow::ensure!(!pin.accept.contains("2.0.0-dev.22"));
     anyhow::ensure!(!pin.accept.contains("2.0.0-dev.21"));
@@ -190,7 +191,8 @@ fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     anyhow::ensure!(!pin.accept.contains("3.0.0"));
     anyhow::ensure!(!pin.accept.contains("3.1.0-dev.1"));
     anyhow::ensure!(
-        version_in_accept("2.0.0-dev.24")
+        version_in_accept("2.0.0-dev.25")
+            && !version_in_accept("2.0.0-dev.24")
             && !version_in_accept("2.0.0-dev.23")
             && !version_in_accept("2.0.0-dev.22")
             && !version_in_accept("2.0.0-dev.21")
