@@ -1295,17 +1295,53 @@ pub(crate) fn ensure_managed_locked_with_expectation(
     Ok(true)
 }
 
+fn archive_stopped_registration_locked(root: &Path, config: &Registration) -> Result<()> {
+    crate::runtime_fetch::with_stopped_runtime_locked(|canonical| {
+        anyhow::ensure!(marker(root)?.is_none(), "Runtime maintenance still owns the registration");
+        let state = manager::inspect(config)?;
+        anyhow::ensure!(
+            !state.registered && !state.loaded && !state.running,
+            "Runtime still has an OS startup registration"
+        );
+        let port = config.environment.get("RSRS_RPC_PORT")
+            .context("registered Runtime port missing")?.parse::<u16>()?;
+        crate::runtime_fetch::require_runtime_port_closed(([127, 0, 0, 1], port).into())?;
+        let path = control_path(root);
+        anyhow::ensure!(
+            path.parent().context("Runtime registration directory missing")?.canonicalize()?
+                == canonical.join("runtime/autostart") && fs::symlink_metadata(&path)?.is_file(),
+            "invalid Runtime registration path"
+        );
+        let archive = path.with_file_name(format!("registration.stopped-{}.json", uuid::Uuid::new_v4()));
+        respire_spawn::durable::publish_new_file(&path, &archive)
+            .with_context(|| format!("could not archive Runtime registration at {}", archive.display()))
+    })
+}
+
 fn start_explicit_locked(takeover: &respire_client_host::lock::LibraryLock) -> Result<()> {
     super::supervise::offline_keygen::reject_generic_recovery(&respire_client_host::paths::main_data_dir())?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
+    check_direct_access()?;
+    if crate::rpc::probe_runtime()?.is_none() {
+        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
+    }
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(takeover)?;
     let root = respire_client_host::paths::main_data_dir();
-    let Some(mut config) = read_registration(&root)? else {
-        return crate::rpc::ensure_daemon_locked();
+    let mut config = match read_registration(&root) {
+        Ok(Some(config)) => config,
+        Ok(None) => return crate::rpc::ensure_daemon_locked(),
+        Err(error) => {
+            archive_stopped_registration_locked(&root, &new_registration()?)
+                .with_context(|| format!("could not archive obsolete Runtime registration: {error:#}"))?;
+            return crate::rpc::ensure_daemon_locked();
+        }
     };
     owned(&config)?;
-    manager::inspect(&config)?;
-    check_direct_access()?;
+    let state = manager::inspect(&config)?;
+    if config.enabled && !state.registered && !state.loaded && !state.running {
+        archive_stopped_registration_locked(&root, &config)?;
+        return crate::rpc::ensure_daemon_locked();
+    }
     if !config.enabled {
         ensure_control_endpoint(&config)?;
         // Explicit start clears the stop flag without re-enabling sign-in startup.
@@ -1708,7 +1744,6 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             emit("runtime.restart", value)
         }
         RuntimeCommand::Start => {
-            crate::runtime_fetch::require_automatic_migration_safe()?;
             let ownership = crate::runtime_policy::takeover_lock()?;
             if !super::supervise::offline_keygen::start_explicit(&ownership)? {
                 start_explicit_locked(&ownership)?;
@@ -2690,9 +2725,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_start_and_restart_reject_before_takeover_and_recheck_after_lock() -> Result<()> {
+    fn legacy_start_and_restart_reject_unverified_endpoint_and_preserve_data() -> Result<()> {
         let _env = crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
-            "RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE",
+            "RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE", "RSRS_RPC_PORT",
         ])?;
         std::env::set_var("RSRS_CORE_TEST_MODE", "1");
         for command in [RuntimeCommand::Start, RuntimeCommand::Restart] {
@@ -2709,9 +2744,13 @@ mod tests {
             anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
             anyhow::ensure!(fs::read(root.join("session.json"))? == b"legacy session");
             anyhow::ensure!(fs::read(&endpoint)? == owner);
-            anyhow::ensure!(!root.join("runtime/takeover").exists(), "rejection created takeover state");
+            let takeover = root.join("runtime/takeover");
+            if matches!(command, RuntimeCommand::Start) {
+                anyhow::ensure!(takeover.join("lock.db").is_file());
+            } else {
+                anyhow::ensure!(!takeover.exists());
+            }
             anyhow::ensure!(fs::read_dir(&root)?.count() == 2);
-            anyhow::ensure!(fs::read_dir(root.join("runtime"))?.count() == 1);
         }
 
         let directory = tempfile::tempdir()?;
@@ -2735,6 +2774,28 @@ mod tests {
         anyhow::ensure!(root.join("runtime/takeover/lock.db").is_file());
         anyhow::ensure!(!control_path(&root).exists() && !marker_path(&root).exists());
         anyhow::ensure!(!crate::runtime_fetch::manifest_path().exists());
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
+        let config = new_registration()?;
+        let path = control_path(&root);
+        let legacy = b"obsolete registration";
+        fs::create_dir_all(path.parent().context("registration parent missing")?)?;
+        fs::write(&path, legacy)?;
+        anyhow::ensure!(archive_stopped_registration_locked(&root, &config).is_err());
+        anyhow::ensure!(fs::read(&path)? == legacy);
+        drop(listener);
+        let library = respire_client_host::lock::LibraryLock::acquire(&root, Duration::ZERO)?;
+        anyhow::ensure!(archive_stopped_registration_locked(&root, &config).is_err());
+        anyhow::ensure!(fs::read(&path)? == legacy);
+        drop(library);
+        #[cfg(target_os = "linux")]
+        let (_manager, _state) = manager::test_adapter::install(&config);
+        archive_stopped_registration_locked(&root, &config)?;
+        anyhow::ensure!(!path.exists() && !endpoint.exists());
+        let archived = fs::read_dir(path.parent().context("registration parent missing")?)?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        anyhow::ensure!(archived.len() == 1 && fs::read(archived[0].path())? == legacy);
         Ok(())
     }
 

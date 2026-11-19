@@ -1806,7 +1806,7 @@ fn verify_stopped_endpoint(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn require_runtime_port_closed(address: std::net::SocketAddr) -> Result<()> {
+pub(crate) fn require_runtime_port_closed(address: std::net::SocketAddr) -> Result<()> {
     match crate::net_rpc::check_connection_to(address) {
         Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
             Some(crate::runtime_error::RuntimeError::Unavailable)) => Ok(()),
@@ -1817,14 +1817,16 @@ fn require_runtime_port_closed(address: std::net::SocketAddr) -> Result<()> {
 
 /// Call under the installation takeover lock, after confirming no current listener.
 pub(crate) fn archive_stopped_endpoint_locked() -> Result<()> {
-    let path = crate::rpc::endpoint_path();
-    if !record_exists(&path)? {
+    if !record_exists(&crate::rpc::endpoint_path())? {
         return Ok(());
     }
+    with_stopped_runtime_locked(|_| Ok(()))
+}
+
+pub(crate) fn with_stopped_runtime_locked(action: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let path = crate::rpc::endpoint_path();
     let (root, profile) = respire_client_host::config::control_roots()?;
     let root = root.canonicalize()?;
-    let parent = path.parent().context("Runtime endpoint directory missing")?;
-    anyhow::ensure!(parent.canonicalize()? == root.join("runtime"), "Runtime endpoint directory is outside the installation");
     let _installation = respire_client_host::lock::LibraryLock::acquire(&root, Duration::ZERO)
         .context("the previous Runtime still holds the installation lock")?;
     let mut _profile = None;
@@ -1835,9 +1837,14 @@ pub(crate) fn archive_stopped_endpoint_locked() -> Result<()> {
                 .context("the previous Runtime still holds the profile lock")?);
         }
     }
-    anyhow::ensure!(fs::symlink_metadata(&path)?.is_file(), "invalid Runtime endpoint file");
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], crate::net_rpc::rpc_port()));
     require_runtime_port_closed(address)?;
+    if !record_exists(&path)? {
+        return action(&root);
+    }
+    let parent = path.parent().context("Runtime endpoint directory missing")?;
+    anyhow::ensure!(parent.canonicalize()? == root.join("runtime"), "Runtime endpoint directory is outside the installation");
+    anyhow::ensure!(fs::symlink_metadata(&path)?.is_file(), "invalid Runtime endpoint file");
     // Old records are untrusted hints about other loopback listeners. A recycled
     // PID alone proves nothing about either the listener or the locked library.
     let bytes = fs::read(&path)?;
@@ -1850,7 +1857,8 @@ pub(crate) fn archive_stopped_endpoint_locked() -> Result<()> {
     }
     let archive = path.with_file_name(format!("endpoint.stopped-{}.json", uuid::Uuid::new_v4()));
     respire_spawn::durable::publish_new_file(&path, &archive)
-        .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))
+        .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))?;
+    action(&root)
 }
 
 fn verify_install_host() -> Result<()> {
