@@ -226,6 +226,7 @@ class SeedReadinessTests(unittest.TestCase):
                     return {'items': ['actual-fixture-result']}
 
                 namespace = dict(database_upgrade=True, normal_reopen_checked=False,
+                    args=SimpleNamespace(client2_binary=None),
                     main=main, alternate=alternate, binary='cli', env={},
                     recovery_factors={str(main): {}, str(alternate): {}},
                     snapshot=lambda profile: snapshots[str(profile)], library_state=lambda value, factors: value,

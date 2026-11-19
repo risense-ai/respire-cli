@@ -512,6 +512,14 @@ public static class RespireGuiNative {
         $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $root 'online-install.stderr.txt') -Encoding utf8NoBOM
         $report.online_install.exit_code = $install.ExitCode
         if ($install.ExitCode -ne 0 -or ($installText | ConvertFrom-Json).ok -ne $true) { throw 'Released Client2 online installation failed' }
+        if (Test-Path -LiteralPath $installedCli) { throw 'Preparing Runtime unexpectedly installed the CLI' }
+        $prepareCli = Child-Start $exe @('--headless','prepare-cli') -CaptureOutput
+        $cliStdout = $prepareCli.StandardOutput.ReadToEndAsync(); $cliStderr = $prepareCli.StandardError.ReadToEndAsync()
+        if (-not $prepareCli.WaitForExit(960000)) { $prepareCli.Kill($true); throw 'Client2 online CLI preparation exceeded its bounded deadline' }
+        $cliText = $cliStdout.GetAwaiter().GetResult()
+        $cliText | Set-Content -LiteralPath (Join-Path $root 'online-prepare-cli.stdout.json') -Encoding utf8NoBOM
+        $cliStderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $root 'online-prepare-cli.stderr.txt') -Encoding utf8NoBOM
+        if ($prepareCli.ExitCode -ne 0 -or ($cliText | ConvertFrom-Json).ok -ne $true) { throw 'Released Client2 online CLI preparation failed' }
         $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
         if ($selection.version -cne $RuntimeVersion -or $selection.sha256 -cne $consumer.runtime_binary_sha256 -or
             (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256 -or
