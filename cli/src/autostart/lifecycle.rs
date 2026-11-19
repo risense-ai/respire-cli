@@ -1037,9 +1037,13 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let _ownership = crate::runtime_policy::takeover_lock()?;
+    let current = crate::rpc::probe_runtime()?;
+    if current.as_ref().is_some_and(|health| health.managed_id.is_none()) {
+        return Ok(None);
+    }
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
     owned(&config)?;
-    let was_running = crate::rpc::probe_runtime()?.is_some();
+    let was_running = current.is_some();
     let mut guard = Maintenance::begin(config, false)?;
     reset_attempts(guard.config.as_ref().context("registration missing")?)?;
     raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
