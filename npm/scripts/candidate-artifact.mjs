@@ -109,8 +109,14 @@ export async function consumeCandidate(source,destination,target) {
     version:candidate.source.version,producer:{run_id:candidate.source.run_id,run_attempt:candidate.source.run_attempt},assets:cliAssets}};
   const options={token:process.env.GH_TOKEN,candidate:true};
   await inspectPublishedRelease(spec.runtime,options);
-  const producer=await inspectRuntimeProducer(spec.runtime,target,options);
-  for(const name of publishedAssetNames('runtime',target))await downloadPublishedAsset(spec.runtime,spec.runtime.assets.find(a=>a.name===name),join(folder,'runtime'),options);
+  const checks = await Promise.allSettled([
+    inspectRuntimeProducer(spec.runtime, target, options),
+    ...publishedAssetNames('runtime', target).map(name => downloadPublishedAsset(spec.runtime,
+      spec.runtime.assets.find(asset => asset.name === name), join(folder, 'runtime'), options)),
+  ]);
+  const failures = checks.filter(result => result.status === 'rejected').map(result => result.reason);
+  if (failures.length) throw new AggregateError(failures, `Runtime verification failed for ${target}`);
+  const producer = checks[0].value;
   const consumed=await consumePublishedTarget(spec,target,folder,destination,candidateHash(candidate),options);
   const receipt={schema:1,kind:'candidate-assets-verification',candidate,target,manifest_sha256:candidateHash(candidate),
     assets_verified:true,payloads_verified:true,cli_assets:cliAssets,runtime_producer:producer,payload_identity:consumed.identity};
