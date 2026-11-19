@@ -2769,9 +2769,11 @@ mod model_menu_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
+        // Wide characters occupy two cells in TestBackend, including a blank continuation.
+        let compact = screen.replace(' ', "");
         assert!(
-            screen.contains("Validate and load")
-                || screen.contains("\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d}"),
+            compact.contains("Validateandload")
+                || compact.contains("\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d}"),
             "{screen}"
         );
         Ok(())
