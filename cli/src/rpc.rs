@@ -944,6 +944,9 @@ fn ensure_daemon_locked_inner(
     // Resolve before stopping the resident owner: a missing or damaged release
     // must fail without replacing it with a CLI shim.
     let executable = resolve_runtime_executable()?;
+    if current.is_none() {
+        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
+    }
     if let Some(health) = current {
         if health.inference_stalled() {
             anyhow::ensure!(

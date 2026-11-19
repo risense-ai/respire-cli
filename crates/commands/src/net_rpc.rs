@@ -132,7 +132,10 @@ fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
 }
 
 fn check_connection() -> Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], rpc_port()));
+    check_connection_to(SocketAddr::from(([127, 0, 0, 1], rpc_port())))
+}
+
+pub fn check_connection_to(addr: SocketAddr) -> Result<()> {
     // Windows may take slightly over two seconds to report loopback refusal.
     // A shorter deadline misclassifies a stopped service as a network timeout.
     match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {

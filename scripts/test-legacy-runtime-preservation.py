@@ -131,6 +131,9 @@ def main():
             stopped.mkdir()
             session = stopped / "session.json"
             session.write_bytes(b"legacy session fixture")
+            stale = stopped / "runtime" / "endpoint.json"
+            stale.parent.mkdir()
+            stale.write_bytes(endpoint_before)
             stopped_environment = dict(environment, RSRS_DATA_DIR=str(stopped),
                                        RSRS_BIN_DIR=str(stopped / "bin"))
             result = subprocess.run([str(candidate), "--json", *command], env=stopped_environment,
@@ -139,8 +142,11 @@ def main():
             if (result.returncode == 0 or "downloads are disabled" not in output
                     or "legacy_runtime_migration_required" in output):
                 raise AssertionError(f"{command}: stopped account data blocked download admission: {output}")
-            if session.read_bytes() != b"legacy session fixture" or list(stopped.iterdir()) != [session]:
-                raise AssertionError(f"{command}: disabled download changed the old account")
+            if (session.read_bytes() != b"legacy session fixture"
+                    or stale.read_bytes() != endpoint_before
+                    or set(stopped.iterdir()) != {session, stale.parent}
+                    or list(stale.parent.iterdir()) != [stale]):
+                raise AssertionError(f"{command}: disabled download changed the old account or endpoint")
             report["stopped_download_admission"].append({"command": list(command),
                                                        "download_boundary_reached": True,
                                                        "session_preserved": True,

@@ -1777,6 +1777,9 @@ fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mi
     // Keep old images and account data; replace the stable CLI only after an authenticated drain.
     let _ownership = crate::runtime_policy::takeover_lock()?;
     let previous = crate::rpc::probe_runtime()?;
+    if previous.is_none() {
+        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
+    }
     let cli_binary = crate::mcp::stable_bin_path();
     let refresh_cli = crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &cli_binary)
         .map_err(anyhow::Error::msg)?;

@@ -394,7 +394,7 @@ pub struct LegacyRuntimeMigrationRequired;
 
 impl std::fmt::Display for LegacyRuntimeMigrationRequired {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("legacy_runtime_migration_required: automatic Runtime replacement is blocked; the existing CLI, Runtime selection and data were preserved; keep using the existing client until a compatible host migration is available")
+        formatter.write_str("legacy_runtime_migration_required: Runtime ownership or installation state could not be verified; stop any previous Runtime and inspect the reported state before upgrading")
     }
 }
 
@@ -1758,22 +1758,84 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         // Validate configured paths without opening or migrating the old database.
         respire_client_host::config::control_roots()
             .context(LegacyRuntimeMigrationRequired)?;
-        let records = [
-            "runtime/endpoint.json",
-            "runtime/autostart/registration.json",
-        ].into_iter().map(|relative| installation_root().join(relative));
-        // Unbound process and startup records still require an explicit handoff.
-        for record in records {
-            match fs::symlink_metadata(record) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
-                Ok(_) => anyhow::bail!(LegacyRuntimeMigrationRequired),
-            }
-        }
+        let registration = installation_root().join("runtime/autostart/registration.json");
+        anyhow::ensure!(
+            !record_exists(&registration).context(LegacyRuntimeMigrationRequired)?,
+            LegacyRuntimeMigrationRequired
+        );
+        verify_stopped_endpoint(&crate::rpc::endpoint_path())
+            .context(LegacyRuntimeMigrationRequired)?;
         None
     };
     verify_install_host()?;
     Ok(selected)
+}
+
+fn record_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn verify_stopped_endpoint(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(metadata.is_file(), "invalid Runtime endpoint file");
+    #[derive(Deserialize)]
+    struct Endpoint {
+        v: u32,
+        pid: u32,
+        url: String,
+    }
+    let endpoint: Endpoint = serde_json::from_slice(&fs::read(path)?)
+        .context("invalid Runtime endpoint record")?;
+    anyhow::ensure!(endpoint.v == u32::from(PROTOCOL_V) && endpoint.pid > 0,
+        "invalid Runtime endpoint identity");
+    let address: std::net::SocketAddr = endpoint.url.strip_prefix("http://")
+        .context("invalid Runtime endpoint URL")?.parse()?;
+    anyhow::ensure!(address.ip().is_loopback() && address.port() > 0,
+        "Runtime endpoint must specify a local port");
+    anyhow::ensure!(crate::autostart::process_birth(endpoint.pid)?.is_none(),
+        "recorded Runtime process {} is still running; stop it before upgrading", endpoint.pid);
+    match crate::net_rpc::check_connection_to(address) {
+        Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+            Some(crate::runtime_error::RuntimeError::Unavailable)) => Ok(true),
+        Err(error) => Err(error),
+        Ok(()) => anyhow::bail!("Runtime port {} is still occupied; stop it before upgrading", address.port()),
+    }
+}
+
+/// Call under the installation takeover lock, after confirming no current listener.
+pub(crate) fn archive_stopped_endpoint_locked() -> Result<()> {
+    let path = crate::rpc::endpoint_path();
+    if !record_exists(&path)? {
+        return Ok(());
+    }
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let parent = path.parent().context("Runtime endpoint directory missing")?;
+    anyhow::ensure!(parent.canonicalize()? == root.join("runtime"), "Runtime endpoint directory is outside the installation");
+    let _installation = respire_client_host::lock::LibraryLock::acquire(&root, Duration::ZERO)
+        .context("the previous Runtime still holds the installation lock")?;
+    let mut _profile = None;
+    if profile.try_exists()? {
+        let profile = profile.canonicalize()?;
+        if profile != root {
+            _profile = Some(respire_client_host::lock::LibraryLock::acquire(&profile, Duration::ZERO)
+                .context("the previous Runtime still holds the profile lock")?);
+        }
+    }
+    if verify_stopped_endpoint(&path).context(LegacyRuntimeMigrationRequired)? {
+        let archive = path.with_file_name(format!("endpoint.stopped-{}.json", uuid::Uuid::new_v4()));
+        respire_spawn::durable::publish_new_file(&path, &archive)
+            .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))?;
+    }
+    Ok(())
 }
 
 fn verify_install_host() -> Result<()> {
