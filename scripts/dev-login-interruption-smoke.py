@@ -51,6 +51,7 @@ FAILURE_CODES = FAILURE_CODES | frozenset({
     "key_continuation_unlock_failed", "key_continuation_memory_failed",
     "key_continuation_credential_not_owned", "key_continuation_query_failed",
     "server_transfer_fault_not_observed",
+    "fixture_secret_service_daemon_exited", "fixture_secret_service_owner_mismatch",
 })
 
 
@@ -70,6 +71,14 @@ def fixture_report(args, report):
     finally:
         # Outermost write also runs when setup or an owned cleanup check raises.
         (args.root / "interruption-coverage.json").write_text(json.dumps(report, indent=2) + "\n")
+
+
+def verify_credential_provider(keys, report):
+    # A crashed provider can be replaced by D-Bus activation. Never
+    # enumerate or delete from a collection whose owner is unverified.
+    provider = report["credential_provider"] = {"exit_code": keys.daemon.poll(), "owner_verified": False}
+    keys.verify_owner()
+    provider["owner_verified"] = True
 
 
 def safe_cli_diagnostic(stdout, stderr):
@@ -1072,6 +1081,7 @@ def main():
                             and confirmed["summary"]["outcome"] == "rolled_back",
                             "rollback_receipt_not_retained")
                     # A fresh migration is safe only after that original terminal rollback.
+                    report["stage"] = "before_publish_retry_migration"
                     cli(*migration)
                     require(state["logins"] == effect_counts[0] + 1, "explicit_retry_login_count_changed")
                 else:
@@ -1340,7 +1350,8 @@ def main():
                 and str(error) in FAILURE_CODES else "unclassified_failure")
             raise
         finally:
-            report["failure_stage"] = report["stage"]
+            if not report["passed"]:
+                report["failure_stage"] = report["stage"]
             report["stage"] = "owned_child_cleanup"
             if child is not None:
                 child_running = child.poll() is None
@@ -1424,6 +1435,7 @@ def main():
             report["runtime_cleanup"] = {"passed": stopped.returncode in (0, 2)}
             report["stage"] = "credential_cleanup"
             if keys:
+                verify_credential_provider(keys, report)
                 # Discover interrupted aliases only from our synthetic files, including
                 # failures before a barrier. Never claim arbitrary credential-store items.
                 for path in args.root.rglob("*.json"):
