@@ -12,12 +12,12 @@ on:
         required: true
         type: string
       client2_release:
-        description: Final public Client2 tag; independent of CLI and Runtime versions
-        required: true
+        description: Optional public Client2 tag for GUI diagnostics
+        required: false
         type: string
       client2_commit:
-        description: Exact source commit of the final public Client2 release
-        required: true
+        description: Exact Client2 commit when requesting GUI diagnostics
+        required: false
         type: string
 
 permissions:
@@ -38,7 +38,6 @@ jobs:
           CLIENT2_COMMIT: ${{ inputs.client2_commit }}
         run: |
           set -euo pipefail
-          test -n "$CLIENT2_RELEASE" && test -n "$CLIENT2_COMMIT"
           gh workflow run release.yml --repo "$REPOSITORY" --ref "$GITHUB_REF_NAME" \
             -f ref="$GITHUB_SHA" -f publish=false -f validation_profile=full \
             -f artifact_source=published-assets \
