@@ -199,7 +199,7 @@ class UpgradeProfileTest(unittest.TestCase):
                             live_owner_restart_rejected=False, safe_restart_checked=False,
                             supervised_worker_checked=False, global_engine_preserved=False,
                             coverage_scope="historical-database", host_checks_delegated_to="resident-concurrency",
-                            normal_reopen_checked=True, runtime_artifact_reused=True,
+                              normal_reopen_checked=True, runtime_artifact_reused=True, stale_endpoint_archived=True,
                             post_upgrade_sync_checked=True,
                             post_upgrade_sync={field: True for field in ('original_urk_preserved',
                                 'existing_keys_registered','source_push','independent_pull_decrypted',
@@ -434,7 +434,8 @@ class UpgradeProfileTest(unittest.TestCase):
         flags = ["passed", "real_model",
                  "distinct_vault_keys", "original_records_preserved", "original_sync_work_preserved",
                  "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked",
-                 "normal_reopen_checked", "standalone_runtime_evidence", "runtime_artifact_reused", "post_upgrade_sync_checked"]
+                 "normal_reopen_checked", "standalone_runtime_evidence", "runtime_artifact_reused", "stale_endpoint_archived",
+                 "post_upgrade_sync_checked"]
         self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()
                                                     if key not in flags}], True)
         for name in flags:

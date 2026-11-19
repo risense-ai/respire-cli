@@ -259,6 +259,7 @@ for binary in BINARIES:
     if args.runtime_binary: env['LC_ALL']='C'
     runtime_installed_after_legacy_data = False
     runtime_artifact_reused = False
+    stale_endpoint_archived = False
     keys=None
     custody_slots={}
     custody_receipts={}
@@ -545,9 +546,16 @@ for binary in BINARIES:
             # Historical writers have exited. Reuse the independently verified
             # artifact; installation/download behavior is a per-target host check.
             legacy_data={str(profile):snapshot(profile) for profile in [main,alternate]}
+            endpoint = main/'runtime/endpoint.json'
+            endpoint.parent.mkdir(exist_ok=True)
+            # The recorded PID is live but belongs to this test driver, while the old port is free.
+            stale_endpoint = json.dumps({'v':1,'pid':os.getpid(),'url':f'http://127.0.0.1:{port}'}).encode()
+            with endpoint.open('xb') as stream:
+                stream.write(stale_endpoint)
             installed = install_published_runtime(binary, env)
             assert installed is not None, 'database upgrade requires the verified managed or published Runtime artifact'
             args.runtime_binary = installed
+            assert endpoint.read_bytes()==stale_endpoint, 'Runtime preparation changed the old endpoint'
             assert {str(profile):snapshot(profile) for profile in [main,alternate]} == legacy_data, 'Runtime installation changed old account data'
             runtime_installed_after_legacy_data = True
             runtime_artifact_reused = True
@@ -561,6 +569,11 @@ for binary in BINARIES:
                 assert after[:2]==before[:2], 'fixture custody changed historical database or indexes'
                 assert library_state(after,recovery_factors[str(profile)])==original_state[str(profile)], 'fixture custody changed original records, sync work or URK'
         if args.seed_binary and args.runtime_binary:
+            run('runtime','start')
+            archived = list(endpoint.parent.glob('endpoint.stopped-*.json'))
+            assert len(archived)==1 and archived[0].read_bytes()==stale_endpoint, 'startup did not archive the old endpoint'
+            assert endpoint.read_bytes()!=stale_endpoint, 'new Runtime still uses the old endpoint record'
+            stale_endpoint_archived = True
             run('--direct','model','engine','cpu')
             stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
             if stopped.returncode:
@@ -1035,6 +1048,7 @@ for binary in BINARIES:
             'coverage_scope':'historical-database' if database_upgrade else 'current-host',
             'host_checks_delegated_to':'resident-concurrency' if database_upgrade else None,
             'normal_reopen_checked':normal_reopen_checked,'runtime_artifact_reused':runtime_artifact_reused,
+            'stale_endpoint_archived':stale_endpoint_archived,
             'original_records_preserved':True,'original_sync_work_preserved':True,'urk_preserved':True,
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
             'encrypted_tombstones_preserved':bool(args.seed_binary),

@@ -154,7 +154,7 @@ def verify_upgrade(source):
     assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
     if upgrade_contract=='standalone-v1':
         assert all(check.get(name) is True for name in [
-            'standalone_runtime_evidence','runtime_artifact_reused','normal_reopen_checked',
+            'standalone_runtime_evidence','runtime_artifact_reused','normal_reopen_checked','stale_endpoint_archived',
         ]),'required standalone upgrade checks missing or failed'
         assert all(check.get(name) is False for name in [
             'old_rpc_checked','forced_restart_checked','live_owner_restart_rejected','safe_restart_checked',
@@ -192,6 +192,7 @@ def verify_upgrade(source):
             'database_dev_checkpoint':check.get('database_dev_checkpoint'),
             'coverage_scope':check.get('coverage_scope'),
             'normal_reopen_checked':check.get('normal_reopen_checked') is True,
+            'stale_endpoint_archived':check.get('stale_endpoint_archived') is True,
             'host_checks_delegated_to':check.get('host_checks_delegated_to'),
             'post_upgrade_sync_checked':check.get('post_upgrade_sync_checked') is True,
             'report':str(result/'real-account-return-verification.json')}
