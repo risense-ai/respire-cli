@@ -292,12 +292,16 @@ export async function consumePublishedTarget(spec, target, source, destination, 
     RSRS_RUNTIME_TRIPLE:target}};
 }
 async function readGitHub(path, token, fetcher) {
-  const response = await fetcher(`https://api.github.com/repos/${path}`, {headers: {
-    Accept: 'application/vnd.github+json', 'User-Agent': 'respire-published-full',
-    ...(token ? {Authorization: `Bearer ${token}`} : {}),
-  }, signal: AbortSignal.timeout(30000)});
-  requireValue(response.status === 200, `GitHub metadata HTTP ${response.status}`);
-  return response.json();
+  try {
+    const response = await fetcher(`https://api.github.com/repos/${path}`, {headers: {
+      Accept: 'application/vnd.github+json', 'User-Agent': 'respire-published-full',
+      ...(token ? {Authorization: `Bearer ${token}`} : {}),
+    }, signal: AbortSignal.timeout(30000)});
+    requireValue(response.status === 200, `GitHub metadata HTTP ${response.status}`);
+    return await response.json();
+  } catch (cause) {
+    throw new Error(`Read GitHub metadata ${path}: ${cause.message}`, {cause});
+  }
 }
 export async function inspectPublishedRelease(part, {token, fetcher = fetch} = {}) {
   const read = path => readGitHub(`${part.repository}/${path}`, token, fetcher);
@@ -359,8 +363,10 @@ export async function inspectRuntimeProducer(part, target, {token, fetcher = fet
       if (response[key].length < 100) return result;
     }
   };
-  const jobs = await list(`runs/${producer.run_id}/attempts/${producer.run_attempt}/jobs`, 'jobs');
-  const artifacts = await list(`runs/${producer.run_id}/artifacts`, 'artifacts');
+  const [jobs, artifacts] = await Promise.all([
+    list(`runs/${producer.run_id}/attempts/${producer.run_attempt}/jobs`, 'jobs'),
+    list(`runs/${producer.run_id}/artifacts`, 'artifacts'),
+  ]);
   const evidence = [];
   // Published Runtime runs keep their original job names. The native report
   // keeps the same source, run, attempt and byte checks across both layouts.
@@ -434,24 +440,24 @@ with zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())) as z:
 }
 export async function downloadPublishedAsset(part, asset, directory, {token, fetcher = fetch} = {}) {
   const path = join(directory, asset.name);
-  const response = await fetcher(`https://api.github.com/repos/${part.repository}/releases/assets/${asset.id}`, {
-    headers: {Accept: 'application/octet-stream', 'User-Agent': 'respire-published-full',
-      ...(token ? {Authorization: `Bearer ${token}`} : {})}, signal: AbortSignal.timeout(600000)});
-  requireValue(response.status === 200 && response.body, `Public asset download HTTP ${response.status}`);
   const hash = createHash('sha256'); let size = 0, created = false;
   const counter = new Transform({transform(chunk, _encoding, callback) {
     size += chunk.length;
     if (size > asset.size) return callback(new Error('Public asset exceeds approved size'));
     hash.update(chunk); callback(null, chunk);
   }});
-  const output = createWriteStream(path, {flags: 'wx', mode: 0o600});
-  output.once('open', () => { created = true; });
   try {
+    const response = await fetcher(`https://api.github.com/repos/${part.repository}/releases/assets/${asset.id}`, {
+      headers: {Accept: 'application/octet-stream', 'User-Agent': 'respire-published-full',
+        ...(token ? {Authorization: `Bearer ${token}`} : {})}, signal: AbortSignal.timeout(600000)});
+    requireValue(response.status === 200 && response.body, `Public asset download HTTP ${response.status}`);
+    const output = createWriteStream(path, {flags: 'wx', mode: 0o600});
+    output.once('open', () => { created = true; });
     await pipeline(Readable.fromWeb(response.body), counter, output);
     requireValue(size === asset.size && hash.digest('hex') === asset.sha256, 'Downloaded public asset hash/size mismatch');
   } catch (error) {
     if (created) rmSync(path);
-    throw error;
+    throw new Error(`Download ${part.repository} asset ${asset.name} (ID ${asset.id}): ${error.message}`, {cause: error});
   }
 }
 export async function verifyPublishedTarget(spec, target, destination, manifestHash, options = {}) {
