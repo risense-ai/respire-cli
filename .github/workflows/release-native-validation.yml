@@ -407,6 +407,14 @@ jobs:
           NODE
           bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" "$NATIVE_RUNTIME_SHA256" "$NATIVE_RUNTIME_VERSION"
           "$exe" --runtime-internal --stop --json
+      - name: Check out the trusted Client2 seal verifier
+        if: inputs.validation_profile == 'full' && matrix.target == 'x86_64-pc-windows-msvc' && fromJSON(inputs.candidate_assets || '{}').client2.sealed
+        uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-client2
+          ref: 343a7dca5c488f6c3186363fdb81dbfd76dc1e41
+          path: .client2-seal-verifier
+          persist-credentials: false
       - name: Verify selected Client2 installation and the existing GUI subset
         if: inputs.validation_profile == 'full' && matrix.target == 'x86_64-pc-windows-msvc'
         timeout-minutes: 35

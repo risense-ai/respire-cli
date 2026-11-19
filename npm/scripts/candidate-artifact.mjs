@@ -29,6 +29,11 @@ export function validateCandidate(candidate, env=process.env) {
   }else assert.equal(candidate.source.sha,env.GITHUB_SHA,'Candidates must use the exact main harness source');
   assert.match(candidate.client2.release,/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/);
   assert.match(candidate.client2.source_sha,/^[a-f0-9]{40}$/);
+  if(Object.hasOwn(candidate.client2,'sealed')){
+    const {run_id,run_attempt,artifact_id,artifact_zip_digest}=candidate.client2.sealed;
+    for(const value of [run_id,run_attempt,artifact_id])assert.ok(Number.isSafeInteger(value)&&value>0);
+    assert.match(artifact_zip_digest,/^sha256:[a-f0-9]{64}$/);
+  }
   const runtime=candidate.runtime;
   assert.equal(runtime.repository,'risense-ai/respire-runtime');
   assert.equal(runtime.version,JSON.parse(readFileSync('runtime-pin.json')).required);
@@ -38,16 +43,40 @@ export function validateCandidate(candidate, env=process.env) {
   for(const a of runtime.assets){assert.match(a.sha256,/^[a-f0-9]{64}$/);assert.ok(a.id>0&&a.size>0);}
   return candidate;
 }
+function resolveSealedClient2(selector, source) {
+  assert.match(selector,/^[1-9]\d*\/[1-9]\d*$/);
+  assert.match(source,/^[a-f0-9]{40}$/);
+  const [run_id,run_attempt]=selector.split('/').map(Number);
+  const repository='risense-ai/respire-client2',prefix=`repos/${repository}/actions`;
+  const run=api(`${prefix}/runs/${run_id}/attempts/${run_attempt}`);
+  assert.ok(run.id===run_id && run.run_attempt===run_attempt && run.head_sha===source
+    && run.head_branch==='main' && run.event==='workflow_dispatch' && run.path==='.github/workflows/desktop.yml'
+    && run.repository?.full_name===repository && run.head_repository?.full_name===repository
+    && run.status==='completed' && run.conclusion==='success', 'Client2 producer is not the successful trusted main attempt');
+  const jobs=pages(`${prefix}/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100`).flatMap(page=>page.jobs);
+  const seals=jobs.filter(job=>job.name==='package-checks'&&job.status==='completed'&&job.conclusion==='success');
+  assert.equal(seals.length,1,'Expected one successful Client2 seal job');
+  const artifacts=pages(`${prefix}/runs/${run_id}/artifacts?per_page=100`).flatMap(page=>page.artifacts)
+    .filter(artifact=>artifact.name===`desktop-package-checks-${run_attempt}`);
+  assert.equal(artifacts.length,1,'Expected one sealed Client2 artifact');
+  const artifact=artifacts[0], seal=seals[0];
+  assert.ok(artifact.expired===false && artifact.workflow_run?.id===run_id && artifact.workflow_run?.head_sha===source
+    && Date.parse(seal.started_at)<=Date.parse(artifact.created_at) && Date.parse(artifact.updated_at)<=Date.parse(seal.completed_at),
+    'Sealed Client2 artifact is expired or belongs to a different attempt');
+  return {run_id,run_attempt,artifact_id:artifact.id,artifact_zip_digest:artifact.digest};
+}
 export async function resolveCandidate() {
   assert.equal(process.env.GITHUB_REF,'refs/heads/main');
   assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');
   const version=JSON.parse(readFileSync('runtime-pin.json')).required;
   const repository='risense-ai/respire-runtime', prefix=`repos/${repository}`;
   const release=api(`${prefix}/releases/tags/v${version}`),sha=api(`${prefix}/commits/v${version}`).sha;
-  // Never guess a producer from an unbound latest run or from a release description.
+  // A prepublication build can succeed for the same source; bind the public release to its publishing run.
   const runs=pages(`${prefix}/actions/workflows/release.yml/runs?head_sha=${sha}&per_page=100`).flatMap(p=>p.workflow_runs)
-    .filter(r=>r.head_sha===sha&&r.status==='completed'&&r.conclusion==='success'&&r.path==='.github/workflows/release.yml');
-  assert.equal(runs.length,1,'Require one successful exact-source pinned Runtime producer');
+    .filter(r=>r.head_sha===sha&&r.status==='completed'&&r.conclusion==='success'&&r.path==='.github/workflows/release.yml')
+    .filter(r=>pages(`${prefix}/actions/runs/${r.id}/attempts/${r.run_attempt}/jobs?per_page=100`)
+      .flatMap(page=>page.jobs).some(job=>job.name==='publish'&&job.conclusion==='success'));
+  assert.equal(runs.length,1,'Require one successful exact-source pinned Runtime publishing run');
   const assets=pages(`${prefix}/releases/${release.id}/assets?per_page=100`);
   const runtime={repository,release_id:release.id,version,source_sha:sha,producer:{run_id:runs[0].id,run_attempt:runs[0].run_attempt},
     assets:targets().flatMap(t=>publishedAssetNames('runtime',t)).map(name=>{
@@ -56,7 +85,9 @@ export async function resolveCandidate() {
       return {id:a.id,name,size:a.size,sha256:a.digest.slice(7)};
     })};
   await inspectPublishedRelease(runtime,{token:process.env.GH_TOKEN});
-  const candidate=validateCandidate({schema:1,kind:'unpublished-cli-candidate',client2:{release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT},source:{repository:'risense-ai/respire-cli',
+  const client2={release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT};
+  if(process.env.CLIENT2_SEALED_RUN)client2.sealed=resolveSealedClient2(process.env.CLIENT2_SEALED_RUN,client2.source_sha);
+  const candidate=validateCandidate({schema:1,kind:'unpublished-cli-candidate',client2,source:{repository:'risense-ai/respire-cli',
     sha:process.env.CLI_SHA,version:process.env.CLI_VERSION,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT)},runtime});
   appendFileSync(process.env.GITHUB_OUTPUT,`candidate=${JSON.stringify(candidate)}\n`);
 }

@@ -2,7 +2,7 @@ import {installPinnedRuntime} from '../../scripts/ci-install-pinned-runtime.mjs'
 import {regressionContract} from './release-regression-contract.mjs';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validatePublishedPackage} from './extract-artifact.mjs';
+import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validateFullGUI, validatePublishedPackage} from './extract-artifact.mjs';
 import assert from 'node:assert/strict';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
@@ -789,6 +789,21 @@ test('published full joins every existing report and live image identity; copied
     assert.equal(complete.actual_processes.length,f.targets.length+Object.values(f.upgradeReports).reduce((count,r)=>count+r.sources.filter(row=>row.passed).length,0)+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
     assert.equal(complete.historical_upgrades.length,f.targets.length);
     const guiFile=path.join(root,'client2-published-online-x86_64-pc-windows-msvc','report.json'),guiBytes=readFileSync(guiFile);
+    const selected={release:'v2.0.0-dev.6',source_sha:'f'.repeat(40),
+      sealed:{run_id:102,run_attempt:2,artifact_id:103,artifact_zip_digest:'sha256:'+'b'.repeat(64)}};
+    const sealedGui=JSON.parse(guiBytes);
+    Object.assign(sealedGui,{official_exe_verified:false,source_candidate_verified:true,candidate_inputs:sealedGui.published_inputs,
+      sealed_client2:{...selected.sealed,repository:'risense-ai/respire-client2',source_sha:selected.source_sha,
+        version:selected.release.slice(1),manifest_sha256:'c'.repeat(64),exe_sha256:sealedGui.exe_sha256,six_package_receipts_verified:true}});
+    const checkSeal=(report, candidate=true)=>validateFullGUI(report,f.spec,f.manifestHash,{candidate,client2:selected});
+    assert.equal(checkSeal(sealedGui),sealedGui);
+    assert.throws(()=>checkSeal(sealedGui,false),/seal differs/);
+    for(const mutate of [g=>g.sealed_client2.run_attempt++,g=>g.sealed_client2.artifact_id++,
+      g=>g.sealed_client2.artifact_zip_digest='sha256:'+'0'.repeat(64),g=>g.sealed_client2.six_package_receipts_verified=false,
+      g=>g.sealed_client2.exe_sha256='0'.repeat(64),g=>g.restart_native_gui.offline.automatic_key_handoff=false,
+      g=>g.cli_processes.pop(),g=>g.cleanup_exit_confirmed=false]){
+      const altered=copy(sealedGui);mutate(altered);assert.throws(()=>checkSeal(altered));
+    }
     for(const mutate of [g=>delete g.cli_processes,g=>g.cli_processes.pop(),g=>g.cli_processes[0].sha256='0'.repeat(64),
       g=>g.cli_processes[0].parent_verified=false,g=>g.cli_processes[0].lifetime_verified=false,g=>g.source_sha='0'.repeat(40),
       g=>g.release='v2.0.0-dev.5',g=>g.restart_native_gui.offline.automatic_key_handoff=false,g=>g.cleanup_error='observer failed']){
