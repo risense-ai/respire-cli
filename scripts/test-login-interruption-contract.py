@@ -813,5 +813,48 @@ class ReportContract(unittest.TestCase):
         self.assertNotIn('diagnostic[:1500]', SOURCE)
 
 
+@unittest.skipUnless(os.environ.get('RSRS_PROVIDER_EXIT_CAPTURE') == '1',
+                     'requires a dedicated native Secret Service diagnostic')
+class ProviderExitCapture(unittest.TestCase):
+    def test_exit_remains_failed_and_does_not_reactivate_service(self):
+        from runpy import run_path
+        from types import SimpleNamespace
+        from jeepney import DBusAddress, new_method_call
+
+        scripts = Path(__file__).parent
+        fixture = run_path(str(scripts / 'dev-login-interruption-smoke.py'))
+        root = Path(os.environ['RUNNER_TEMP']).resolve() / 'provider-exit-capture'
+        root.mkdir(mode=0o700)
+        key_module = run_path(str(scripts / 'dev-migration-secret-service.py'))
+        keys = key_module['create'](root / 'keyring')
+        report = {'passed': False}
+        try:
+            fixture['verify_credential_provider'](keys, report)
+            self.assertEqual(report['credential_provider'], {'exit_code': None, 'owner_verified': True})
+            keys.daemon.kill()
+            self.assertEqual(keys.daemon.wait(timeout=5), -signal.SIGKILL)
+            with self.assertRaisesRegex(RuntimeError, '^fixture_secret_service_daemon_exited$'):
+                with fixture['fixture_report'](SimpleNamespace(root=root), report):
+                    report.update(stage='credential_cleanup', failure_stage='legacy_recovery',
+                                  operation_failure_code='cli_expectation_failed')
+                    fixture['verify_credential_provider'](keys, report)
+            saved = json.loads((root / 'interruption-coverage.json').read_text())
+            self.assertFalse(saved['passed'])
+            self.assertEqual(saved['failure_stage'], 'legacy_recovery')
+            self.assertEqual(saved['operation_failure_code'], 'cli_expectation_failed')
+            self.assertEqual(saved['failure_code'], 'fixture_secret_service_daemon_exited')
+            self.assertEqual(saved['credential_provider'],
+                             {'exit_code': -signal.SIGKILL, 'owner_verified': False})
+            address = DBusAddress('/org/freedesktop/DBus', 'org.freedesktop.DBus', 'org.freedesktop.DBus')
+            owner = keys.connection.send_and_get_reply(new_method_call(
+                address, 'NameHasOwner', 's', ('org.freedesktop.secrets',)))
+            self.assertEqual(owner.body, (False,))
+        finally:
+            if keys.daemon.poll() is None:
+                keys.daemon.kill()
+                keys.daemon.wait(timeout=5)
+            keys.connection.close()
+
+
 if __name__ == '__main__':
     unittest.main()

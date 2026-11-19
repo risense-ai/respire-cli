@@ -9,6 +9,10 @@ on:
         description: Replay the supplementary and standalone interruption checks on both Linux musl architectures
         type: boolean
         default: false
+      provider_capture_only:
+        description: With musl_interruption, verify capture of an owned Secret Service exit
+        type: boolean
+        default: false
       database_sync_only:
         description: Only test legacy ciphertext migration, real sync and independent current-device decryption
         type: boolean
@@ -109,9 +113,11 @@ jobs:
           HISTORY_SOURCES: ${{ inputs.history_sources }}
           BUSINESS_ONLY: ${{ inputs.business_only }}
           MUSL_INTERRUPTION: ${{ inputs.musl_interruption }}
+          PROVIDER_CAPTURE_ONLY: ${{ inputs.provider_capture_only }}
           EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
         run: |
           node -e 'if(process.env.MUSL_INTERRUPTION==="true"&&[process.env.BUSINESS_ONLY,process.env.API_ONLY,process.env.LOCAL_API_ONLY,process.env.DATABASE_SYNC_ONLY].includes("true")) throw new Error("Choose one diagnostic scope")'
+          node -e 'if(process.env.PROVIDER_CAPTURE_ONLY==="true"&&process.env.MUSL_INTERRUPTION!=="true") throw new Error("provider_capture_only requires musl_interruption")'
           node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.DATABASE_SYNC_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.DATABASE_SYNC_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
@@ -232,7 +238,7 @@ jobs:
           bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
       - name: Install PowerShell
-        if: ${{ !inputs.local_api_only && !inputs.database_sync_only && runner.os != 'Windows' }}
+        if: ${{ !inputs.provider_capture_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os != 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -249,7 +255,7 @@ jobs:
             brew install powershell
           fi
       - name: Sweep the exact CI binary
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.database_sync_only && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.provider_capture_only && !inputs.local_api_only && !inputs.database_sync_only && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
         env:
           RSRS_LANG: en
@@ -295,7 +301,7 @@ jobs:
           python3 scripts/test-login-interruption-contract.py
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/om-sweep/models/bge-m3"
       - name: Verify all supplementary CLI contracts
-        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.provider_capture_only && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -327,7 +333,7 @@ jobs:
           python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
           test "$fixture_status" -eq 0
       - name: Replay standalone native musl login interruption
-        if: ${{ !cancelled() && inputs.musl_interruption && steps.standalone_runtime.outcome == 'success' && steps.native_credentials.outcome == 'success' }}
+        if: ${{ !cancelled() && inputs.musl_interruption && !inputs.provider_capture_only && steps.standalone_runtime.outcome == 'success' && steps.native_credentials.outcome == 'success' }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -337,6 +343,12 @@ jobs:
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 -B scripts/test-login-interruption-contract.py
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/dev-supplements/outbox/models"
+      - name: Verify failure capture when the owned Secret Service exits
+        if: ${{ inputs.provider_capture_only && steps.native_credentials.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private RSRS_PROVIDER_EXIT_CAPTURE=1 python3 -B scripts/test-login-interruption-contract.py ProviderExitCapture
       - name: Verify native encrypted profile migration
         if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.database_sync_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
@@ -429,6 +441,7 @@ jobs:
             ${{ runner.temp }}/standalone-diagnostic-identity.json
             ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
             ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+            ${{ runner.temp }}/provider-exit-capture/interruption-coverage.json
             ${{ runner.temp }}/dev-supplements/suite-results.json
             ${{ runner.temp }}/dev-supplements/combined-coverage.json
             ${{ runner.temp }}/dev-supplements/outbox/outbox-coverage.json

@@ -73,6 +73,14 @@ def fixture_report(args, report):
         (args.root / "interruption-coverage.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
+def verify_credential_provider(keys, report):
+    # A crashed provider can be replaced by D-Bus activation. Never
+    # enumerate or delete from a collection whose owner is unverified.
+    provider = report["credential_provider"] = {"exit_code": keys.daemon.poll(), "owner_verified": False}
+    keys.verify_owner()
+    provider["owner_verified"] = True
+
+
 def safe_cli_diagnostic(stdout, stderr):
     """Keep fixed classifications only; subprocess output can contain account material."""
     try:
@@ -1427,11 +1435,7 @@ def main():
             report["runtime_cleanup"] = {"passed": stopped.returncode in (0, 2)}
             report["stage"] = "credential_cleanup"
             if keys:
-                # A crashed provider can be replaced by D-Bus activation. Never
-                # enumerate or delete from a collection whose owner is unverified.
-                report["credential_provider"] = {"exit_code": keys.daemon.poll(), "owner_verified": False}
-                keys.verify_owner()
-                report["credential_provider"]["owner_verified"] = True
+                verify_credential_provider(keys, report)
                 # Discover interrupted aliases only from our synthetic files, including
                 # failures before a barrier. Never claim arbitrary credential-store items.
                 for path in args.root.rglob("*.json"):
