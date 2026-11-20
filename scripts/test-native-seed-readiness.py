@@ -124,6 +124,7 @@ class SeedReadinessTests(unittest.TestCase):
             state['clock'] += 60  # Exercise the actual deadline without wall-clock waiting.
 
         namespace = dict(args=SimpleNamespace(seed_binary='old' if historical else None,
+                                             seed_source='v' + seed_version if historical else None,
                                              runtime_binary='runtime' if runtime else None,
                                              database_dev_checkpoint=None),
                          main=main, alternate=alternate, binary='cli', pathlib=pathlib, json=json,
