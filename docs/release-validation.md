@@ -60,8 +60,14 @@ then requires all eight native lanes, seven cloud sweeps, historical
 formal/database DEV upgrades, packaging and API gates. Client2 has its own release
 train and validates against the published Runtime protocol and launch contract.
 Explicit `client2_release` / `client2_commit` inputs request the existing Windows
-GUI diagnostic. That diagnostic also verifies the exact CLI image used during
-startup and restart.
+GUI subset. The published check uses Client2's default Dev channel to discover
+and install the exact selected Runtime. It checks the GUI profile, paths and
+process starts for CLI absence through startup, restart and recovery. The
+verified CLI runs by absolute path for fixture staging or synthetic account
+seeding. Candidate mode stages the verified Runtime archive locally before GUI
+launch. The historical launcher diagnostic and explicit CoreConfigQuery retain
+their CLI-backed fixtures. Producer recovery continues to validate its original
+GUI reports against their authenticated producer and process receipts.
 
 Every full result joins raw reports and real Runtime process hashes before
 `release-prepared-RUN-ATTEMPT` is emitted. Exact-source main push CI must also

@@ -631,7 +631,8 @@ export function attestContinuation(root,outputFile){
   // Native fixtures and all bytes are verified by the unchanged full requirements.
   const assets=preparedAssets(assetsFolder,source,context.manifest);
   const full_result=completeCandidate(candidate,assets,root,context.jobs,source,{evidenceOwners:context.evidenceOwners,
-    macosShardsRequired:isArmRecovery(producer)});
+    macosShardsRequired:isArmRecovery(producer),
+    historicalProducerGui:anchors.some(a=>a.logical_name==='client2-published-online-'+windowsTarget && a.owner.run_id===Number(BUILD_RUN))});
   full_result.continuation={producer,consumer:{run_id:source.run_id,run_attempt:source.run_attempt,sha:source.workflow_head_sha},
     scripts:context.scripts,artifacts:anchors,failed_artifacts:failedArtifacts(context),failed_jobs:context.original.filter(j=>retryable(j)&&j.conclusion==='failure').map(j=>({id:j.id,name:j.name,run_attempt:j.run_attempt}))};
   const receipt=createPreparation({...context,assets,packs:preparedPacks(join(root,'npm-release-packages'),source,context.manifest),full_result});
@@ -848,7 +849,9 @@ export function attestMuslPreparation(root,file){
   const assetsRoot=join(root,'release-assets');mkdirSync(assetsRoot);
   for(const {triple:t} of context.manifest.targets)for(const name of [`rsrs-${t}${t.includes('windows')?'.exe':''}`,`cli-build-${t}.json`])copyFileSync(join(root,'cli-release-'+t,name),join(assetsRoot,name));
   const assets=preparedAssets(assetsRoot,source,context.manifest);
-  const result=completeCandidate(composed.candidate,assets,root,context.jobs,source,{evidenceOwners:context.evidenceOwners});
+  const result=completeCandidate(composed.candidate,assets,root,context.jobs,source,{evidenceOwners:context.evidenceOwners,
+    historicalProducerGui:anchors.some(a=>a.logical_name==='client2-published-online-'+windowsTarget &&
+      [Number(BUILD_RUN),Number(firstRecovery)].includes(a.owner.run_id))});
   const origins={old:{anchor:composed.anchors.old,directory:join(root,'source-check','old')},current:{anchor:composed.anchors.current,directory:join(root,'source-check','current')},summary:{anchor:summary,directory:summaryRoot}};
   const full_result=bindMuslReportOrigins(result,origins);
   full_result.continuation={producer:source.producer,consumer:{run_id:source.run_id,run_attempt:source.run_attempt,sha:source.workflow_head_sha},scripts:context.scripts,

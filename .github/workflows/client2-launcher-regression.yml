@@ -240,7 +240,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = $env:RUNTIME_VERSION
           ./scripts/probe-client2-gui.ps1 `
-            -Client2CandidateRunId $env:CLIENT2_RUN `
+            -Client2CandidateRunId $env:CLIENT2_RUN -LegacyGuiCli `
             -Client2Commit '6ffa187685734873721ab51f3a54d8b2c29cd269' `
             -Cli "$PWD/target/debug/rsrs.exe" `
             -RuntimeArchive "$env:RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" `

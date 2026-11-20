@@ -572,7 +572,7 @@ if report.get('macos_shards'):
 print(json.dumps(result))
 `], {cwd:new URL('../../scripts/',import.meta.url), input:JSON.stringify(report), encoding:'utf8', windowsHide:true}));
 }
-export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners,independent=Boolean(candidate && !client2),macosShardsRequired=false} = {}) {
+export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners,independent=Boolean(candidate && !client2),macosShardsRequired=false,historicalProducerGui=false} = {}) {
   requireValue(sourcePattern.test(context.sha || '') && positiveID(context.run_id) && positiveID(context.run_attempt), 'Invalid full run identity');
   const processes = [], reports = [], historicalUpgrades = [];
   function job(predicate, label) {
@@ -792,7 +792,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     && packages.packages.every(p=>p.version===spec.cli.version && hashPattern.test(p.sha256)), 'Published package validation differs');
   for(const packed of packages.packages) verifyFile(join(directory,'npm-release-packages'),{path:packed.file,sha256:packed.sha256});
   const gui=independent ? null : read('client2-published-online-x86_64-pc-windows-msvc','report.json');
-  if(gui)validateFullGUI(gui,spec,manifestHash,{candidate:Boolean(candidate),client2});
+  if(gui)validateFullGUI(gui,spec,manifestHash,{candidate:Boolean(candidate),client2,historicalProducerGui});
   job(j => j.name === 'api-smoke','API');
   const apiOwner=evidenceOwners?.['api-smoke'] || context;
   const apiIdentity=read('dev-api-coverage','published-api-identity.json');
@@ -813,7 +813,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     full_passed:historicalUpgrades.every(report => report.profile === 'full'),gui_passed:gui ? true : null,g1Passed:false,
     limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms and the existing Windows Client2 GUI subset; real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against official metadata and exact-source SDK locks, not an independent private SDK archive download',candidate?'Candidate installation uses frozen local CLI and Runtime bytes; public-channel discovery remains postpublication evidence':'npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
 }
-export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2}={}) {
+export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2,historicalProducerGui=false}={}) {
   const target='x86_64-pc-windows-msvc';
   requireValue(gui.status==='connectivity-passed' && gui.environment_ready===true && gui.cleanup_exit_confirmed===true && !gui.cleanup_error && !gui.error
     && gui.cli_sha256===spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256
@@ -841,11 +841,29 @@ export function validateFullGUI(gui,spec,manifestHash,{candidate=false,client2}=
         && proof.exe_sha256===gui.exe_sha256, 'GUI Client2 seal differs from the selected product');
     } else requireValue(gui.official_exe_verified===true, 'GUI Client2 public executable was not verified');
   }
-  const cliHash=spec.cli.assets.find(a=>a.name===publishedAssetNames('cli',target)[1]).sha256;
-  // Earlier PowerShell reports can start with a null from an uninitialized array.
-  for(const phase of ['initial','restart'])requireValue(gui.cli_processes?.some(p=>p?.phase===phase && p.sha256===cliHash
-    && positiveID(p.pid) && positiveID(p.parent_pid) && typeof p.started_ticks==='string' && /^\d+$/.test(p.started_ticks)
-    && p.parent_verified===true && p.session_verified===true && p.lifetime_verified===true), 'GUI did not observe the actual CLI image');
+  if(historicalProducerGui) {
+    // Only the recovery harness for the authenticated historical producer can select this proof.
+    requireValue(candidate, 'Historical GUI proof is restricted to producer recovery');
+    for(const phase of ['initial','restart'])requireValue(gui.cli_processes?.some(p=>p?.phase===phase && p.sha256===gui.cli_sha256
+      && positiveID(p.pid) && positiveID(p.parent_pid) && typeof p.started_ticks==='string' && /^\d+$/.test(p.started_ticks)
+      && p.parent_verified===true && p.session_verified===true && p.lifetime_verified===true), 'Historical GUI did not observe the actual CLI image');
+  } else {
+    const phases=['initial','restart','recovery-issue','recovery-resume','recovery-verified'];
+    if(!candidate)phases.unshift('install-runtime');
+    const proof=gui.cli_independence;
+    requireValue(proof?.mode==='external-fixture-only' && proof.process_start_trace_clear===true
+      && !Object.hasOwn(gui,'cli_processes') && Array.isArray(proof.phases) && proof.phases.length===phases.length
+      && phases.every((phase,i)=>proof.phases[i]===phase), 'Missing CLI independence evidence for the GUI phases');
+    if(!candidate) {
+      const install=gui.online_install;
+      const runtimeHash=spec.runtime.assets.find(a=>a.name===publishedAssetNames('runtime',target)[1]).sha256;
+      requireValue(install?.mode==='published-assets' && install.manifest_sha256===manifestHash
+        && install.completed===true && install.exit_code===0 && install.cli_absent_before===true && install.runtime_absent_before===true
+        && install.channel_source==='product-default' && install.runtime_channel==='dev'
+        && install.runtime_version===spec.runtime.version && install.runtime_release_id===spec.runtime.release_id
+        && install.runtime_source===spec.runtime.source_sha && install.runtime_sha256===runtimeHash, 'GUI online Runtime installation identity differs');
+    }
+  }
   const inputs=candidate?gui.candidate_inputs:gui.published_inputs;
   requireValue(inputs?.manifest_sha256===manifestHash && inputs.cli_source===spec.cli.source_sha && inputs.runtime_source===spec.runtime.source_sha,'GUI input identity differs');
   return gui;

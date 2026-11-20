@@ -1,9 +1,10 @@
-# rsrs-runtime
+# Legacy `rsrs-runtime` helper
 
-Standalone loopback runtime binary for respire (runtime split WP-3, milestone
-M1 "two runnable binaries"). It hosts the same authenticated loopback HTTP
-surface the CLI used to embed (`/api/health`, `/api/rpc`, `/api/runtime/stop`,
-`/mcp`), driven by the shared `respire_commands::rpc_serve` module.
+This workspace member records the original split-era helper and its wire
+behavior. The product `rsrs-runtime` is built and released by the dedicated
+[Runtime repository](https://github.com/risense-ai/respire-runtime). The CLI
+and Client2 use the released Runtime and determine interoperability by the
+wire protocol and the methods or capabilities they need.
 
 ## Build
 
@@ -24,17 +25,16 @@ rsrs-runtime --status                 # health probe
 rsrs-runtime --version
 ```
 
-Unknown arguments exit with code 2. `runtime start|stop|status` (with or
-without a leading `--json`) is the client2 lifecycle contract; do not change
-those shapes without updating the coordinator.
+Unknown arguments exit with code 2. These invocation shapes describe this
+helper's historical lifecycle contract. For current product lifecycle checks,
+see [Runtime control contract](../docs/runtime-control-contract.md).
 
 ## Identity and health
 
-At startup the binary publishes its `RuntimeIdentity`
-(`runtime_version` = this crate's version, compat window `min_cli = 1.0.20`,
-`max_cli = *`) through `respire_commands::rpc_serve::set_runtime_identity`.
-The `/api/health` body carries the extension under the `runtime` key plus a
-flattened `runtime_version`, so older CLI builds keep working additively.
+The helper still emits the historical `runtime_compat` block alongside
+`runtime_version` in its health identity. Keep that shape for historical
+consumers. The window is not part of the current Runtime's release metadata
+or the CLI's interoperability policy.
 
 `RSRS_RUNTIME_BOOT_TOKEN` is consumed with `respire_spawn` semantics: read
 once, then removed from the environment. Managed-boot verification (the
@@ -43,7 +43,5 @@ host-side registration/maintenance fence) remains host-managed through
 
 ## Status
 
-`assets.status` RPC reports a stub (`complete: true`, nothing missing) because
-the host guarantees asset placement in this train; real inventory lands with
-P4. Boot-token/registration verification, the supervisor and the CI release
-wiring are P2 work.
+This helper returns a stub for `assets.status`. Use the dedicated Runtime
+release for current asset inventory and lifecycle behavior.

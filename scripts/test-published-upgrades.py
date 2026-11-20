@@ -213,7 +213,9 @@ try:
         executable=args.client2_gui_report.parent/'respire-windows-amd64.exe'
         digest=desktop['exe_sha256']
         assert desktop['status']=='connectivity-passed' and desktop['cleanup_exit_confirmed'] is True, 'desktop GUI validation did not pass'
-        assert desktop['cli_sha256']==report['candidate_sha256'], 'desktop validation used a different CLI'
+        independence=desktop['cli_independence']
+        assert independence['mode']=='external-fixture-only' and independence['process_start_trace_clear'] is True, 'desktop CLI independence was not verified'
+        assert desktop['cli_sha256']==report['candidate_sha256'], 'desktop validation used a different external CLI fixture'
         assert hashlib.sha256(executable.read_bytes()).hexdigest()==digest, 'validated desktop executable changed'
         latest=next(tag for tag in reversed(formal_sources) if selected.get(tag) and
                     any('v'+item['version']==tag and item.get('passed') is True for item in report['sources']))

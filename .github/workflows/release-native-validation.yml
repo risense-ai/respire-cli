@@ -449,7 +449,7 @@ jobs:
           }
           ./scripts/probe-client2-gui.ps1 `
             @client2 `
-            -Cli "$PWD/target/ci/x86_64-pc-windows-msvc/release/rsrs.exe" `
+            -FixtureCli "$PWD/target/ci/x86_64-pc-windows-msvc/release/rsrs.exe" `
             -RuntimeArchive $env:RSRS_PUBLISHED_RUNTIME_ARCHIVE `
             -RuntimeVersion $env:RSRS_PUBLISHED_RUNTIME_VERSION `
             -OutputDirectory "$env:RUNNER_TEMP/published-client2-gui" `
