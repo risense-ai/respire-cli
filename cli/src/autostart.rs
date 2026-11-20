@@ -52,7 +52,8 @@ pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
     check_direct_access, check_managed_request, credential_state,
     ensure_managed_locked, ensure_managed_locked_with_expectation, execute, managed_enabled, managed_id, may_reuse_runtime,
-    note_credential_access, record_exit, restart_maintenance_locked, restart_stage,
+    note_credential_access, prepare_cold_restart_locked, prepare_cold_start_locked, record_exit,
+    restart_maintenance_locked, restart_stage,
     stop_managed_locked, verify_managed_boot, with_explicit_recovery,
 };
 
