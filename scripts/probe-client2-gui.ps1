@@ -60,6 +60,7 @@ if (-not $root.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or 
     throw 'Require a new output directory strictly inside RUNNER_TEMP'
 }
 New-Item -ItemType Directory -Path $root | Out-Null
+$autostartExpected = $null
 $desktopProcess = $null
 $accountFixture = $null
 $coreProxy = $null
@@ -221,6 +222,31 @@ function Save-DownloadedClient2([string]$Destination) {
     }
     $report.exe_sha256 = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
 }
+function Assert-EmptyClient2RunEntry($Key, [string]$Executable) {
+    if ($null -eq $Key) { return }
+    $names = $Key.GetValueNames()
+    if ($names -contains 'respire') { throw 'Client2 login startup entry already exists' }
+    $escaped = [regex]::Escape($Executable)
+    $target = '^(?:"' + $escaped + '"|' + $escaped + ')(?:[ \t]|$)'
+    foreach ($name in $names) {
+        $command = $Key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($command -is [string] -and $command.Trim() -match $target) {
+            throw 'An alternate login startup entry already targets the fixture executable'
+        }
+    }
+}
+
+function Remove-Client2RunResidue($Key, [string]$ExpectedCommand) {
+    if ($null -eq $Key -or $Key.GetValueNames() -notcontains 'respire') { return $false }
+    if ($Key.GetValueKind('respire') -ne [Microsoft.Win32.RegistryValueKind]::String -or
+        $Key.GetValue('respire') -cne $ExpectedCommand) {
+        throw 'Client2 login startup entry differs from the fixture; left untouched'
+    }
+    $Key.DeleteValue('respire')
+    if ($Key.GetValueNames() -contains 'respire') { throw 'Client2 login startup residue remains' }
+    return $true
+}
+
 function Assert-GuiCliAbsent {
     $directories = @($root, (Join-Path $taskProfile 'bin'), (Join-Path $taskHome '.rsrs/bin')) + ($childEnv['PATH'] -split ';')
     foreach ($directory in $directories) {
@@ -509,13 +535,18 @@ public static class RespireGuiNative {
     $childEnv['RSRS_RPC_PORT'] = "$rpcPort"; $childEnv['RSRS_INSTANCE_ID'] = [Guid]::NewGuid().ToString('N')
     $childEnv['RSRS_CORE_TEST_MODE'] = '1'; $childEnv['RSRS_NO_AUTOSYNC'] = '1'; $childEnv['RSRS_UPDATE_CHECK'] = '0'
     if ($CoreConfigQuery) { $childEnv.Remove('RSRS_CORE_TEST_MODE') }
-    function Child-Start([string]$file, [string[]]$argv, [switch]$CaptureOutput, [switch]$CaptureInput) {
+    function Child-Start([string]$file, [string[]]$argv, [switch]$CaptureOutput, [switch]$CaptureInput, [switch]$AutostartProbe) {
         $start = [Diagnostics.ProcessStartInfo]::new($file)
         $start.UseShellExecute = $false; $start.WorkingDirectory = $root
         $start.RedirectStandardOutput = [bool]$CaptureOutput; $start.RedirectStandardError = [bool]$CaptureOutput
         $start.RedirectStandardInput = [bool]$CaptureInput
         $start.Environment.Clear()
         foreach ($key in $childEnv.Keys) { $start.Environment[$key] = $childEnv[$key] }
+        if ($AutostartProbe) {
+            foreach ($key in @('GITHUB_ACTIONS','RUNNER_ENVIRONMENT','RUNNER_OS','RUNNER_TEMP')) {
+                $start.Environment[$key] = [Environment]::GetEnvironmentVariable($key)
+            }
+        }
         foreach ($arg in $argv) { [void]$start.ArgumentList.Add($arg) }
         return [Diagnostics.Process]::Start($start)
     }
@@ -690,6 +721,7 @@ public static class RespireGuiNative {
         }
         if ($checkGuiCli) { Assert-GuiCliAbsent }
         Write-Output ('GUI probe: starting desktop ' + $phase)
+        $startupClock = [Diagnostics.Stopwatch]::StartNew()
         $desktopProcess = Child-Start $exe @()
         $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
         if ($checkGuiCli) { $cliTraceActors.Add($desktopProcess.Id) }
@@ -699,7 +731,8 @@ public static class RespireGuiNative {
         $report.desktop = @{pid=$desktopProcess.Id; session_id=$desktopProcess.SessionId; path=$nativeRoot.ExecutablePath; started_ticks=$desktopStarted}
         if ($desktopProcess.SessionId -ne $report.environment.session_id) { throw 'Desktop launched into a different session' }
         $windows = @()
-        for ($attempt=0; $attempt -lt 80; $attempt++) {
+        # Match the 60-second budget in Client2's published startup diagnostic.
+        while ($startupClock.Elapsed.TotalSeconds -lt 60) {
             if ($desktopProcess.HasExited) { throw 'Official desktop exited before a native window appeared' }
             $windows = @([RespireGuiNative]::Windows($desktopProcess.Id))
             if (@($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count) { break }
@@ -740,6 +773,19 @@ public static class RespireGuiNative {
             $report.native_binding.recovery_phase = $phase
             if ($phase -in @('recovery-resume','recovery-verified')) { $report.native_binding.recovery_request = $report.recovery.request }
         }
+        $autostartProbe = $phase -ceq 'initial' -and $candidateAssets -and $OfflineAcceptance -and
+            $checkGuiCli -and $report.sealed_client2.six_package_receipts_verified -eq $true
+        if ($autostartProbe) {
+            Assert-GuiCliAbsent
+            $runKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Run'
+            $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($runKeyPath)
+            try { Assert-EmptyClient2RunEntry $runKey $nativeRoot.ExecutablePath }
+            finally { if ($runKey) { $runKey.Dispose() } }
+            # Match Wails v3's executable quoting for a Windows path.
+            $autostartExe = $nativeRoot.ExecutablePath
+            $autostartExpected = if ($autostartExe -match '[ \t]') { '"' + $autostartExe + '" --tray' } else { $autostartExe + ' --tray' }
+            $report.native_binding.autostart_expected_command = $autostartExpected
+        }
         $bindingPath = Join-Path $root 'native-binding.json'
         if ($CoreConfigQuery) {
             $report.native_binding.core_query = @{phase=$phase; address=$queryProxy.address}
@@ -764,7 +810,7 @@ public static class RespireGuiNative {
         if ($client2Candidate) { $helperArgs += '-SourceCandidateStability' }
         if ($CoreConfigQuery) { $helperArgs += '-CoreConfigQuery' }
         Write-Output 'GUI probe: starting UI Automation helper'
-        $driver = Child-Start $systemPowerShell $helperArgs
+        $driver = Child-Start $systemPowerShell $helperArgs -AutostartProbe:$autostartProbe
         Write-Output 'GUI probe: UI Automation helper started'
         $helperDeadline = if ($OfflineAcceptance -or $CoreConfigQuery) { 360000 } else { 45000 }
         if (-not $driver.WaitForExit($helperDeadline)) {
@@ -774,6 +820,9 @@ public static class RespireGuiNative {
         Write-Output 'GUI probe: UI Automation helper exited'
         $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
         if ($recoveryPhase) { $report.recovery_native_gui = $native } else { $report.native_gui = $native }
+        if ($autostartProbe -and $native.offline.autostart_registration.status -cne 'round-trip-passed') {
+            throw 'Client2 login startup UI registration round-trip failed; see native-gui.json'
+        }
         if ($client2Candidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
             $native.offline.account_focus_stability.status -cne 'timed-window-passed' -or
             $native.offline.account_focus_stability.completed_poll_count -cne 'not-observed')) { throw 'Source candidate focus stability was not verified' }
@@ -914,6 +963,17 @@ public static class RespireGuiNative {
             $report.cleanup_exit_confirmed = -not $report.cleanup_error
         }
     } catch { $report.cleanup_error = $_.Exception.Message }
+    if ($autostartExpected) {
+        try {
+            $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($runKeyPath, $true)
+            try { $report.autostart_residue_removed = Remove-Client2RunResidue $runKey $autostartExpected }
+            finally { if ($runKey) { $runKey.Dispose() } }
+            $report.autostart_cleanup_confirmed = $true
+        } catch {
+            if (-not $report.cleanup_error) { $report.cleanup_error = $_.Exception.Message }
+            $report.cleanup_exit_confirmed = $false
+        }
+    }
     if ($accountFixture) {
         try {
             if (-not $accountFixture.HasExited) { $accountFixture.Kill($true); $accountFixture.WaitForExit() }
