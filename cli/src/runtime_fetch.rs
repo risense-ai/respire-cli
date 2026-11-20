@@ -10,7 +10,7 @@
 //!   download. Portable images require the explicit override.
 //! * Downloads come from the official release assets with a gh-proxy mirror
 //!   fallback (same rule as client2 `mirrorURL` and the model installer's
-//!   `RSRS_MIRROR` override). Archives are sha256-verified against the released
+//!   explicit Runtime mirror override). Archives are sha256-verified against the released
 //!   `runtime-build-<triple>.json` (`archive_sha256`, with `sha256` as its
 //!   legacy alias; `binary_sha256` independently checks the extracted image) and extracted with a strict whitelist (regular
 //!   files and directories only, no absolute/`..`/`\`/`:`
@@ -1017,21 +1017,17 @@ fn mirror_origin(raw: &str) -> Result<String> {
     Ok(origin)
 }
 
-/// Download origins in fallback order: an explicit mirror (or `RSRS_MIRROR`)
-/// is tried first and the official source last; without an override the
+/// Download origins: an explicit Runtime mirror is tried before the official
+/// source. Without an override the
 /// official source is tried first and the gh-proxy mirror last, matching
 /// client2 `mirrorURL`.
 fn download_origins(mirror: Option<&str>) -> Result<Vec<String>> {
     let official = RELEASE_BASE.to_owned();
     let proxied = format!("{MIRROR_PREFIX}/{official}");
-    let setting = match mirror {
-        Some(value) => Some(value.to_owned()),
-        None => respire_client_host::settings::mirror_from_env()?,
-    }
-    .filter(|value| !value.trim().is_empty());
+    let setting = mirror.map(str::trim).filter(|value| !value.is_empty());
     match setting {
         Some(value) => {
-            let origin = mirror_origin(value.trim())?;
+            let origin = mirror_origin(value)?;
             anyhow::ensure!(
                 origin == MIRROR_PREFIX || origin == RELEASE_BASE,
                 "runtime mirror is not approved"
@@ -1898,8 +1894,8 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 }
 
 /// Install the pinned release (or an explicit `pin` version override),
-/// returning the managed binary path. An explicit `mirror` origin overrides
-/// the `RSRS_MIRROR` selection for this call. Already-installed matching
+/// returning the managed binary path. Only an explicit `mirror` origin changes
+/// Runtime download sources. Already-installed matching
 /// builds are reused. Concurrent CLI instances serialize on the install lock;
 /// the switch into the version directory is
 /// atomic and the previous version directory is retained as the rollback
@@ -2279,6 +2275,11 @@ mod revision4_install_validation {
             assert!(!safe_metadata_path(name), "unsafe path accepted: {name}");
         }
         assert!(safe_metadata_path("core-notices/models/LICENSE.txt"));
+        assert_eq!(
+            download_origins(None)?,
+            [RELEASE_BASE.to_owned(), format!("{MIRROR_PREFIX}/{RELEASE_BASE}")]
+        );
+        assert_eq!(download_origins(Some(RELEASE_BASE))?, [RELEASE_BASE]);
         assert!(download_origins(Some("https://unapproved.invalid")).is_err());
         let version = "2.0.0-dev.4";
         let name = "runtime-build-x86_64-unknown-linux-gnu.json";
