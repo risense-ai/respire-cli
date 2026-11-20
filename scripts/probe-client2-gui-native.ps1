@@ -8,6 +8,7 @@ param(
     [ValidateSet('issue','resume','verified')][string]$RecoveryPhase
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'client2-probe-process-tree.ps1')
 $report = [ordered]@{
     method = 'Windows UI Automation + OS SendInput Tab + desktop target-window capture'
     identity_verified = $false; accessibility_tree_read = $false; foreground_verified = $false
@@ -22,11 +23,9 @@ function Assert-Target([bool]$RequireForeground = $false) {
         $owner.SessionId -ne $binding.session_id -or
         -not [string]::Equals($owner.Path, $binding.exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'Original EXE identity/session changed' }
     $all = @(Get-CimInstance Win32_Process)
-    $ids = [Collections.Generic.HashSet[int]]::new(); [void]$ids.Add([int]$binding.desktop_pid)
-    do {
-        $added = $false
-        foreach ($item in $all) { if ($ids.Contains([int]$item.ParentProcessId) -and $ids.Add([int]$item.ProcessId)) { $added = $true } }
-    } while ($added)
+    $tree = @(Get-Client2ProbeProcessTree $all $binding.desktop_pid $binding.desktop_started_ticks $binding.session_id $binding.exe)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    foreach ($item in $tree) { [void]$ids.Add([int]$item.ProcessId) }
     $browser = @($all | Where-Object { $_.ProcessId -eq $binding.browser_pid })
     $browserProcess = Get-Process -Id $binding.browser_pid -ErrorAction Stop
     $profileArg = '--user-data-dir=(?:"' + [regex]::Escape($binding.webview_profile) + '"|' + [regex]::Escape($binding.webview_profile) + '(?=\s|$))'
