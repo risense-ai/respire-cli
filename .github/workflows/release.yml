@@ -191,8 +191,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: full-reports
+          pattern: '!macos-upgrade-*'
       - name: Join exact-attempt full reports and actual process image digests
         env:
+          MACOS_UPGRADE_SHARDS_REQUIRED: 'true'
           CLIENT2_RELEASE: ${{ inputs.client2_release }}
           CLIENT2_COMMIT: ${{ inputs.client2_commit }}
         run: node npm/scripts/extract-artifact.mjs --complete-published full-reports
@@ -361,6 +363,7 @@ jobs:
       version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       candidate_assets: ${{ needs.plan.outputs.candidate }}
       validation_profile: full
+      shard_macos_upgrades: ${{ inputs.artifact_source == 'published-assets' || needs.plan.outputs.sha == github.sha }}
       client2_release: ${{ inputs.client2_release }}
       client2_commit: ${{ inputs.client2_commit }}
       client2_candidate_run_id: ''
@@ -676,12 +679,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: full-reports
+          pattern: '!macos-upgrade-*'
       - uses: actions/download-artifact@v4
         with:
           pattern: cli-release-*
           path: release-assets
           merge-multiple: true
       - name: Attest actual full reports and frozen CLI and npm bytes
+        env:
+          MACOS_UPGRADE_SHARDS_REQUIRED: 'true'
         run: node npm/scripts/release-preparation.mjs attest release-assets full-reports/npm-release-packages release-prepared.json full-reports
       - uses: actions/upload-artifact@v4
         with:

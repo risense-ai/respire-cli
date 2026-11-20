@@ -234,7 +234,8 @@ export function attestPreparation(assetsFolder,packsFolder,output,reportsFolder)
   const context=preparationContext(source);
   validatePreparationRun(context.run,source,{producing:true});
   const assets=preparedAssets(assetsFolder,source,context.manifest);
-  const full_result=completeCandidate(JSON.parse(process.env.CANDIDATE_ASSETS),assets,reportsFolder,context.jobs,source);
+  const full_result=completeCandidate(JSON.parse(process.env.CANDIDATE_ASSETS),assets,reportsFolder,context.jobs,source,
+    {macosShardsRequired:process.env.MACOS_UPGRADE_SHARDS_REQUIRED==='true'});
   const receipt=createPreparation({...context,profile:validationProfile(process.env.VALIDATION_PROFILE),assets,full_result,
     packs:preparedPacks(packsFolder,source,context.manifest)});
   writeFileSync(output,JSON.stringify(receipt,null,2)+'\n');

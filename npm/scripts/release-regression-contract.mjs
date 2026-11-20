@@ -25,10 +25,21 @@ const groups=[
     ['migration',j=>j.name.startsWith('Native migration ('),t=>j=>j.name===`Native migration (${t})`],
     ['migration_gate',j=>j.name.startsWith('Migration gate ('),t=>j=>j.name===`Migration gate (${t})`],
 ];
+const macosAggregate = 'native-regression / Apple Silicon upgrade aggregate';
 export function regressionStatus(jobs,contract){
   const profile=validationProfile(contract?.validation_profile);
   if(profile==='full'&&(contract?.schema!==2||contract.scope!=='database-in-place-upgrade'))throw Error('Full regression scope differs');
   let pending=false;
+  if(profile==='full'){
+    const aggregate=jobs.filter(j=>j.name===macosAggregate);
+    if(aggregate.length>1)throw Error('Duplicate Apple Silicon upgrade aggregate');
+    const shards=jobs.some(j=>j.name.startsWith('native-regression / Apple Silicon upgrade (')&&j.conclusion!=='skipped');
+    const gate=aggregate[0];
+    if(shards||(gate&&gate.conclusion!=='skipped')){
+      if(gate?.status==='completed'&&gate.conclusion!=='success')throw Error('Required Apple Silicon upgrade aggregate: '+gate.conclusion);
+      if(gate?.status!=='completed')pending=true;
+    }
+  }
   for(const [kind,select,match] of groups){
     if(kind==='binaries'&&profile==='full')continue;
     const selected=jobs.filter(select);
@@ -78,7 +89,9 @@ export function parseTimestamp(value){
 export function regressionCompletedAt(jobs,contract,readyTimestamp){
   if(regressionStatus(jobs,contract)!=='success')return null;
   const ready=parseTimestamp(readyTimestamp);if(ready===null)return null;
-  const required=jobs.filter(j=>(contract.api&&j.name==='api-smoke')||(contract.package&&j.name==='validate / npm-dry-run')||groups.some(([kind,,match])=>(contract[kind]??[]).some(target=>match(target)(j))));
+  const required=jobs.filter(j=>(contract.api&&j.name==='api-smoke')||(contract.package&&j.name==='validate / npm-dry-run')
+    || (contract.schema===2&&j.name===macosAggregate&&j.conclusion==='success')
+    || groups.some(([kind,,match])=>(contract[kind]??[]).some(target=>match(target)(j))));
   const completions=[];
   for(const job of required){
     const end=parseTimestamp(job.completed_at);if(end===null)return null;

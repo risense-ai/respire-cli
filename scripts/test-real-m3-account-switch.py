@@ -182,11 +182,14 @@ architecture.add_argument('--expect-supervised-worker',action='store_true',help=
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
 parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
 parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then verify the database upgrade')
+parser.add_argument('--seed-source',help='Verify and record the exact historical release tag used for a shard')
 parser.add_argument('--client2-binary', type=pathlib.Path, help='Install and start Runtime using the verified desktop executable')
 parser.add_argument('--client2-sha256')
 parser.add_argument('--database-dev-checkpoint', choices=['v1.0.11-dev.1', 'v1.0.17-dev.6'])
 add_runtime_arguments(parser)
 args=parser.parse_args()
+if args.seed_source and not args.seed_binary:
+    parser.error('--seed-source requires --seed-binary')
 if args.database_dev_checkpoint and not args.seed_binary:
     parser.error('--database-dev-checkpoint requires an authenticated historical --seed-binary')
 database_upgrade = bool(args.seed_binary and args.runtime_binary)
@@ -425,6 +428,8 @@ for binary in BINARIES:
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
                     return seeded
                 seed_version = json.loads(seed_command('v').stdout)['summary']['version']
+                if args.seed_source:
+                    assert 'v' + seed_version == args.seed_source, 'historical seed version differs from the shard source'
                 # These published versions select M3 without activating an empty index.
                 if seed_version in {'1.0.11-dev.1', '1.0.11', '1.0.12', '1.0.15', '1.0.16',
                                     '1.0.17-dev.6', '1.0.18', '1.0.19', '1.0.20'}:
@@ -1082,6 +1087,9 @@ for binary in BINARIES:
                 checkpoint_evidence['post_sync_special_state_preserved']=True
                 checkpoint_evidence['sync_verified_accounts']=['main']
             assert run('recall','Historical reverse synchronization','--titles').get('items'), 'verified source owner lost reverse marker'
+        seed_identity = ({'seed_source': 'v' + seed_version,
+                          'seed_sha256': hashlib.sha256(pathlib.Path(args.seed_binary).read_bytes()).hexdigest()}
+                         if args.seed_source else {})
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'supervised_worker_checked':args.expect_supervised_worker,'owned_worker_identities':worker_identities,
@@ -1110,7 +1118,7 @@ for binary in BINARIES:
             'safe_restart_checked':restart_checked and bool(args.runtime_binary),
             'legacy_client_rejected':legacy_client_rejected,'old_rpc_checked':old_rpc_checked,
             'old_rpc_authenticated':old_rpc_authenticated,'initial_generation_changes':generation_changes,'fixture':str(root),
-            **runtime_report(args,True)})
+            **seed_identity,**runtime_report(args,True)})
     except Exception as error:
         reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000],
             **({'runtime_stop_failure':stop_failure} if stop_failure is not None else {})})

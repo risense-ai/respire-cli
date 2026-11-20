@@ -1,7 +1,8 @@
 """Exercise actual-artifact upgrades for the selected critical or full gate."""
-import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile
+import argparse, hashlib, json, os, pathlib, platform, re, shutil, subprocess, sys, tarfile
 from concurrent.futures import ThreadPoolExecutor
 from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability, select_upgrade_sources
+from published_upgrade_evidence import validate_upgrade_result
 from native_fixture_process import add_runtime_arguments, runtime_inputs
 
 parser=argparse.ArgumentParser()
@@ -17,6 +18,9 @@ parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
 parser.add_argument('--source',action='append',default=[],help='Diagnostic subset only: exact selected tag or latest formal; never full coverage')
 parser.add_argument('--include-legacy-baselines',action='store_true',help='Manual historical diagnostics only: include unpublished draft and DEV baselines')
+macos_shards=parser.add_mutually_exclusive_group()
+macos_shards.add_argument('--plan-macos-shards',action='store_true',help='Freeze the full Apple Silicon source and byte identities without running upgrades')
+macos_shards.add_argument('--macos-shard-plan',type=pathlib.Path,help='Run one exact --source from the same-attempt Apple Silicon plan')
 add_runtime_arguments(parser)
 args=parser.parse_args()
 if (args.download_only or args.draft_baseline_cache) and not args.include_legacy_baselines:
@@ -25,14 +29,34 @@ if not args.download_only: runtime_inputs(args,[args.binary])
 if args.client2_gui_report and (args.download_only or args.source or args.profile!='full' or
         args.target!='x86_64-pc-windows-msvc' or not args.runtime_binary):
     parser.error('Client2 database acceptance requires the full standalone Windows release gate')
+if args.plan_macos_shards or args.macos_shard_plan:
+    import macos_upgrade_shards as shards
+    if (not __debug__ or args.target!=shards.TARGET or args.profile!='full' or not args.runtime_binary
+            or args.include_legacy_baselines or args.download_only):
+        parser.error('Apple Silicon shard mode requires the full standalone published-source profile with assertions')
+    if args.plan_macos_shards and args.source:
+        parser.error('The Apple Silicon plan requires the complete source inventory')
+    if args.macos_shard_plan and (len(args.source)!=1 or args.source==['latest']):
+        parser.error('A shard requires exactly one source tag from the plan')
+    if args.macos_shard_plan and (sys.platform!='darwin' or platform.machine()!='arm64'
+            or os.environ.get('GITHUB_ACTIONS')!='true' or os.environ.get('RUNNER_ENVIRONMENT')!='github-hosted'):
+        parser.error('Apple Silicon shards require a native GitHub-hosted runner')
 upgrade_contract='standalone-v1' if args.runtime_binary else 'legacy-shim-v1'
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
+if args.macos_shard_plan and any(root.iterdir()):
+    parser.error('A shard requires an empty output directory')
 def command(*values):
     executable=shutil.which(values[0])
     assert executable,'required tool missing: '+values[0]
     return subprocess.check_output([executable,*values[1:]],text=True,encoding='utf-8',timeout=60).strip()
 releases=[]
-if not args.download_only:
+if args.macos_shard_plan:
+    saved_plan=args.macos_shard_plan.read_bytes()
+    frozen_plan=json.loads(saved_plan)
+    releases=[{'tag_name':tag,'id':item['release_id'],'draft':False,'prerelease':'-' in tag,
+               'assets':[{'name':name,**asset} for name,asset in item['assets'].items()]}
+              for tag,item in frozen_plan['inputs'].items()]
+elif not args.download_only:
     for page in range(1,101):
         batch=json.loads(command('gh','api',f'repos/risense-ai/respire-cli/releases?per_page=100&page={page}'))
         releases.extend(batch)
@@ -42,8 +66,11 @@ def stable(tag):
     return bool(re.fullmatch(r'v\d+\.\d+\.\d+',tag)) and tuple(map(int,tag[1:].split('.'))) >= (1,0,6)
 sources={item['tag_name']:item for item in releases if not item['draft'] and not item['prerelease'] and stable(item['tag_name'])}
 formal_sources=sorted(sources, key=lambda tag: tuple(map(int,tag[1:].split('.'))))
-registry=[] if args.download_only else sorted(set(json.loads(command('npm','view','@rsrsai/cli','versions','--json'))) |
-                set(json.loads(command('npm','view','rsrs-cli','versions','--json'))))
+if args.macos_shard_plan:
+    registry=frozen_plan['inventory']['registry_formal_versions']
+else:
+    registry=[] if args.download_only else sorted(set(json.loads(command('npm','view','@rsrsai/cli','versions','--json'))) |
+                    set(json.loads(command('npm','view','rsrs-cli','versions','--json'))))
 missing=[version for version in registry if stable('v'+version) and 'v'+version not in sources]
 assert not missing,'published npm stable has no verifiable GitHub artifact: '+str(missing)
 # Database checkpoints are mandatory in both profiles, independently of optional diagnostics.
@@ -75,6 +102,23 @@ report={'passed':False,'target':args.target,'candidate_sha256':None if args.down
         'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
+
+if args.plan_macos_shards or args.macos_shard_plan:
+    model_cache=str(pathlib.Path(__file__).with_name('native-model-cache.py'))
+    for model in dict.fromkeys((args.model_dir,args.legacy_model_dir)):
+        subprocess.run([sys.executable,model_cache,'verify','--model-dir',model,'--legacy-dir',args.legacy_model_dir],check=True)
+    identity={'cli_sha256':report['candidate_sha256'],'runtime_sha256':args.runtime_sha256,
+              'runtime_version':args.runtime_version,'model_key':command(sys.executable,model_cache,'key'),
+              'manifest_sha256':os.environ['RSRS_PUBLISHED_ASSETS_SHA256'],
+              'bundle_sha256':os.environ['RSRS_PUBLISHED_BUNDLE_SHA256'],
+              'fixture_sha':command('git','rev-parse','HEAD')}
+    plan=shards.make_plan(report,sources,releases,identity)
+    if args.plan_macos_shards:
+        shards.write_json(root/'macos-shard-plan.json',plan)
+        sys.exit(0)
+    shards.require(frozen_plan==plan and args.source[0] in plan['inputs'],
+                   'Shard plan or expected source differs from the current verified inputs')
+
 def verify_upgrade(source,client2_args=()):
     tag,release=source
     folder=root/tag; folder.mkdir(exist_ok=True)
@@ -98,7 +142,7 @@ def verify_upgrade(source,client2_args=()):
     if needed:
         download_env=os.environ.copy()
         download_env['GODEBUG']=(download_env.get('GODEBUG')+',' if download_env.get('GODEBUG') else '')+'http2client=0'
-        if release['draft']:
+        if release['draft'] or args.macos_shard_plan:
             for name in needed:
                 with (folder/name).open('wb') as output:
                     subprocess.run(['gh','api',f"repos/risense-ai/respire-cli/releases/assets/{assets[name]['id']}",
@@ -124,86 +168,19 @@ def verify_upgrade(source,client2_args=()):
     runtime_args=(['--runtime-binary',str(args.runtime_binary),'--runtime-sha256',args.runtime_sha256,
                    '--runtime-version',args.runtime_version] if args.runtime_binary else [])
     checkpoint_args=['--database-dev-checkpoint',tag] if tag in DATABASE_DEV_CHECKPOINTS else []
+    shard_args=['--seed-source',tag] if args.macos_shard_plan else []
     architecture_args=[] if args.runtime_binary else ['--expect-supervised-worker']
     subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
         '--binary',args.binary,'--seed-binary',str(old),'--model-dir',args.model_dir,
-        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args,*architecture_args,*client2_args],check=True)
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args,*checkpoint_args,*architecture_args,*shard_args,*client2_args],check=True)
     checks=json.loads((result/'real-account-return-verification.json').read_text())
-    assert isinstance(checks,list) and len(checks)==1,'expected one candidate upgrade report'
-    check=checks[0]
-    assert isinstance(check,dict) and all(check.get(name) is True for name in [
-        'passed','real_model','distinct_vault_keys',
-        'original_records_preserved','original_sync_work_preserved','urk_preserved',
-        'old_records_decrypted','post_upgrade_recall_checked','encrypted_tombstones_preserved',
-    ]),'required real upgrade checks missing or failed'
-    assert check.get('seed_vault_versions')==[1,3] and all(type(value) is int for value in check['seed_vault_versions']), 'historical v1/v3 session coverage missing'
-    if checkpoint_args:
-        checkpoint=check.get('database_dev_checkpoint')
-        assert isinstance(checkpoint,dict) and checkpoint.get('tag')==tag \
-            and checkpoint.get('special_state_seeded') is True \
-            and checkpoint.get('special_state_preserved') is True \
-            and checkpoint.get('verified_accounts')==['main','alternate'], 'database checkpoint-specific state was not verified'
-        if args.runtime_binary:
-            assert checkpoint.get('post_sync_special_state_preserved') is True \
-                and checkpoint.get('sync_verified_accounts')==['main'], 'database checkpoint state was not verified after real sync'
-    assert check.get('historical_credential_migration_actor')=='fixture', 'explicit fixture credential migration missing'
-    custody=check.get('host_credential_custody')
-    assert isinstance(custody,dict) and custody.get('required') is True and custody.get('cleanup_passed') is True, 'historical credential custody or cleanup unconfirmed'
-    accounts=custody.get('verified_accounts')
-    assert isinstance(accounts,list) and len(accounts)==2 and all(isinstance(item,dict) for item in accounts), 'historical account custody evidence missing'
-    assert [(item.get('account'),item.get('vault_version')) for item in accounts]==[('main',1),('alternate',3)], 'historical credential account coverage differs'
-    assert all(item.get('urk_preserved') is True for item in accounts), 'historical credential custody changed a data key'
-    cleanup=check.get('native_credential_cleanup')
-    assert isinstance(cleanup,dict) and cleanup.get('passed') is True and cleanup.get('remaining_entries')==[], 'native credential cleanup unconfirmed'
-    assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
-    if upgrade_contract=='standalone-v1':
-        assert all(check.get(name) is True for name in [
-            'standalone_runtime_evidence','runtime_artifact_reused','normal_reopen_checked','stale_endpoint_archived',
-        ]),'required standalone upgrade checks missing or failed'
-        assert all(check.get(name) is False for name in [
-            'old_rpc_checked','forced_restart_checked','live_owner_restart_rejected','safe_restart_checked',
-            'supervised_worker_checked','in_process_checked','global_engine_preserved',
-        ]),'database upgrade must not claim delegated host or legacy checks'
-        assert check.get('legacy_handoff_actor') is None, 'database upgrade must not require a running legacy host'
-        assert check.get('coverage_scope')=='historical-database', 'historical database coverage scope missing'
-        assert check.get('host_checks_delegated_to')=='resident-concurrency', 'current host checks must remain in the resident fixture'
-        assert check.get('post_upgrade_sync_checked') is True, 'historical schema synchronization or cleanup was not verified'
-        sync=check.get('post_upgrade_sync')
-        assert isinstance(sync,dict) and all(sync.get(field) is True for field in ('original_urk_preserved',
-            'existing_keys_registered','source_push','independent_pull_decrypted','reverse_marker_source_pull',
-            'original_active_preserved','tombstones_propagated','pending_work_acknowledged')), 'historical bidirectional sync evidence incomplete'
-        assert isinstance(check.get('cloud_cleanup'),dict) and check['cloud_cleanup'].get('passed') is True \
-            and check['cloud_cleanup'].get('remaining_users')==[], 'historical sync cloud cleanup unconfirmed'
-        assert check.get('runtime_mode')=='standalone_runtime','standalone Runtime mode missing'
-        assert check.get('runtime_binary_sha256')==args.runtime_sha256,'upgrade Runtime digest differs'
-        assert check.get('runtime_version')==args.runtime_version,'upgrade Runtime version differs'
-        receipts=check.get('runtime_identity_receipts')
-        assert isinstance(receipts,list) and receipts and all(isinstance(item,dict) for item in receipts),\
-            'upgrade Runtime identity receipts missing'
-    else:
-        assert all(check.get(name) is True for name in [
-            'forced_restart_checked','old_rpc_checked','supervised_worker_checked','global_engine_preserved',
-        ]),'required legacy shim upgrade checks missing or failed'
-    assert check.get('binary_sha256')==report['candidate_sha256'],'candidate changed during upgrade validation'
-    assert check.get('client2_sha256')==(client2_args[-1] if client2_args else None),'desktop upgrade actor differs'
-    if client2_args:
-        assert check.get('client2_native_credential_migration') is True, 'desktop native credential migration was not exercised'
-    assert check.get('engine')=='cpu','upgrade did not verify real CPU inference'
-    sequence=check.get('sequence')
-    assert isinstance(sequence,list) and [step['account'] for step in sequence]==['main','alternate','main'],'upgrade account sequence differs'
-    for step in sequence:
-        rows=step.get('model_rows')
-        assert isinstance(rows,dict) and set(rows)=={'embedder','model index'} and all(
-            row.get('status')=='ok' for row in rows.values()),'upgrade model readiness checks missing or failed'
-    return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'upgrade_contract':upgrade_contract,
-            'database_dev_checkpoint':check.get('database_dev_checkpoint'),
-            'coverage_scope':check.get('coverage_scope'),
-            'normal_reopen_checked':check.get('normal_reopen_checked') is True,
-            'stale_endpoint_archived':check.get('stale_endpoint_archived') is True,
-            'client2_sha256':check.get('client2_sha256'),
-            'host_checks_delegated_to':check.get('host_checks_delegated_to'),
-            'post_upgrade_sync_checked':check.get('post_upgrade_sync_checked') is True,
-            'report':str(result/'real-account-return-verification.json')}
+    row=validate_upgrade_result(checks,tag=tag,formal=tag in formal_sources,upgrade_contract=upgrade_contract,
+        candidate_sha256=report['candidate_sha256'],runtime_sha256=args.runtime_sha256,runtime_version=args.runtime_version,
+        report_path=result/'real-account-return-verification.json',client2_sha256=client2_args[-1] if client2_args else None)
+    if args.macos_shard_plan:
+        shards.validate_shard_process(checks[0],plan,tag)
+    return row
+
 
 if args.download_only:
     assert args.profile=='full' and not args.draft_baseline_cache,'download-only requires the fixed full draft source'
@@ -246,9 +223,13 @@ try:
     report['first_platform_release']=first_platform_release
     if first_platform_release:
         report['upgrade_status']='not-applicable: first Intel macOS release; fresh inference is validated separately'
-    report['passed']=True
     applicable=[item for item in report['sources'] if item.get('passed') is True]
     report['post_upgrade_sync_checked']=bool(applicable) and all(item.get('post_upgrade_sync_checked') is True for item in applicable)
+    if args.macos_shard_plan:
+        report['macos_shard']={'source':args.source[0],'plan_sha256':hashlib.sha256(saved_plan).hexdigest(),
+                              'check_run_id':shards.check_run_id(),
+                              'identity':identity,'process_report_sha256':shards.file_digest(pathlib.Path(applicable[0]['report']))}
+    report['passed']=True
     report['full_coverage']=report['all_published_sources_covered']=args.profile=='full' and not args.source
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
