@@ -1724,8 +1724,15 @@ function Read-RecoveryRecord {
     if ($matches.Count -ne 1) { throw 'Require exactly one real desktop reset request' }
     $record = $matches[0]
     $allowed = @('id','name','started','state','host','transaction','materialSaved')
+    $transactionFields = @('operation_id','source_profile','kind')
+    if ($binding.verified_candidate_assets -and -not $binding.fixture_mode) {
+        # Native key recovery persists its route with the original operation identity.
+        $transactionFields += 'runtime_key'
+    }
+    $publicTransaction = @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin $transactionFields }).Count -eq 0 -and
+        ($transactionFields -cnotcontains 'runtime_key' -or ($record.transaction.runtime_key -is [bool] -and $record.transaction.runtime_key))
     if (@($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -or
-        @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin @('operation_id','source_profile','kind') }).Count -or
+        -not $publicTransaction -or
         $record.id -cnotmatch '\Adesktop-[0-9a-f-]{36}\z' -or $record.state -cne 'done' -or
         $record.host -isnot [bool] -or $record.host -ne $true -or $record.transaction.kind -cne 'key' -or
         $record.transaction.source_profile -isnot [string] -or -not $record.transaction.source_profile -or
@@ -1734,7 +1741,7 @@ function Read-RecoveryRecord {
         # Export only fixed predicates, never journal values or unexpected field names.
         $report.recovery.journal_validation = [ordered]@{
             record_fields_public = @($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -eq 0
-            transaction_fields_public = @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin @('operation_id','source_profile','kind') }).Count -eq 0
+            transaction_fields_public = $publicTransaction
             request_id_valid = $record.id -cmatch '\Adesktop-[0-9a-f-]{36}\z'
             state_done = $record.state -ceq 'done'
             host_true = $record.host -is [bool] -and $record.host -eq $true
