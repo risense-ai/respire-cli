@@ -952,11 +952,13 @@ public static class RespireGuiNative {
                 } elseif ($checkpoint.offline -and -not $report.native_binding.recovery_phase) { $report.cleanup_error = 'Offline Runtime identity not established; detached cleanup is not certified' }
               } catch { $report.cleanup_error = $_.Exception.Message }
             }
-            $sameRoot = Get-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
-            if ($sameRoot -and $sameRoot.StartTime.ToUniversalTime().Ticks -eq $desktopStarted) {
-                $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
-                $report.processes_before_cleanup = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
-            }
+            try {
+                $sameRoot = Get-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
+                if ($sameRoot -and $sameRoot.StartTime.ToUniversalTime().Ticks -eq $desktopStarted) {
+                    $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
+                    $report.processes_before_cleanup = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
+                }
+            } catch { $report.cleanup_error = $_.Exception.Message }
             foreach ($item in $tracked) {
                 try { Stop-TrackedOwned $item } catch { $report.cleanup_error = $_.Exception.Message }
             }

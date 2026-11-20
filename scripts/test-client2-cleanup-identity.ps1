@@ -56,6 +56,27 @@ try { $null=Get-Client2ProbeProcessTree $snapshot 10 ($exact.Ticks+10) 2 $rootIm
     $rejected=$_.Exception.Message -ceq 'Client2 process snapshot does not contain the original desktop'
 }
 if (-not $rejected) { throw 'Process tree accepted a different desktop lifetime' }
+
+$cleanup=@($ast.FindAll({param($n)
+    $n -is [Management.Automation.Language.TryStatementAst] -and
+        $n.Body.Statements[0].Extent.Text -ceq "Write-Output 'GUI probe: cleaning up tracked processes'"
+},$true))
+if ($cleanup.Count -ne 1) { throw 'Missing unique post-run process cleanup' }
+$desktopProcess=@{Id=10}
+$desktopStarted=$exact.Ticks
+$OfflineAcceptance=$false
+$report=@{}
+$tracked=@([pscustomobject]@{ProcessId=30})
+$script:stopped=@()
+function Get-Process { param($Id,$ErrorAction) return @{StartTime=$exact} }
+function Descendants { throw 'Original desktop disappeared from the process snapshot' }
+function Stop-TrackedOwned($Item) { $script:stopped += $Item.ProcessId }
+function Confirm-TrackedAbsent($Item) { return $true }
+$null=& ([scriptblock]::Create($cleanup[0].Extent.Text))
+if (($script:stopped -join ',') -cne '30' -or $report.cleanup_exit_confirmed -ne $false -or
+    $report.cleanup_error -cne 'Original desktop disappeared from the process snapshot') {
+    throw 'A failed snapshot skipped known processes or certified incomplete cleanup'
+}
 Write-Output 'Synthetic cleanup identity checks passed (not native cleanup acceptance)'
 
 # Exercise the actual binding function with synthetic health/process records only.
