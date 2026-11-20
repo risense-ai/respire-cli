@@ -42,9 +42,11 @@ Write-Output 'Synthetic cleanup identity checks passed (not native cleanup accep
 # Exercise the actual binding function with synthetic health/process records only.
 $nativeAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Native binding helper parse failed' }
-$bind=@($nativeAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Bind-OfflineRuntime'},$true))
-if ($bind.Count -ne 1) { throw 'Unique native binding function required' }
-. ([scriptblock]::Create($bind[0].Extent.Text))
+foreach ($name in @('Test-OfflineProfilePath','Bind-OfflineRuntime','Assert-OfflineRuntime')) {
+    $nodes=@($nativeAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
+    if ($nodes.Count -ne 1) { throw 'Unique native binding function required' }
+    . ([scriptblock]::Create($nodes[0].Extent.Text))
+}
 $binding=@{runtime_exe='C:\fixture\rsrs-runtime.exe';data_directory='C:\fixture';session_id=2;runtime_sha256=('a'*64)}
 $nativeHealth=[pscustomobject]@{server='respire';v=1;pid=42;exe=$binding.runtime_exe;data_dir=$binding.data_directory}
 $nativeProcess=[pscustomobject]@{Id=42;Path=$binding.runtime_exe;SessionId=2;StartTime=$exact}
@@ -63,6 +65,13 @@ try {
         if ($report.offline.runtime_binding_stage -cne 'bound' -or $offlineRuntime.pid -ne 42) { throw 'Matching Runtime image did not bind' }
         if ($report.offline.runtime_binding_checks.Count -ne 8 -or @($report.offline.runtime_binding_checks.Values | Where-Object { $_ -isnot [bool] -or -not $_ }).Count) { throw 'Successful binding diagnostic was not eight true booleans' }
     }
+    $nativeHealth.data_dir='\\?\C:\fixture'
+    Bind-OfflineRuntime
+    $null=Assert-OfflineRuntime
+    $nativeHealth.data_dir='\\?\C:\foreign'
+    $rejected=$false
+    try { $null=Assert-OfflineRuntime } catch { $rejected=$_.Exception.Message -ceq 'Offline Runtime actor changed during business acceptance' }
+    if (-not $rejected) { throw 'Repeated identity check accepted a foreign extended profile' }
     foreach ($case in @('foreign_image','empty_image','foreign_process','foreign_session','foreign_data','wrong_digest')) {
         $nativeHealth.exe=$binding.runtime_exe; $nativeHealth.data_dir=$binding.data_directory
         $nativeProcess.Path=$binding.runtime_exe; $nativeProcess.SessionId=2; $nativeHash='a'*64
@@ -71,7 +80,7 @@ try {
             empty_image { $nativeHealth.exe=$null }
             foreign_process { $nativeProcess.Path='C:\foreign\rsrs-runtime.exe' }
             foreign_session { $nativeProcess.SessionId=3 }
-            foreign_data { $nativeHealth.data_dir='C:\foreign' }
+            foreign_data { $nativeHealth.data_dir='\\?\C:\foreign' }
             wrong_digest { $nativeHash='b'*64 }
         }
         $report=@{offline=@{}}; $rejected=$false
