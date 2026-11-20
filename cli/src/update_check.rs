@@ -9,7 +9,8 @@
 //! Three design constraints:
 //! 1. **Never block the main flow**: network failure, timeout, or offline all return None.
 //!    Version checks must not break remember/doctor.
-//! 2. **24h throttle**: results (including failures) land in `data_dir/update_check.json`;
+//! 2. **24h throttle**: results (including failures) land in the CLI installation root's
+//!    `update_check.json`;
 //!    no second query the same day - avoid hitting the network on every write.
 //! 3. **Can be turned off**: `RSRS_UPDATE_CHECK=0` disables;
 //!    `RSRS_REGISTRY` swaps the registry (tests / mirrors).
@@ -29,7 +30,7 @@ const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
 const PACKAGE: &str = "rsrs-cli";
 
 pub fn cache_path() -> Result<PathBuf> {
-    Ok(respire_client_host::config::control_roots()?.1.join("update_check.json"))
+    Ok(respire_client_host::config::control_installation_root()?.join("update_check.json"))
 }
 
 /// Version-check switch: `RSRS_UPDATE_CHECK=0` turns it off.
@@ -198,7 +199,7 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
     if !enabled() {
         return None;
     }
-    // Optional update hints must not fall back to another profile on invalid config.
+    // Optional update hints still require a valid installation root.
     let path = cache_path().ok()?;
     let current = crate::VERSION.to_owned();
     let now = chrono::Utc::now().timestamp();
