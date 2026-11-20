@@ -122,8 +122,13 @@ test('supported Linux ARM targets require native runners, every source feedback 
     if(file==='release-native-validation.yml'){
       const expression=workflow.match(/include: \$\{\{ fromJSON\((.*)\) \}\}/)?.[1];assert(expression);
       assert(expression.startsWith("inputs.recovery_matrix || "));
-      const [full]=[...expression.matchAll(/'(\[.*?\])'/g)].map(m=>JSON.parse(m[1]));
+      const selectMatrix=shard_macos_upgrades=>JSON.parse(runInNewContext(expression,{
+        inputs:{recovery_matrix:'',shard_macos_upgrades},
+        format:(template,...values)=>template.replace(/\{(\d+)\}/g,(_,index)=>values[Number(index)]),
+      }));
+      const full=selectMatrix(false);
       assert.deepEqual(full.map(t=>t.target).sort(),manifest.targets.map(t=>t.triple).sort());
+      assert.deepEqual(selectMatrix(true),full.filter(t=>t.target!=='aarch64-apple-darwin'));
       for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert.equal(full.find(t=>t.target===triple)?.os,'ubuntu-24.04-arm');
     }else for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
     assert(workflow.includes('scripts/require-native-linux-arm64.sh'),file+' lacks hardware check');
@@ -148,7 +153,7 @@ test('supported Linux ARM targets require native runners, every source feedback 
   const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];
   assert.match(background,/runs-on: ubuntu-24.04-arm/);assert.match(background,/VERIFY_ARM64: 'true'/);
   assert.match(background,/publication-arm64-verified-/);assert.doesNotMatch(background,/id-token:|contents: write|actions: write|npm publish|concurrency:/);
-  const native=text('release-native-validation.yml').replace(/\r\n/g,'\n');
+  const native=text('release-native-validation.yml').replace(/\r\n/g,'\n').replace(/^      - &\w+\n        /gm,'      - ');
   const step=name=>native.split('      - name: '+name+'\n')[1]?.split('\n      - ')[0];
   const install=step('Install and verify the official pinned standalone Runtime');
   assert.match(install,/id: pinned-runtime/);assert.match(install,/if: inputs.artifact_source != 'published-assets'/);

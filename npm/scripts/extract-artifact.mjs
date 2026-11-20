@@ -564,11 +564,15 @@ for tag in [*report['published_formal_sources'], *DATABASE_DEV_CHECKPOINTS]:
         pass  # This target/release has no policy exemption for absent artifacts.
     present = tag not in gaps or any(row.get('version') == tag[1:] and row.get('passed') is True for row in report['sources'])
     sources[tag] = {'assets': [{'name': name} for name in required] if present else []}
-print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps,
-                 'selected': sorted(select_upgrade_sources(sources, target, report['profile']))}))
+result = {'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps,
+          'selected': sorted(select_upgrade_sources(sources, target, report['profile']))}
+if report.get('macos_shards'):
+    import runpy
+    result['model_key'] = runpy.run_path('native-model-cache.py')['cache_key']()
+print(json.dumps(result))
 `], {cwd:new URL('../../scripts/',import.meta.url), input:JSON.stringify(report), encoding:'utf8', windowsHide:true}));
 }
-export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners,independent=Boolean(candidate && !client2)} = {}) {
+export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context, {candidate,client2=candidate?.client2,evidenceOwners,independent=Boolean(candidate && !client2),macosShardsRequired=false} = {}) {
   requireValue(sourcePattern.test(context.sha || '') && positiveID(context.run_id) && positiveID(context.run_attempt), 'Invalid full run identity');
   const processes = [], reports = [], historicalUpgrades = [];
   function job(predicate, label) {
@@ -577,6 +581,12 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
       && matches[0].run_id === (evidenceOwners?.[matches[0].name] || context).run_id
       && matches[0].run_attempt === (evidenceOwners?.[matches[0].name] || context).run_attempt
       && matches[0].head_sha === (evidenceOwners?.[matches[0].name] || context).sha, 'Missing successful exact-attempt full job: ' + label);
+    return matches[0];
+  }
+  function checkRunId(job) {
+    const id = job.check_run_url?.match(/\/check-runs\/([1-9]\d*)$/)?.[1];
+    requireValue(id, 'Missing check run identity: '+job.name);
+    return id;
   }
   function read(artifact, name) {
     const folder = join(directory,artifact);
@@ -638,7 +648,18 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     read('resident-concurrency-'+target,'fixture-dependencies.json');
     const bounded = read('resident-concurrency-'+target,'fixture-process-verification.json');
     requireValue(Array.isArray(bounded) && bounded.length > 0 && bounded.every(r => r.passed === true), 'Fixture process bounds incomplete');
-    const upgrades = read('published-upgrades-'+target,'published-upgrades.json');
+    const legacyUpgrades = 'published-upgrades-'+target;
+    const attemptUpgrades = legacyUpgrades+'-'+context.run_id+'-'+context.run_attempt;
+    const aggregateJob = 'native-regression / Apple Silicon upgrade aggregate';
+    const sharded = target === 'aarch64-apple-darwin' && (macosShardsRequired || existsSync(join(directory,attemptUpgrades))
+      || jobs.some(j => j.name === aggregateJob && j.conclusion !== 'skipped'));
+    let aggregateCheckRunId;
+    if (sharded) {
+      requireValue(!existsSync(join(directory,legacyUpgrades)), 'Mixed serial and sharded Apple Silicon upgrade evidence');
+      aggregateCheckRunId = checkRunId(job(j => j.name === aggregateJob, 'Apple Silicon aggregate'));
+    }
+    const upgradeArtifact = sharded ? attemptUpgrades : legacyUpgrades;
+    const upgrades = read(upgradeArtifact,'published-upgrades.json');
     const full = upgrades.profile === 'full';
     requireValue(upgrades.passed === true && ['critical','full'].includes(upgrades.profile) && (!candidate || full)
       && upgrades.full_coverage === full && upgrades.all_published_sources_covered === full
@@ -655,6 +676,44 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
       && Object.entries(policy.checkpoints).every(([tag,reason]) => upgrades.database_dev_checkpoints[tag] === reason)
       && JSON.stringify([...upgrades.selected_sources].sort()) === JSON.stringify(policy.selected)
       && upgrades.sources.length === policy.selected.length, 'Required formal or database DEV upgrade sources differ');
+    let shardPlan, shardChecks;
+    if (sharded) {
+      shardPlan = read(upgradeArtifact,'macos-shard-plan.json');
+      const proof = upgrades.macos_shards;
+      const runtimeNames = publishedAssetNames('runtime',target);
+      const expectedIdentity = {
+        cli_sha256:native[0].binary_sha256, runtime_sha256:spec.runtime.assets.find(a => a.name === runtimeNames[1]).sha256,
+        runtime_version:spec.runtime.version, manifest_sha256:manifestHash,
+        bundle_sha256:spec.runtime.assets.find(a => a.name === runtimeNames[2]).sha256,
+        model_key:policy.model_key, fixture_sha:context.sha,
+      };
+      const run = shardPlan.run;
+      requireValue(full && proof?.plan_sha256 === reports.at(-1).sha256 && proof.check_run_id === aggregateCheckRunId
+        && shardPlan.schema === 1 && shardPlan.target === target && run?.repository === spec.cli.repository
+        && run.run_id === String(context.run_id) && run.run_attempt === String(context.run_attempt) && run.workflow_sha === context.sha
+        && ownKeys(proof.run,Object.keys(run)) && Object.keys(run).every(k => run[k] === proof.run[k])
+        && [shardPlan.identity,proof.identity].every(identity => ownKeys(identity,Object.keys(expectedIdentity))
+          && Object.keys(expectedIdentity).every(k => expectedIdentity[k] !== undefined && identity[k] === expectedIdentity[k]))
+        && ownKeys(shardPlan.inputs,policy.selected) && Array.isArray(proof.source_evidence)
+        && new Set(Object.values(shardPlan.inputs).map(item => item?.release_id)).size === policy.selected.length
+        && proof.source_evidence.length === policy.selected.length
+        && new Set(proof.source_evidence.map(row => row?.process_report_sha256)).size === policy.selected.length
+        && ['published_formal_sources','database_dev_checkpoints','registry_formal_versions','additional_draft_baselines']
+          .every(key => JSON.stringify(shardPlan.inventory?.[key]) === JSON.stringify(upgrades[key])),
+      'Apple Silicon upgrade shard plan or byte identity differs');
+      const shardPrefix = 'native-regression / Apple Silicon upgrade (';
+      const names = policy.selected.map(tag => shardPrefix+tag+')');
+      requireValue(jobs.filter(j => j.name.startsWith(shardPrefix)).length === names.length,
+        'Unexpected Apple Silicon upgrade shard job inventory');
+      shardChecks = new Map(policy.selected.map((tag,index) => {
+        const name = names[index];
+        return [tag,checkRunId(job(j => j.name === name, name))];
+      }));
+      requireValue(new Set([aggregateCheckRunId,...shardChecks.values()]).size === names.length+1,
+        'Duplicate Apple Silicon check run identity');
+    } else {
+      requireValue(upgrades.macos_shards === undefined, 'Apple Silicon shard evidence has no exact aggregate job');
+    }
     const passed = [], notApplicable = [];
     for (const version of upgrades.selected_sources) {
       const row = upgrades.sources.filter(r => 'v'+r.version === version);
@@ -665,10 +724,22 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
       } else {
         requireValue(row[0].passed === true && row[0].status === undefined
           && row[0].upgrade_contract === 'standalone-v1', 'Failed historical upgrade source');
-        const check = read('published-upgrades-'+target,version+'/results/real-account-return-verification.json');
+        const check = read(upgradeArtifact,version+'/results/real-account-return-verification.json');
         requireValue(Array.isArray(check) && check.length === 1 && check[0].binary_sha256 === native[0].binary_sha256, 'Upgrade process binary differs');
         requireValue(check[0].upgrade_contract === 'standalone-v1' && check[0].runtime_installed_after_legacy_data === true
           && check[0].legacy_handoff_actor === null, 'Historical database upgrade must install Runtime after legacy data without starting a legacy host');
+        if (sharded) {
+          const source = shardPlan.inputs[version];
+          const names = [`rsrs-${target}`,`rsrs-${target}-runtime.tar.gz`,`cli-build-${target}.json`];
+          const evidence = upgrades.macos_shards.source_evidence.filter(item => item?.source === version);
+          requireValue(positiveID(source?.release_id) && ownKeys(source.assets,names)
+            && names.every(name => positiveID(source.assets[name]?.id) && /^sha256:[a-f0-9]{64}$/.test(source.assets[name]?.digest || ''))
+            && new Set(names.map(name => source.assets[name].id)).size === names.length
+            && evidence.length === 1 && evidence[0].process_report_sha256 === reports.at(-1).sha256
+            && evidence[0].check_run_id === shardChecks.get(version)
+            && check[0].seed_source === version && 'sha256:'+check[0].seed_sha256 === source.assets[names[0]].digest,
+          'Apple Silicon historical source or shard report digest differs: '+version);
+        }
         processes.push(...validatePublishedProcessEvidence(check[0],spec,target,manifestHash));
         passed.push(version);
       }
@@ -790,7 +861,8 @@ async function completePublished(spec,targets,directory) {
     requireValue(batch.jobs.length>0 && jobs.length<batch.total_count,'Incomplete full job inventory');
   }
   const client2 = process.env.CLIENT2_RELEASE ? {release:process.env.CLIENT2_RELEASE,source_sha:process.env.CLIENT2_COMMIT} : undefined;
-  const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context,{client2,independent:!client2});
+  const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context,
+    {client2,independent:!client2,macosShardsRequired:process.env.MACOS_UPGRADE_SHARDS_REQUIRED === 'true'});
   requireValue(result.full_passed, 'Full acceptance requires full historical upgrade coverage');
   writeFileSync(join(directory,'published-full-result.json'),JSON.stringify(result,null,2)+'\n');
 }
