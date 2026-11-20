@@ -841,6 +841,9 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         return Ok(());
     }
     if let Some(health) = probe_runtime()? {
+        if ready_business_runtime(&health)? {
+            return Ok(());
+        }
         if runtime_acceptable(&health)? {
             if crate::autostart::startup_core_config_ready(&health)? {
                 respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
@@ -859,6 +862,23 @@ pub(crate) fn ensure_daemon() -> Result<()> {
     let takeover = crate::runtime_policy::takeover_lock()?;
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     ensure_daemon_locked()
+}
+
+/// An open, scoped service can handle business RPC without transferring lifecycle ownership.
+fn ready_business_runtime(health: &crate::net_rpc::Health) -> Result<bool> {
+    if !health.store_ready || health.inference_stalled() || health.installation_root.is_empty()
+        || health.data_dir.is_empty() || health.v != PROTOCOL_V
+    {
+        return Ok(false);
+    }
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    if !crate::mcp::same_path(std::path::Path::new(&health.installation_root), &root)
+        || !crate::mcp::same_path(std::path::Path::new(&health.data_dir), &profile)
+    {
+        return Ok(false);
+    }
+    crate::net_rpc::request_scope(health)?;
+    Ok(true)
 }
 
 pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool> {
@@ -1293,6 +1313,19 @@ mod runtime_resolution_tests {
             .err()
             .context("legacy proof was accepted during runtime reuse")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>());
+        let (root, profile) = respire_client_host::config::control_roots()?;
+        let mut independent = health.clone();
+        independent.exe = directory.path().join("independent-runtime").display().to_string();
+        independent.installation_root = root.display().to_string();
+        independent.data_dir = profile.display().to_string();
+        independent.runtime_version = "3.1.4".into();
+        independent.managed_id = Some("external-host".into());
+        independent.generation = 1;
+        independent.account_id = "account-identity".into();
+        independent.instance_id = "instance-identity".into();
+        anyhow::ensure!(ready_business_runtime(&independent)?, "scoped RPC must not depend on the local install receipt");
+        independent.data_dir = directory.path().join("other-library").display().to_string();
+        anyhow::ensure!(!ready_business_runtime(&independent)?, "RPC selected a different library");
         std::fs::remove_file(crate::runtime_fetch::manifest_path())?;
 
         // Even an explicit override cannot turn this CLI into a Runtime.
