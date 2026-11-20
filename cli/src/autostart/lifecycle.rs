@@ -1074,10 +1074,8 @@ pub(super) fn registered_runtime_image(config: &Registration, migrated_image: Op
         }
     }
     // The registered supervisor clears runtime overrides before selecting its child.
-    let accepted = crate::runtime_fetch::read_manifest()?
-        .is_some_and(|manifest| crate::runtime_fetch::version_in_accept(&manifest.version));
     let runtime =
-        if let Some(managed) = crate::runtime_fetch::managed_runtime_path()?.filter(|_| accepted) {
+        if let Some(managed) = crate::runtime_fetch::managed_runtime_path()? {
             managed
         } else {
             config
@@ -1168,8 +1166,8 @@ fn wait_ready_with_expectation(config: &Registration,
         if let Some(health) = crate::rpc::probe_runtime()? {
             verify_owned_runtime(config, &health)?;
             anyhow::ensure!(
-                crate::runtime_fetch::version_in_accept(&health.runtime_version),
-                "managed runtime version mismatch"
+                health.v == crate::rpc::PROTOCOL_V,
+                "managed Runtime protocol mismatch"
             );
             if health.credential_state == "required" || health.store_ready
                 || respire_client_host::settings::off_mode()? {

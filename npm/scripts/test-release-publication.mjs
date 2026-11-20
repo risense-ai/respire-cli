@@ -2,7 +2,7 @@ import {installPinnedRuntime} from '../../scripts/ci-install-pinned-runtime.mjs'
 import {regressionContract} from './release-regression-contract.mjs';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validateFullGUI, validatePublishedPackage} from './extract-artifact.mjs';
+import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedProcessEvidence, validatePublishedFull, validateFullGUI, validatePublishedPackage} from './extract-artifact.mjs';
 import assert from 'node:assert/strict';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
@@ -766,15 +766,6 @@ test('published archive extractor refuses links, traversal, duplicates, bad chec
     await assert.rejects(extractPublishedArchive(path.join(root,'truncated.tgz'),path.join(root,'truncated')));
   } finally {rmSync(root,{recursive:true,force:true});}
 });
-test('published compatibility checks exact product pin and numeric DEV minCLI without rebuilding',()=>{
-  const spec={cli:{version:'1.0.21-dev.5'},runtime:{version:'1.0.21-dev.4'}};
-  const runtime={compat:{min_cli:'1.0.21-dev.5',max_cli:'*'}}, pin={required:spec.runtime.version,accept:'>=1.0.21-dev.4,<2.0.0'};
-  validatePublishedCompatibility(spec,runtime,pin);
-  for(const bad of [{required:'1.0.21-dev.3'}, {accept:'*'}])assert.throws(()=>validatePublishedCompatibility(spec,runtime,{...pin,...bad}));
-  for(const compat of [{min_cli:'1.0.21-dev.6',max_cli:'*'},{min_cli:'1.0.21-dev.5',max_cli:'1.0.21-dev.5'},{min_cli:'invalid',max_cli:'*'}])assert.throws(()=>validatePublishedCompatibility(spec,{compat},pin));
-  validatePublishedCompatibility({...spec,cli:{version:'1.0.21-dev.10'}},runtime,pin);
-});
-
 import {publishedFullFixture} from './full-report-fixture.mjs';
 test('published full joins every existing report and live image identity; copied summaries and partial jobs cannot pass',()=>{
   const root=mkdtempSync(path.join(tmpdir(),'published-full-join-'));

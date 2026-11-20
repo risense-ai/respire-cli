@@ -504,7 +504,7 @@ pub(crate) fn serve() -> Result<()> {
         let (installation, profile) = respire_client_host::config::control_roots()?;
         anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
             && health.instance_id == instance_id && !health.account_id.is_empty() && health.generation > 0
-            && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+            && health.v == crate::rpc::PROTOCOL_V
             && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
             && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
             "Runtime readiness does not match the selected child and installation");

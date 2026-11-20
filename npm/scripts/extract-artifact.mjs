@@ -229,14 +229,6 @@ function compareVersion(a, b) {
   for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
   return 0;
 }
-export function validatePublishedCompatibility(spec, runtime, pin) {
-  requireValue(pin.required === spec.runtime.version, 'Published CLI requires a different Runtime');
-  const range = /^>=(\d+\.\d+\.\d+(?:-dev\.\d+)?),<(\d+\.\d+\.\d+(?:-dev\.\d+)?)$/.exec(pin.accept || '');
-  requireValue(range && compareVersion(spec.runtime.version, range[1]) >= 0 && compareVersion(spec.runtime.version, range[2]) < 0,
-    'Published Runtime outside CLI acceptance range');
-  requireValue(runtime.compat && compareVersion(spec.cli.version, runtime.compat.min_cli) >= 0
-    && (runtime.compat.max_cli === '*' || compareVersion(spec.cli.version, runtime.compat.max_cli) < 0), 'Published CLI outside Runtime compatibility range');
-}
 async function publishedSourceJSON(part, path, options) {
   const blob = await readGitHub(`${part.repository}/contents/${path}?ref=${part.source_sha}`, options.token, options.fetcher ?? fetch);
   requireValue(blob.type === 'file' && blob.encoding === 'base64' && blob.size > 0 && blob.size <= 2 ** 20, 'Invalid published source file');
@@ -252,8 +244,6 @@ export async function consumePublishedTarget(spec, target, source, destination, 
   }
   const cli = JSON.parse(readFileSync(join(source,'cli',`cli-build-${target}.json`))), runtime = JSON.parse(readFileSync(join(source,'runtime',`runtime-build-${target}.json`)));
   validatePublishedMetadata(spec, target, cli, runtime);
-  const pin = options.candidate ? JSON.parse(readFileSync('runtime-pin.json')) : await publishedSourceJSON(spec.cli, 'runtime-pin.json', options);
-  validatePublishedCompatibility(spec, runtime, pin);
   const runtimeLock = (await publishedSourceJSON(spec.runtime, 'crates/core-sdk/core-sdk.lock.json', options)).targets?.[target];
   requireValue(runtimeLock, 'Published Runtime Core SDK lock missing');
   const cliManifest = options.candidate ? JSON.parse(readFileSync('npm/artifact-manifest.json')) : await publishedSourceJSON(spec.cli, 'npm/artifact-manifest.json', options);

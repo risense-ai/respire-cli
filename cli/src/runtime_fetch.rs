@@ -29,7 +29,7 @@
 //! compared with the same numeric rules as `respire_client_host::version_cmp`) that
 //! an already-installed runtime must satisfy to be reused instead of replaced.
 //! Runtime releases publish `runtime-build-<triple>.json` with
-//! `{"runtime_version","tag","triple","binary_sha256","binary_file","compat":{"min_cli","max_cli"}}`
+//! `{"runtime_version","tag","triple","binary_sha256","binary_file"}`
 //! (`sha256` is an alias for `archive_sha256` only);
 //! `compat` states which CLI versions the runtime accepts and is enforced
 //! before an archive is installed.
@@ -571,7 +571,6 @@ pub(crate) fn require_offline_keygen_handoff() -> Result<(PathBuf, String)> {
     let metadata = manifest.bound_metadata(&release_triple()?)
         .context("offline_keygen_handoff_unsupported: authenticated capability metadata required")?;
     require_handoff_capability(&metadata.capabilities)?;
-    anyhow::ensure!(version_in_accept(&manifest.version), "offline_keygen_handoff_unsupported: Runtime incompatible");
     Ok((binary, manifest.sha256))
 }
 
@@ -633,14 +632,6 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
 // Release metadata and download sources
 // ---------------------------------------------------------------------------
 
-/// `compat` block of `runtime-build-<triple>.json`: which CLI versions the
-/// runtime release accepts.
-#[derive(Clone, Debug, Deserialize)]
-pub struct CompatBounds {
-    pub min_cli: String,
-    pub max_cli: String,
-}
-
 /// Released runtime build metadata consumed by the CLI downloader and client2.
 #[derive(Clone, Debug, Deserialize)]
 pub struct BuildMetadata {
@@ -664,7 +655,6 @@ pub struct BuildMetadata {
     pub source_commit: Option<String>,
     /// Archive-side binary file name, the full-triple name.
     pub binary_file: String,
-    pub compat: CompatBounds,
     #[serde(default)]
     pub protocol_range: Option<ProtocolRange>,
     #[serde(default, deserialize_with = "deserialize_capabilities")]
@@ -764,10 +754,6 @@ impl BuildMetadata {
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
-        self.validate_for_cli(required, triple, env!("CARGO_PKG_VERSION"))
-    }
-
-    fn validate_for_cli(&self, required: &str, triple: &str, cli: &str) -> Result<()> {
         anyhow::ensure!(
             self.schema_version == 1 || self.schema_version == 2,
             "unsupported runtime metadata schema {}",
@@ -814,27 +800,6 @@ impl BuildMetadata {
         if self.schema_version == 2 {
             self.validate_schema2()?;
         }
-        anyhow::ensure!(
-            valid_version(&self.compat.min_cli),
-            "release metadata has an invalid compat range"
-        );
-        anyhow::ensure!(
-            self.compat.max_cli == "*" || valid_version(&self.compat.max_cli),
-            "release metadata has an invalid compat range"
-        );
-        anyhow::ensure!(
-            semver_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
-            "runtime {} requires CLI >= {}; upgrade the CLI first",
-            self.runtime_version,
-            self.compat.min_cli
-        );
-        anyhow::ensure!(
-            self.compat.max_cli == "*"
-                || semver_cmp(cli, &self.compat.max_cli) == std::cmp::Ordering::Less,
-            "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
-            self.runtime_version,
-            self.compat.max_cli
-        );
         Ok(())
     }
 

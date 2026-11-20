@@ -889,7 +889,7 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
             &respire_client_host::config::control_roots()?.1,
         )
         && crate::autostart::may_reuse_runtime(health)?
-        && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+        && health.v == PROTOCOL_V
         && crate::mcp::exe_matches_dest(&health.exe, &expected)
         && !health.inference_stalled())
 }
@@ -1073,7 +1073,7 @@ fn wait_daemon_ready(
                     && !health.account_id.is_empty()
                     && health.instance_id == instance_id
                     && crate::mcp::exe_matches_dest(&health.exe, executable)
-                    && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+                    && health.v == PROTOCOL_V
                     && !health.data_dir.is_empty()
                     && crate::mcp::same_path(
                         std::path::Path::new(&health.data_dir),

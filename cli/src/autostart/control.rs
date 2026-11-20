@@ -272,9 +272,8 @@ pub(crate) fn installed_auth_runtime() -> Result<(std::path::PathBuf, String)> {
         .context("auth control requires an installed managed Runtime; run `rsrs runtime install` to migrate the installation and refresh the stable CLI, then retry")?.canonicalize()?;
     let manifest = crate::runtime_fetch::read_manifest()?
         .context("auth control Runtime manifest is missing")?;
-    anyhow::ensure!(crate::runtime_fetch::version_in_accept(&manifest.version)
-        && super::hash_file(&binary)?.eq_ignore_ascii_case(&manifest.sha256),
-        "auth control Runtime version or image does not match the managed manifest");
+    anyhow::ensure!(super::hash_file(&binary)?.eq_ignore_ascii_case(&manifest.sha256),
+        "auth control Runtime image does not match the managed manifest");
     Ok((binary, manifest.sha256))
 }
 
