@@ -135,10 +135,12 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     )?;
     // Verify the replacement before retiring any state or stopping a service.
     resolve_runtime_executable()?;
-    if health.is_none() {
-        crate::autostart::prepare_cold_restart_locked()?;
-    }
-    let mut maintenance = crate::autostart::restart_maintenance_locked()?;
+    let independent = health.is_none() && crate::autostart::prepare_cold_restart_locked()?;
+    let maintenance = if independent {
+        None
+    } else {
+        Some(crate::autostart::restart_maintenance_locked()?)
+    };
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     crate::autostart::restart_stage("restart_probe");
     let stopped_pid = health.as_ref().map(|value| value.pid);
@@ -161,8 +163,10 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     if !respire_client_host::settings::off_mode()? && health.credential_state != "required" {
         verify_open_store(&respire_client_host::config::control_roots()?.1)?;
     }
-    maintenance.finish()?;
-    maintenance.finish_handoff()?;
+    if let Some(mut maintenance) = maintenance {
+        maintenance.finish()?;
+        maintenance.finish_handoff()?;
+    }
     let ready = crate::net_rpc::health()?;
     crate::autostart::restart_stage("restart_ready");
     Ok(json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,

@@ -291,7 +291,7 @@ pub(crate) fn prepare_grant_for_identity(
                 "managed launch does not match an enabled registration"
             ),
             None => anyhow::ensure!(
-                (!config.enabled && !config.manually_stopped) || maintenance.is_some(),
+                !config.enabled || maintenance.is_some(),
                 "registered runtime requires its host lifecycle coordinator"
             ),
         }
