@@ -1277,9 +1277,6 @@ fn archive_stopped_registration_locked(root: &Path, config: &Registration) -> Re
             !state.registered && !state.loaded && !state.running,
             "Runtime still has an OS startup registration"
         );
-        let port = config.environment.get("RSRS_RPC_PORT")
-            .context("registered Runtime port missing")?.parse::<u16>()?;
-        crate::runtime_fetch::require_runtime_port_closed(([127, 0, 0, 1], port).into())?;
         let path = control_path(root);
         anyhow::ensure!(
             path.parent().context("Runtime registration directory missing")?.canonicalize()?
@@ -2748,7 +2745,9 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
-        let config = new_registration()?;
+        let mut config = new_registration()?;
+        let unrelated_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        config.environment.insert("RSRS_RPC_PORT".into(), unrelated_listener.local_addr()?.port().to_string());
         let path = control_path(&root);
         let legacy = b"obsolete registration";
         fs::create_dir_all(path.parent().context("registration parent missing")?)?;
