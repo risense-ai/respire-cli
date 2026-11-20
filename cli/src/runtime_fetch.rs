@@ -1653,35 +1653,19 @@ fn is_progress_abort(error: &anyhow::Error) -> bool {
         || error.downcast_ref::<std::io::Error>().is_some()
 }
 
-/// Read-only admission before progress, downloads, install locks or selection writes.
-/// A different pin is not permission to discard an unverified existing selection.
-fn automatic_install_preflight(required: Option<&str>) -> Result<Option<PathBuf>> {
-    let manifest = read_manifest().context(ManagedRuntimeRepairRequired)?;
-    let selected = if let Some(manifest) = &manifest {
-        let binary = validate_installed(manifest).map_err(|error| {
-            if manifest.release.is_none() {
-                error.context(LegacyRuntimeMigrationRequired)
-            } else {
-                error
-            }
-        })?;
-        required.is_none_or(|version| manifest.version == version).then_some(binary)
-    } else {
-        // Account data does not establish process ownership or authorize an unlock.
-        // Validate configured paths without opening or migrating the old database.
-        respire_client_host::config::control_roots()
-            .context(LegacyRuntimeMigrationRequired)?;
-        let registration = installation_root().join("runtime/autostart/registration.json");
-        anyhow::ensure!(
-            !record_exists(&registration).context(LegacyRuntimeMigrationRequired)?,
-            LegacyRuntimeMigrationRequired
-        );
-        verify_stopped_endpoint(&crate::rpc::endpoint_path())
-            .context(LegacyRuntimeMigrationRequired)?;
-        None
+/// Reuse only the selected package and its own verified bytes.
+fn selected_install_for_reuse(required: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? else {
+        return Ok(None);
     };
-    verify_install_host()?;
-    Ok(selected)
+    let binary = validate_installed(&manifest).map_err(|error| {
+        if manifest.release.is_none() {
+            error.context(LegacyRuntimeMigrationRequired)
+        } else {
+            error
+        }
+    })?;
+    Ok(required.is_none_or(|version| manifest.version == version).then_some(binary))
 }
 
 fn record_exists(path: &Path) -> Result<bool> {
@@ -1789,8 +1773,7 @@ fn verify_install_host() -> Result<()> {
     Ok(())
 }
 
-/// Materialization and managed replacement must use the same read-only boundary
-/// before changing the old CLI image, supervisor registration or maintenance state.
+/// Validate historical ownership before changing supervisor or maintenance state.
 pub(crate) fn require_automatic_migration_safe() -> Result<()> {
     if let Some(selected) = crate::embedding::selection() {
         // Client2 has already selected this image. Host commands do not migrate
@@ -1802,7 +1785,17 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
     }
     verify_install_host()?;
     shared::migrate_legacy()?;
-    automatic_install_preflight(None).map(|_| ())
+    if selected_install_for_reuse(None)?.is_none() {
+        respire_client_host::config::control_roots().context(LegacyRuntimeMigrationRequired)?;
+        let registration = installation_root().join("runtime/autostart/registration.json");
+        anyhow::ensure!(
+            !record_exists(&registration).context(LegacyRuntimeMigrationRequired)?,
+            LegacyRuntimeMigrationRequired
+        );
+        verify_stopped_endpoint(&crate::rpc::endpoint_path())
+            .context(LegacyRuntimeMigrationRequired)?;
+    }
+    Ok(())
 }
 
 /// Install a release from the default channel (or an explicit version),
@@ -1826,19 +1819,15 @@ fn download_runtime_release(
     pin: Option<&str>,
     mirror: Option<&str>,
     channel: RuntimeChannel,
-    migrate_existing: bool,
+    reuse_selected: bool,
 ) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
-    if migrate_existing {
-        verify_install_host()?;
-        shared::migrate_legacy()?;
-    }
     if let Some(explicit) = pin {
         anyhow::ensure!(valid_version(explicit), "invalid runtime version: {explicit:?}");
     }
-    if migrate_existing {
-        if let Some(binary) = automatic_install_preflight(pin)? {
+    if reuse_selected {
+        if let Some(binary) = selected_install_for_reuse(pin)? {
             return Ok(binary);
         }
     }
@@ -1849,8 +1838,8 @@ fn download_runtime_release(
         "runtime downloads are disabled in core test mode"
     );
     let lock = install_lock()?;
-    if migrate_existing {
-        if let Some(binary) = automatic_install_preflight(pin)? {
+    if reuse_selected {
+        if let Some(binary) = selected_install_for_reuse(pin)? {
             return Ok(binary);
         }
     }
@@ -1897,9 +1886,6 @@ fn download_runtime_release(
             // Release archives carry the full-triple binary name; publish the
             // bare managed name before switching the version directory.
             place_managed_binary(&unpacked, &metadata.binary_file)?;
-            if migrate_existing {
-                automatic_install_preflight(Some(&required))?;
-            }
             adopt_or_verify_version_dir(&unpacked, &manifest)?;
             publish_manifest(&manifest)?;
             Ok(managed_binary_path(&required))
