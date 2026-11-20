@@ -1871,12 +1871,19 @@ function Invoke-OfflineGuiAcceptance {
     $report.offline.action_stage = 'offline_initialization'
     Press-OfflineButton ([regex]::Unescape('\u005e\u521d\u59cb\u5316\u79bb\u7ebf\u8bb0\u5fc6\u5e93\u0024')) -VerifySourceStability:$SourceCandidateStability
     $report.offline.action_stage = 'key_generation'
+    $script:recoveryMaterialVisible = $true
     Press-OfflineButton ([regex]::Unescape('\u005e\u521b\u5efa\u672c\u673a\u5bc6\u94a5\u0024'))
-    # Never read arbitrary tree nodes/values, capture a screenshot, copy or archive recovery material.
-    $null = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('\u005e\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599\u0024')) 60
+    # Keep capture blocked until the selected dialog is proven absent.
     $report.offline.action_stage = 'recovery_dismiss'
-    Press-OfflineButton ([regex]::Unescape('\u005e\u5173\u95ed\u0024')) # Focus the recovery dialog's fixed close button before native input.
-    Wait-OfflineRecoveryDismissed
+    if ($binding.sealed_keygen_acknowledgement -eq $true) {
+        Assert-RecoveryMaterialGate
+        Confirm-RecoveryMaterial
+    } else {
+        $null = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('\u005e\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599\u0024')) 60
+        Press-OfflineButton ([regex]::Unescape('\u005e\u5173\u95ed\u0024'))
+        Wait-OfflineRecoveryDismissed
+        $script:recoveryMaterialVisible = $false
+    }
     $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
     $report.offline.runtime_binding_stage = 'start_control'
