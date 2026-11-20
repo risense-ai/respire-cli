@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// CLI versions accepted by a runtime build (semver window, `max_cli` may be `*`).
+/// Historical split-era CLI version window, retained for wire compatibility.
+/// Current Runtime interoperability is determined by the wire protocol and capabilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCompat {
     pub min_cli: String,
