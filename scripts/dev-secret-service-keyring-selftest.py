@@ -47,6 +47,12 @@ def business_check(manager, env, command, roundtrips, run=run_command, *, timeou
         result = run(command, env=env, check=False, timeout=timeout)
         business_exit = result.returncode
         report["business_passed"] = business_exit == 0
+        if manager.daemon is not None:
+            daemon_exit = manager.daemon.poll()
+            report["secret_service_daemon_at_business_exit"] = {
+                "state": "running" if daemon_exit is None else "exited",
+                "exit_code": daemon_exit,
+            }
         report["stage"] = "credential_after"
         manager.verify_owner()
         after = {}
@@ -293,6 +299,7 @@ def self_test():
     assert report["business_credential_cleanup_passed"] and not report["passed"]
     assert report["failure_code"] == "fixture_diagnostic_failed"
     assert report["secret_service_daemon"] == {"state": "exited", "exit_code": -6}
+    assert report["secret_service_daemon_at_business_exit"] == report["secret_service_daemon"]
     assert type(report["secret_service_daemon"]["exit_code"]) is int
     assert "sensitive-after" not in json.dumps(report)
 

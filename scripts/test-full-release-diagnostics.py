@@ -301,6 +301,17 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(runtime.exit_diagnostic('nonloopback_dns', 1, result)['structured_reason'], 'unknown')
         for case_id in runtime.DIRECT_CASE_IDS:
             self.assertEqual(runtime.exit_diagnostic(case_id, 0, result)['case_id'], case_id)
+        result.stdout = json.dumps({'summary': {'reason': 'runtime_error'}, 'errors': [
+            SECRET, 'host session credential read failed (' + SECRET + ')',
+            'Runtime V2 unlock rejected (HTTP 403); inspect Runtime health before retrying',
+        ]})
+        diagnostic = runtime.exit_diagnostic('runtime_host_unlock', 0, result)
+        self.assertEqual(diagnostic['first_unlock_error'], {'code': 'host_session_credential_read_failed'})
+        self.assertNotIn(SECRET, json.dumps(diagnostic))
+        result.stdout = json.dumps({'errors': ['Runtime V2 unlock rejected (HTTP 403); ' + SECRET]})
+        diagnostic = runtime.exit_diagnostic('runtime_host_unlock', 0, result)
+        self.assertEqual(diagnostic['first_unlock_error'], {'code': 'unlock_http_rejected', 'http_status': 403})
+        self.assertNotIn(SECRET, json.dumps(diagnostic))
 
         from dev_migration_diagnostics import migration_execution_state
         import sqlite3

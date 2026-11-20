@@ -963,6 +963,8 @@ class SnapshotTests(unittest.TestCase):
                 (b'malloc(): corrupted ' + private, -6, 'allocator_corruption'),
                 (b'munmap_chunk(): invalid pointer ' + private, -6, 'allocator_invalid_pointer'),
                 (b'*** stack smashing detected *** ' + private, -6, 'stack_smashing'),
+                (b'(gnome-keyring-daemon:123): GLib-GIO-ERROR **: ' + private, -5, 'glib_fatal_error'),
+                (b'** (gnome-keyring-daemon:123): Gkm-CRITICAL **: ' + private, -5, 'glib_fatal_critical'),
                 (private, -6, 'unknown'), (b'ERROR:file.c:42:fn: assertion failed', None, 'unknown'),
                 (b'ERROR:file.c:42:fn: assertion failed', 0, 'unknown')):
             self.assertEqual(secret_service.provider_abort_type(stderr, code), expected)
@@ -970,6 +972,7 @@ class SnapshotTests(unittest.TestCase):
             header = b'Bail out! Gkm:ERROR:/private/' + private + b'/' + filename + b':42:some_function: assertion failed: (' + private + b')'
             location = secret_service.provider_abort_location(header, -6)
             self.assertEqual(location, dict(file=filename.decode(), line=42, function='some_function'))
+            self.assertEqual(secret_service.provider_abort_location(header, -5), location)
             for value in (USER, PASSWORD, SUPER, '/private/', 'assertion failed'):
                 self.assertNotIn(value, json.dumps(location))
             self.assertEqual(secret_service.provider_abort_location(header, None), 'unknown')
