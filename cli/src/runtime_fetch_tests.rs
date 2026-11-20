@@ -565,7 +565,7 @@ fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
 }
 
 #[test]
-fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<()> {
+fn runtime_staging_and_cli_update_preserve_legacy_data_before_launch() -> Result<()> {
     let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
@@ -584,11 +584,8 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     fs::write(&endpoint, br#"{"v":1,"pid":0}"#)?;
     let error = download_and_install(None, None)
         .err()
-        .context("legacy owner triggered automatic installation")?;
-    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
-    anyhow::ensure!(is_progress_abort(&error));
-    anyhow::ensure!(!format!("{error:#}").contains("downloads are disabled"),
-        "legacy check happened after the download boundary");
+        .context("hermetic download was allowed")?;
+    anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
     let materialized = crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
     anyhow::ensure!(materialized == legacy);
     anyhow::ensure!(!crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &legacy)
@@ -618,8 +615,8 @@ fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> 
             .err().context("non-directory binary ancestor passed admission")?;
         anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
         let error = download_and_install(None, None)
-            .err().context("non-directory binary ancestor triggered installation")?;
-        anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+            .err().context("hermetic download was allowed")?;
+        anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
         anyhow::ensure!(!root.exists(), "rejected binary path created installation state");
         anyhow::ensure!(fs::read(&blocked)? == b"existing non-directory bytes");
     }
@@ -642,10 +639,10 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
     let required = &pinned()?.required;
-    anyhow::ensure!(automatic_install_preflight(Some(required))?.is_none());
+    anyhow::ensure!(selected_install_for_reuse(Some(required))?.is_none());
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     fs::write(dir.path().join("client.json"), br#"{"language":"en"}"#)?;
-    anyhow::ensure!(automatic_install_preflight(Some(required))?.is_none(),
+    anyhow::ensure!(selected_install_for_reuse(Some(required))?.is_none(),
         "fresh preferences were mistaken for an old installation");
     fs::create_dir(dir.path().join("bin"))?;
     let legacy_cli = crate::mcp::stable_bin_path();
@@ -662,9 +659,10 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
         "v": 1, "pid": pid, "bin": "1.0.21-dev.3", "url": url,
     }))?;
     fs::write(&endpoint, &record)?;
-    anyhow::ensure!(automatic_install_preflight(Some(required)).is_err(), "occupied port was admitted");
+    anyhow::ensure!(selected_install_for_reuse(Some(required))?.is_none(), "listener affected package selection");
+    anyhow::ensure!(require_automatic_migration_safe().is_err(), "unverified launch owner was admitted");
     drop(port);
-    anyhow::ensure!(automatic_install_preflight(Some(required))?.is_none());
+    anyhow::ensure!(selected_install_for_reuse(Some(required))?.is_none());
     let error = download_and_install(None, None)
         .err()
         .context("hermetic download was allowed")?;
@@ -703,7 +701,7 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
 }
 
 #[test]
-fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Result<()> {
+fn automatic_install_preserves_legacy_data_without_requiring_owner_handoff() -> Result<()> {
     let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
     for relative in [
@@ -716,8 +714,8 @@ fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Resul
         fs::create_dir_all(record.parent().context("legacy record parent missing")?)?;
         fs::write(&record, b"existing legacy state")?;
         let error = download_and_install(None, None)
-            .err().context("unbound owner was treated as a stopped installation")?;
-        anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>(), "missed {relative}");
+            .err().context("hermetic download was allowed")?;
+        anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"), "old record blocked staging: {relative}");
         anyhow::ensure!(fs::read(&record)? == b"existing legacy state");
         anyhow::ensure!(!manifest_path().exists() && !runtime_dir().join(".install.lock").exists());
         anyhow::ensure!(!crate::mcp::stable_bin_path().exists());
@@ -734,7 +732,7 @@ fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Resul
     }
     fs::write(dir.path().join("client.json"),
         serde_json::json!({"data_dir": profile}).to_string())?;
-    anyhow::ensure!(automatic_install_preflight(None)?.is_none());
+    anyhow::ensure!(selected_install_for_reuse(None)?.is_none());
     let error = download_and_install(None, None)
         .err().context("source test unexpectedly downloaded a Runtime")?;
     anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>(),
