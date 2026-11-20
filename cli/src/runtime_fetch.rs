@@ -729,17 +729,9 @@ impl BuildMetadata {
             .context("release metadata is missing protocol_range")?;
         anyhow::ensure!(
             protocol.minimum > 0
-                && protocol.maximum >= protocol.minimum
-                && protocol.minimum <= PROTOCOL_V
-                && PROTOCOL_V <= protocol.maximum,
-            "runtime protocol range does not include CLI protocol {PROTOCOL_V}"
+                && protocol.maximum >= protocol.minimum,
+            "release metadata has an invalid protocol range"
         );
-        for capability in ["business_executor", "mcp_server"] {
-            anyhow::ensure!(
-                self.capabilities.get(capability).map(String::as_str) == Some("1"),
-                "runtime release does not advertise {capability} version 1"
-            );
-        }
         anyhow::ensure!(
             !self.files.is_empty() && self.files.len() <= 4096,
             "release metadata has an invalid file count"

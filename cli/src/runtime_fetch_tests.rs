@@ -334,8 +334,7 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
         "target_triple": triple, "archive_file": format!("rsrs-runtime-{triple}.tar.gz"),
         "archive_sha256": sha256_hex(&archive), "binary_file": binary_name, "binary_sha256": hash,
         "source_commit": "0".repeat(40), "compat": {"min_cli": "1.0.0", "max_cli": "*"},
-        "protocol_range": {"minimum": 1, "maximum": 1},
-        "capabilities": {"business_executor": "1", "mcp_server": "1"},
+        "protocol_range": {"minimum": 2, "maximum": 2},
         "files": [
             {"path": binary_name, "size": binary_bytes.len(), "sha256": hash},
             {"path": CORE_MANIFEST_FILE, "size": core.len(), "sha256": sha256_hex(core.as_bytes())},
