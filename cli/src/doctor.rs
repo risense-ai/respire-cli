@@ -650,7 +650,7 @@ mod tests {
                 assert!(matches!(repair(&result)?.status, Status::Ok));
                 Ok(())
             })?;
-            // A client never opens the local store; an unbound endpoint blocks repair.
+            // Package preparation reaches the download boundary without opening the store.
             let endpoint = root.join("runtime/endpoint.json");
             std::fs::create_dir_all(endpoint.parent().context("legacy endpoint parent missing")?)?;
             let owner = br#"{"v":1,"pid":0}"#;
@@ -663,7 +663,7 @@ mod tests {
             let failure = repair(&result)
                 .err()
                 .context("invalid selection was accepted")?;
-            assert!(failure.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
+            assert!(format!("{failure:#}").contains("runtime downloads are disabled in core test mode"));
             assert_eq!(std::fs::read(&endpoint)?, owner);
             assert_eq!(std::fs::read(&database)?, before);
             assert!(!root.join("models").exists());
