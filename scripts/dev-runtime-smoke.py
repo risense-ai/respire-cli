@@ -41,20 +41,51 @@ DIRECT_CASE_IDS = frozenset({'owned_cli', 'nonloopback_unspecified_ipv4',
                              'runtime_prestart_stop', 'runtime_host_unlock'})
 CLI_REASONS = frozenset({'invalid_input', 'runtime_error', 'request_outcome_unknown'})
 
+UNLOCK_ERRORS = (
+    ('Runtime is not ready for V2 credential delivery', 'credential_delivery_not_ready'),
+    ('unlock Runtime does not own the selected profile', 'owner_profile_mismatch'),
+    ('unlock Runtime process identity changed', 'owner_process_changed'),
+    ('unlock Runtime image changed', 'owner_image_changed'),
+    ('Runtime session credentials are unavailable; library remains locked', 'session_file_unavailable'),
+    ('host session credential read failed (', 'host_session_credential_read_failed'),
+    ('Runtime session key is unavailable; library remains locked', 'session_key_unavailable'),
+    ('Runtime V2 unlock transport failed (', 'unlock_transport_failed'),
+    ('invalid Runtime V2 unlock receipt', 'unlock_receipt_invalid'),
+    ('Runtime unlock receipt schema mismatch:', 'unlock_receipt_schema_mismatch'),
+    ('Runtime V2 unlock receipt reports a locked library', 'unlock_receipt_locked'),
+    ('Runtime provider credential receipt mismatch:', 'provider_receipt_mismatch'),
+)
+
 
 def exit_diagnostic(case_id, expected, result):
     reason = 'unknown'
+    unlock_error = None
     try:
         value = json.loads(result.stdout.strip().splitlines()[-1])
         candidate = value.get('summary', {}).get('reason')
         if type(candidate) is str and candidate in CLI_REASONS:
             reason = candidate
+        if case_id == 'runtime_host_unlock' and isinstance(value.get('errors'), list):
+            for error in value['errors']:
+                if not isinstance(error, str):
+                    continue
+                http = re.match(r'Runtime V2 unlock rejected \(HTTP ([1-5][0-9]{2})\);', error)
+                if http:
+                    unlock_error = {'code': 'unlock_http_rejected', 'http_status': int(http[1])}
+                    break
+                code = next((code for prefix, code in UNLOCK_ERRORS if error.startswith(prefix)), None)
+                if code:
+                    unlock_error = {'code': code}
+                    break
     except (ValueError, IndexError, AttributeError, TypeError):
         pass
-    return {'case_id': case_id if type(case_id) is str and case_id in DIRECT_CASE_IDS else 'owned_cli',
-            'expected_exit': expected if type(expected) is int else None,
-            'actual_exit': result.returncode if type(result.returncode) is int else None,
-            'structured_reason': reason}
+    diagnostic = {'case_id': case_id if type(case_id) is str and case_id in DIRECT_CASE_IDS else 'owned_cli',
+                  'expected_exit': expected if type(expected) is int else None,
+                  'actual_exit': result.returncode if type(result.returncode) is int else None,
+                  'structured_reason': reason}
+    if case_id == 'runtime_host_unlock':
+        diagnostic['first_unlock_error'] = unlock_error or {'code': 'unclassified'}
+    return diagnostic
 
 
 class Failure(Exception):
@@ -99,6 +130,17 @@ class RuntimeProviderKeys:
     def current_owner(self):
         return self.connection.send_and_get_reply(self.new_method_call(
             self.address, 'GetNameOwner', 's', ('org.freedesktop.secrets',))).body
+
+    def owner_at_failure(self):
+        try:
+            check = self.new_method_call(self.address, 'NameHasOwner', 's', ('org.freedesktop.secrets',))
+            if self.connection.send_and_get_reply(check, timeout=2).body == (False,):
+                return 'missing'
+            lookup = self.new_method_call(self.address, 'GetNameOwner', 's', ('org.freedesktop.secrets',))
+            owner = self.connection.send_and_get_reply(lookup, timeout=2).body
+            return 'same' if owner == self.owner else 'changed'
+        except Exception:
+            return 'unavailable'
 
     def verify_owner(self):
         require(self.current_owner() == self.owner, 'runtime_fixture_owner_changed')
@@ -352,6 +394,8 @@ class Smoke:
             raise Failure('owned_cli_execution_failed') from None
         if result.returncode != expected:
             self.report['failure_diagnostic'] = exit_diagnostic(case_id, expected, result)
+            if case_id == 'runtime_host_unlock':
+                self.report['failure_diagnostic']['secret_service_owner'] = self.provider_keys.owner_at_failure()
             raise Failure('owned_cli_exit_mismatch')
         try:
             value = json.loads(result.stdout.strip().splitlines()[-1])
