@@ -135,6 +135,8 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     )?;
     // Verify the replacement before retiring any state or stopping a service.
     resolve_runtime_executable()?;
+    // A pre-existing maintenance operation still needs its original receipt.
+    let allow_missing_receipt = !crate::autostart::background_paused();
     let independent = health.is_none() && crate::autostart::prepare_cold_restart_locked()?;
     let maintenance = if independent {
         None
@@ -144,21 +146,20 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     crate::autostart::restart_stage("restart_probe");
     let stopped_pid = health.as_ref().map(|value| value.pid);
-    if crate::autostart::managed_enabled()?
-        && health
-            .as_ref()
-            .is_some_and(|value| !value.inference_stalled())
-    {
-        crate::autostart::restart_stage("restart_managed");
-        ensure_daemon_locked()?;
-    } else {
-        if let Some(health) = health.as_ref() {
-            crate::autostart::restart_stage("restart_stop");
-            drain_occupant(health, timeout)?;
+    match health.as_ref() {
+        Some(health) if !health.inference_stalled() && crate::autostart::managed_enabled()? => {
+            crate::autostart::restart_stage("restart_managed");
+            crate::autostart::drain_managed_for_restart(health, allow_missing_receipt)?;
         }
-        crate::autostart::restart_stage("restart_start");
-        ensure_daemon_locked()?;
+        health => {
+            if let Some(health) = health {
+                crate::autostart::restart_stage("restart_stop");
+                drain_occupant_for_restart(health, timeout, allow_missing_receipt)?;
+            }
+            crate::autostart::restart_stage("restart_start");
+        }
     }
+    ensure_daemon_locked()?;
     let health = crate::net_rpc::health()?;
     if !respire_client_host::settings::off_mode()? && health.credential_state != "required" {
         verify_open_store(&respire_client_host::config::control_roots()?.1)?;
@@ -838,7 +839,13 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         return Ok(());
     }
     if let Some(health) = probe_runtime()? {
-        if ready_business_runtime(&health)? {
+        if reusable_business_runtime(&health)? {
+            if !health.store_ready {
+                let (_, profile) = respire_client_host::config::control_roots()?;
+                if profile.join("session.json").try_exists()? {
+                    respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+                }
+            }
             return Ok(());
         }
         if runtime_acceptable(&health)? {
@@ -856,14 +863,20 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         }
     }
     let takeover = crate::runtime_policy::takeover_lock()?;
+    if let Some(health) = probe_runtime()? {
+        if reusable_business_runtime(&health)? {
+            return Ok(());
+        }
+    }
     crate::autostart::prepare_cold_start_locked()?;
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     ensure_daemon_locked()
 }
 
-/// An open, scoped service can handle business RPC without transferring lifecycle ownership.
-fn ready_business_runtime(health: &crate::net_rpc::Health) -> Result<bool> {
-    if !health.store_ready || health.inference_stalled() || health.installation_root.is_empty()
+/// Business RPC can reuse a scoped service without selecting its executable.
+fn reusable_business_runtime(health: &crate::net_rpc::Health) -> Result<bool> {
+    if !(health.store_ready || health.credential_state == "required")
+        || health.inference_stalled() || health.installation_root.is_empty()
         || health.data_dir.is_empty() || health.v != PROTOCOL_V
     {
         return Ok(false);
@@ -996,6 +1009,14 @@ pub(crate) fn stop_occupant(pid: u32) -> Result<()> {
 }
 
 pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration) -> Result<()> {
+    drain_occupant_for_restart(health, timeout, false)
+}
+
+pub(crate) fn drain_occupant_for_restart(
+    health: &crate::net_rpc::Health,
+    timeout: Duration,
+    allow_missing_receipt: bool,
+) -> Result<()> {
     let pid = health.pid;
     let (installation_root, profile) = respire_client_host::config::control_roots()?;
     anyhow::ensure!(
@@ -1033,8 +1054,19 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    crate::net_rpc::final_stop_receipt(health, Some(&operation_id))
+    let receipt = crate::net_rpc::read_final_stop_receipt(health, Some(&operation_id))
         .context("runtime drain final receipt verification failed")?;
+    if receipt.is_none() {
+        anyhow::ensure!(allow_missing_receipt,
+            "runtime drain final receipt verification failed: final runtime stop receipt is missing");
+        anyhow::ensure!(respire_client_host::config::control_roots()? == (installation_root, profile),
+            "runtime selection changed before verifying the stopped library");
+        respire_host_control::lifecycle_io::verify_no_private_recovery_for_restart()?;
+        crate::runtime_fetch::with_stopped_runtime_locked(|_| Ok(()))
+            .context("Runtime exited without a final stop receipt, but its listener or locks could not be verified free")?;
+        eprintln!("Runtime exited without a final stop receipt; its listener and library locks were verified free.");
+        return Ok(());
+    }
     crate::net_rpc::wait_until_down()
         .context("runtime drain listener did not close")?;
     let released = respire::lock::LibraryLock::acquire(
@@ -1317,9 +1349,12 @@ mod runtime_resolution_tests {
         independent.generation = 1;
         independent.account_id = "account-identity".into();
         independent.instance_id = "instance-identity".into();
-        anyhow::ensure!(ready_business_runtime(&independent)?, "scoped RPC must not depend on the local install receipt");
+        anyhow::ensure!(reusable_business_runtime(&independent)?, "scoped RPC must not depend on the local install receipt");
+        independent.store_ready = false;
+        independent.credential_state = "required".into();
+        assert!(reusable_business_runtime(&independent)?);
         independent.data_dir = directory.path().join("other-library").display().to_string();
-        anyhow::ensure!(!ready_business_runtime(&independent)?, "RPC selected a different library");
+        anyhow::ensure!(!reusable_business_runtime(&independent)?, "RPC selected a different library");
         std::fs::remove_file(crate::runtime_fetch::manifest_path())?;
 
         // Even an explicit override cannot turn this CLI into a Runtime.

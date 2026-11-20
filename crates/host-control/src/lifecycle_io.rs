@@ -107,6 +107,13 @@ pub(crate) fn legacy_recovery_clear(root: &Path, journal: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The ordinary restart receipt exception cannot complete a private transaction.
+pub fn verify_no_private_recovery_for_restart() -> Result<()> {
+    let (root, _) = respire_client_host::config::control_roots()?;
+    let journal = respire_client_host::paths::client_config_path().with_file_name(".login-recovery.json");
+    legacy_recovery_clear(&root, &journal).context("private lifecycle recovery requires its original stop receipt")
+}
+
 /// The caller holds installation takeover ownership, before any child readiness wait.
 pub fn migrate_legacy_session_under_takeover(takeover: &respire_client_host::lock::LibraryLock) -> Result<bool> {
     use sha2::{Digest, Sha256};

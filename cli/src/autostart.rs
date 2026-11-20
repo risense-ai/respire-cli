@@ -59,6 +59,24 @@ pub(crate) use lifecycle::{
 
 pub use respire_commands::autostart::{AutostartCommand, RuntimeCommand};
 
+pub(crate) fn drain_managed_for_restart(
+    health: &crate::net_rpc::Health,
+    allow_missing_receipt: bool,
+) -> Result<()> {
+    let root = respire_client_host::paths::main_data_dir();
+    let config = read_registration(&root)?.context("managed restart registration missing")?;
+    lifecycle::owned(&config)?;
+    lifecycle::ensure_control_endpoint(&config)?;
+    manager::inspect(&config)?;
+    lifecycle::verify_owned_runtime(&config, health)?;
+    crate::rpc::drain_occupant_for_restart(
+        health,
+        std::time::Duration::from_secs(60),
+        allow_missing_receipt,
+    )?;
+    lifecycle::stop_drained_supervisor(&config)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Platform {
