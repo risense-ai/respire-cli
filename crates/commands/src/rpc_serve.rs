@@ -30,8 +30,8 @@ use serde_json::{json, Value};
 
 static RUNTIME_IDENTITY: OnceLock<RuntimeIdentity> = OnceLock::new();
 
-/// Publish the serving binary's identity; the first call wins. The health body
-/// and every RPC reply report it so clients can pin-check the managed runtime.
+/// Publish the serving binary's identity; the first call wins. Health and RPC
+/// replies report it for process identification and diagnostics.
 pub fn set_runtime_identity(identity: RuntimeIdentity) -> bool {
     RUNTIME_IDENTITY.set(identity).is_ok()
 }
@@ -54,10 +54,9 @@ fn bin_version() -> &'static str {
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-/// Publish the identity of a host binary that serves in-process as the
-/// split-transition shim (the CLI exe behind `--runtime-internal`): it reports
-/// its own train so client version gates keep matching, with an unbounded
-/// compatibility window. First publication still wins.
+/// Publish the identity used by the historical in-process shim.
+/// Preserve the legacy window on the wire. Current hosts launch the independent
+/// Runtime and use protocol capabilities for interoperability. First publication wins.
 pub fn publish_shim_identity(version: &'static str) -> bool {
     set_runtime_identity(RuntimeIdentity {
         runtime_version: version.to_owned(),
