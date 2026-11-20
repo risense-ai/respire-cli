@@ -1789,6 +1789,34 @@ function Confirm-RecoveryMaterial {
     }
     throw 'Acknowledged recovery dialog did not disappear'
 }
+function Get-RecoveryStartFailure([string]$Path, [long]$Offset) {
+    if (-not [IO.File]::Exists($Path)) { return 'client_log_missing' }
+    try {
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+        try {
+            $length = $stream.Length - $Offset
+            if ($length -lt 0 -or $length -gt 16384) { return 'client_log_range_invalid' }
+            $stream.Position = $Offset
+            $reader = [IO.BinaryReader]::new($stream)
+            $lines = [Text.Encoding]::UTF8.GetString($reader.ReadBytes([int]$length))
+        } finally { $stream.Dispose() }
+    } catch { return 'client_log_unreadable' }
+    $start = [regex]::Unescape('\u542f\u52a8 Runtime: ')
+    foreach ($entry in ([ordered]@{
+        offline_keygen_pending = '\u79bb\u7ebf\u521d\u59cb\u5316\u5c1a\u672a\u5b8c\u6210'
+        maintenance_route_unverified = 'Runtime \u7ef4\u62a4\u6216\u8d26\u6237\u8def\u7531\u7f3a\u5c11'
+        runtime_selection_error = '\u8bfb\u53d6 Runtime \u5b89\u88c5\u4fe1\u606f\u5931\u8d25'
+        existing_process_unverified = 'Runtime \u72b6\u6001\u65e0\u6cd5\u786e\u8ba4'
+        child_exited = 'Runtime \u542f\u52a8\u524d\u9000\u51fa'
+        startup_unconfirmed = 'Runtime \u542f\u52a8\u7ed3\u679c\u672a\u786e\u8ba4'
+    }).GetEnumerator()) {
+        if ($lines.Contains($start + [regex]::Unescape($entry.Value))) { return $entry.Key }
+    }
+    if ($lines.Contains($start)) { return 'unclassified_start_error' }
+    return 'no_start_error_observed'
+}
+
 function Invoke-RecoveryMaterialAcceptance {
     $report.offline = @{} # Reuse guarded UI input diagnostics, not offline acceptance claims.
     $report.recovery = @{status='failed'; phase=$RecoveryPhase; unchecked_blocked=$false}
@@ -1807,8 +1835,16 @@ function Invoke-RecoveryMaterialAcceptance {
             Wait-OfflinePreferences 'autoRuntime' $false
             $report.offline.action_stage = 'saved_recovery_runtime_start'
             Press-OfflineButton ([regex]::Unescape('^\u6982\u89c8$'))
+            $clientLog = Join-Path $binding.data_directory 'client2/client.log'
+            $logOffset = if ([IO.File]::Exists($clientLog)) { ([IO.FileInfo]::new($clientLog)).Length } else { 0 }
             Press-OfflineButton ([regex]::Unescape('^\u542f\u52a8 Runtime$'))
-            $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u505c\u6b62 Runtime$')) 60
+            try {
+                # Client2 checks the current endpoint for up to 3 seconds before its 90-second launch.
+                $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u505c\u6b62 Runtime$')) 95 -ObserveStartStopSelector
+            } catch {
+                $report.recovery.start_failure = Get-RecoveryStartFailure $clientLog $logOffset
+                throw
+            }
             Bind-OfflineRuntime
             if ($offlineRuntime.started_ticks -lt $binding.desktop_started_ticks -or
                 $offlineRuntime.record.ParentProcessId -ne $binding.desktop_pid) { throw 'Saved recovery did not start a new Client2-owned Runtime' }
