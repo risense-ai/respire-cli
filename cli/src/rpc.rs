@@ -125,7 +125,7 @@ pub fn stop_if_running() -> Result<()> {
     Ok(())
 }
 
-/// Restart after an authenticated drain, or complete evidence of an exited owner.
+/// Restart after an authenticated drain, or after verifying the port and library are free.
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
@@ -135,16 +135,10 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     let health = probe_runtime().context(
         "runtime restart blocked: owner health is unavailable; no process was forced to exit",
     )?;
-    let stale = if health.is_none() && endpoint_path().try_exists()? {
-        Some(crate::autostart::StaleOwner::prepare_restart_locked()
-            .context("runtime restart blocked: stale owner could not be verified")?)
-    } else {
-        None
-    };
-    let mut maintenance = crate::autostart::restart_maintenance_locked()?;
-    if let Some(stale) = stale {
-        stale.remove_endpoint_locked()?;
+    if health.is_none() {
+        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
     }
+    let mut maintenance = crate::autostart::restart_maintenance_locked()?;
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     crate::autostart::restart_stage("restart_probe");
     let stopped_pid = health.as_ref().map(|value| value.pid);
