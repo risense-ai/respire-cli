@@ -73,11 +73,23 @@ def fixture_report(args, report):
         (args.root / "interruption-coverage.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
-def verify_credential_provider(keys, report):
+def verify_credential_provider(keys, report, key_module):
     # A crashed provider can be replaced by D-Bus activation. Never
     # enumerate or delete from a collection whose owner is unverified.
-    provider = report["credential_provider"] = {"exit_code": keys.daemon.poll(), "owner_verified": False}
-    keys.verify_owner()
+    exit_code = keys.daemon.poll()
+    provider = report["credential_provider"] = {"exit_code": exit_code, "owner_verified": False}
+    try:
+        keys.verify_owner()
+    except Exception:
+        if exit_code in (-5, -6) and keys.daemon_stderr is not None:
+            try:
+                stderr = keys.daemon_stderr.read_bytes()
+            except OSError:
+                provider["abort_diagnostic"] = "fixture_provider_diagnostic_read_failed"
+            else:
+                provider["abort_type"] = key_module.provider_abort_type(stderr, exit_code)
+                provider["abort_location"] = key_module.provider_abort_location(stderr, exit_code)
+        raise
     provider["owner_verified"] = True
 
 
@@ -1435,7 +1447,7 @@ def main():
             report["runtime_cleanup"] = {"passed": stopped.returncode in (0, 2)}
             report["stage"] = "credential_cleanup"
             if keys:
-                verify_credential_provider(keys, report)
+                verify_credential_provider(keys, report, key_module)
                 # Discover interrupted aliases only from our synthetic files, including
                 # failures before a barrier. Never claim arbitrary credential-store items.
                 for path in args.root.rglob("*.json"):
