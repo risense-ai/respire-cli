@@ -1,0 +1,139 @@
+name: ARM64 GNU historical Secret Service diagnostic
+on:
+  push:
+    branches: [codex/cli-arm64-gnu-history-trap]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  historical:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      CLI_TARGET: aarch64-unknown-linux-gnu
+      RSRS_RUNTIME_TRIPLE: aarch64-unknown-linux-gnu
+      CLI_SHA: e5f36e0861b8f3615151c8db3a440711d5d14440
+      CLI_VERSION: 2.0.0-dev.24
+      CLI_PRODUCER_RUN_ID: '44718206331'
+      CLI_PRODUCER_ATTEMPT: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify original candidate and official Runtime dev.28
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
+          ZIP_SHA256: edba437b55930e36c7241bd57a43f1f614d9400b1b95cb8d70bd7a7f299ecb01
+          RUNTIME_SHA256: 7f0f5be1ac04af29c7ffd224e58529632d30be7beec30f59d04a273663b24084
+        run: |
+          set -euo pipefail
+          bash scripts/require-native-linux-arm64.sh "$CLI_TARGET"
+          artifact="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CLI_PRODUCER_RUN_ID/artifacts?name=cli-release-$CLI_TARGET" \
+            --jq '.artifacts | if length == 1 and .[0].expired == false then .[0].id else error("candidate artifact unavailable") end')"
+          endpoint="repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact"
+          gh api "$endpoint" | jq -e --arg digest "sha256:$ZIP_SHA256" \
+            --arg target "$CLI_TARGET" --arg sha "$CLI_SHA" --arg run "$CLI_PRODUCER_RUN_ID" \
+            '.expired == false and .digest == $digest and .name == ("cli-release-" + $target)
+             and .workflow_run.id == ($run | tonumber) and .workflow_run.head_sha == $sha' >/dev/null
+          gh api "$endpoint/zip" > "$RUNNER_TEMP/candidate.zip"
+          echo "$ZIP_SHA256  $RUNNER_TEMP/candidate.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/candidate.zip" -d "$RUNNER_TEMP/candidate"
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          node npm/scripts/extract-artifact.mjs "$RUNNER_TEMP/candidate" cli
+          bash scripts/verify-linux-arm64-elf.sh "$CLI_TARGET" cli/rsrs
+          sha256sum cli/rsrs
+          node scripts/ci-install-pinned-runtime.mjs cli/rsrs
+          grep -Fx 'NATIVE_RUNTIME_VERSION=2.0.0-dev.28' "$GITHUB_ENV"
+          grep -Fx "NATIVE_RUNTIME_SHA256=$RUNTIME_SHA256" "$GITHUB_ENV"
+          printf 'RSRS_DATA_DIR=%s\n' "$RSRS_DATA_DIR" >> "$GITHUB_ENV"
+      - name: Install the release fixture's native dependencies
+        run: |
+          set -euo pipefail
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
+          python -m venv "$RUNNER_TEMP/upgrade-python"
+          "$RUNNER_TEMP/upgrade-python/bin/python" -m pip install --only-binary=:all: \
+            SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
+          command -v nm
+          dpkg-query -W gnome-keyring libglib2.0-0t64 dbus
+      - name: Key the pinned model bytes
+        id: model-key
+        run: echo "key=$(python scripts/native-model-cache.py key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: model-cache
+        with:
+          path: .native-model-cache
+          key: ${{ steps.model-key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Prepare the pinned real model and legacy FP16 assets
+        env:
+          EXPECTED_KEY: ${{ steps.model-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.model-cache.outputs.cache-matched-key }}
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          model="$RSRS_DATA_DIR/models/bge-m3"
+          legacy="$RUNNER_TEMP/native-legacy-model"
+          if [ -n "$MATCHED_KEY" ]; then
+            test "$MATCHED_KEY" = "$EXPECTED_KEY"
+            python scripts/native-model-cache.py restore --model-dir "$model" --legacy-dir "$legacy"
+          else
+            export HOME="$RSRS_DATA_DIR/home" USERPROFILE="$RSRS_DATA_DIR/home" RSRS_M3_DIR="$model"
+            cli="$(realpath cli/rsrs)"
+            export RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$cli")"
+            "$cli" --direct model install-m3 --json > "$RUNNER_TEMP/model-install.json"
+            jq -e '.status == "ok" and (.details.backend_load.evidence |
+              .ready and .inference_completed and .fresh_session and .dimensions == 1024 and .selected == "CPU")' \
+              "$RUNNER_TEMP/model-install.json" >/dev/null
+            "$cli" --runtime-internal --stop --json > "$RUNNER_TEMP/model-stop.json"
+            mkdir -p "$legacy/onnx"
+            curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+              'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' \
+              --output "$legacy/onnx/model_fp16.onnx"
+          fi
+          mkdir -p "$legacy/onnx"
+          cp "$model/tokenizer.json" "$legacy/tokenizer.json"
+          cp "$model/onnx/model_quantized.onnx" "$model/onnx/model_quantized.cpu-v1.ort" "$legacy/onnx/"
+          python scripts/native-model-cache.py verify --model-dir "$model" --legacy-dir "$legacy"
+      - name: Run v1.0.7 with real Secret Service and the approved test server
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          test "$RSRS_DEV_SERVER_ADDR" = https://api-dev.rsrs.rs
+          [[ "$RSRS_DEV_SERVER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          umask 077
+          ulimit -c 0
+          root="$RUNNER_TEMP/historical"
+          mkdir "$root"
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          unset RSRS_SS_FIXTURE_BUS DBUS_SESSION_BUS_ADDRESS GH_DEBUG
+          status=0
+          "$py" scripts/test-published-upgrades.py \
+            --binary "$(realpath cli/rsrs)" --target "$CLI_TARGET" --profile full --source v1.0.7 \
+            --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" \
+            --runtime-version "$NATIVE_RUNTIME_VERSION" --model-dir "$RSRS_DATA_DIR/models/bge-m3" \
+            --legacy-model-dir "$RUNNER_TEMP/native-legacy-model" --output-dir "$root" \
+            > "$root/private-command.log" 2>&1 || status=$?
+          "$py" scripts/report-historical-secret-service.py "$root" "$RUNNER_TEMP/historical-secret-service.json" "$status"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: historical-secret-service-arm64-gnu-trap
+          retention-days: 1
+          path: ${{ runner.temp }}/historical-secret-service.json
+          if-no-files-found: ignore
