@@ -63,10 +63,6 @@ pub(crate) fn account_host() -> Option<Arc<dyn HostLifecycle>> {
 }
 
 impl Selection {
-    pub(crate) fn version(&self) -> &str {
-        self.runtime.version()
-    }
-
     /// Revalidate through the embedding's original inventory and ownership checks.
     pub(crate) fn verify(&self) -> Result<VerifiedRuntime> {
         let current = (self.embedding.verify_runtime)()?;

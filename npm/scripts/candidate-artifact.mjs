@@ -38,7 +38,7 @@ export function validateCandidate(candidate, env=process.env) {
   }
   const runtime=candidate.runtime;
   assert.equal(runtime.repository,'risense-ai/respire-runtime');
-  assert.equal(runtime.version,JSON.parse(readFileSync('runtime-pin.json')).required);
+  assert.equal(runtime.version,JSON.parse(readFileSync('.github/runtime-test-fixture.json')).required);
   assert.match(runtime.source_sha,/^[a-f0-9]{40}$/);
   const names=targets().flatMap(t=>publishedAssetNames('runtime',t));
   assert.deepEqual(runtime.assets.map(a=>a.name).sort(),names.sort());
@@ -70,7 +70,7 @@ function resolveSealedClient2(selector, source) {
 export async function resolveCandidate() {
   assert.equal(process.env.GITHUB_REF,'refs/heads/main');
   assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');
-  const version=JSON.parse(readFileSync('runtime-pin.json')).required;
+  const version=JSON.parse(readFileSync('.github/runtime-test-fixture.json')).required;
   const repository='risense-ai/respire-runtime', prefix=`repos/${repository}`;
   const release=api(`${prefix}/releases/tags/v${version}`),sha=api(`${prefix}/commits/v${version}`).sha;
   // A prepublication build can succeed for the same source; bind the public release to its publishing run.

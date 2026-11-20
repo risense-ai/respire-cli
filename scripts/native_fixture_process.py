@@ -135,7 +135,7 @@ def install_official_runtime(binary, env, version, binary_hash):
         install_env = {key: value for key, value in env.items()
                        if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
                        and not key.endswith(('_TOKEN', '_API_KEY'))}
-        result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
+        result = subprocess.run([str(binary), '--json', 'runtime', 'install', '--version', version],
                                 env=install_env, capture_output=True, timeout=180)
         if result.returncode:
             raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode)
@@ -201,7 +201,7 @@ def install_published_runtime(binary, env):
         repository = pathlib.Path(__file__).resolve().parent.parent
         version = os.environ['NATIVE_RUNTIME_VERSION']
         binary_hash = os.environ['NATIVE_RUNTIME_SHA256']
-        if (version != json.loads((repository / 'runtime-pin.json').read_text(encoding='utf-8'))['required']
+        if (version != json.loads((repository / '.github/runtime-test-fixture.json').read_text(encoding='utf-8'))['required']
                 or len(binary_hash) != 64 or any(c not in '0123456789abcdef' for c in binary_hash)):
             raise ValueError('source fixture differs from the independently pinned Runtime identity')
         if not (root / 'bin/runtime.json').exists():

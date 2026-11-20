@@ -2,7 +2,7 @@ import {installPinnedRuntime} from '../../scripts/ci-install-pinned-runtime.mjs'
 import {regressionContract} from './release-regression-contract.mjs';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validateFullGUI, validatePublishedPackage} from './extract-artifact.mjs';
+import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedProcessEvidence, validatePublishedFull, validateFullGUI, validatePublishedPackage} from './extract-artifact.mjs';
 import assert from 'node:assert/strict';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
@@ -685,7 +685,7 @@ test('published target downloads and verifies both real file sets but records no
     const kind = url.includes('/respire-runtime/') ? 'runtime' : 'cli', selected = spec[kind];
     if (url.includes('/jobs?') || url.includes('/artifacts?')) return producer.fetcher(url);
     if(url.includes('/contents/')) {
-      const value=url.includes('runtime-pin.json')?{required:version,accept:`>=${version},<2.0.0`}:url.includes('artifact-manifest.json')?{artifactLayout:'cli-frontend-v2',cliVersion:version,targets:[{triple:target}]}:{targets:{[target]:sdk}};
+      const value=url.includes('.github/runtime-test-fixture.json')?{required:version,accept:`>=${version},<2.0.0`}:url.includes('artifact-manifest.json')?{artifactLayout:'cli-frontend-v2',cliVersion:version,targets:[{triple:target}]}:{targets:{[target]:sdk}};
       const body=Buffer.from(JSON.stringify(value));
       return {status:200,json:async()=>({type:'file',encoding:'base64',size:body.length,content:body.toString('base64'),sha:createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${body.length}\0`),body])).digest('hex')})};
     }
@@ -766,15 +766,6 @@ test('published archive extractor refuses links, traversal, duplicates, bad chec
     await assert.rejects(extractPublishedArchive(path.join(root,'truncated.tgz'),path.join(root,'truncated')));
   } finally {rmSync(root,{recursive:true,force:true});}
 });
-test('published compatibility checks exact product pin and numeric DEV minCLI without rebuilding',()=>{
-  const spec={cli:{version:'1.0.21-dev.5'},runtime:{version:'1.0.21-dev.4'}};
-  const runtime={compat:{min_cli:'1.0.21-dev.5',max_cli:'*'}}, pin={required:spec.runtime.version,accept:'>=1.0.21-dev.4,<2.0.0'};
-  validatePublishedCompatibility(spec,runtime,pin);
-  for(const bad of [{required:'1.0.21-dev.3'}, {accept:'*'}])assert.throws(()=>validatePublishedCompatibility(spec,runtime,{...pin,...bad}));
-  for(const compat of [{min_cli:'1.0.21-dev.6',max_cli:'*'},{min_cli:'1.0.21-dev.5',max_cli:'1.0.21-dev.5'},{min_cli:'invalid',max_cli:'*'}])assert.throws(()=>validatePublishedCompatibility(spec,{compat},pin));
-  validatePublishedCompatibility({...spec,cli:{version:'1.0.21-dev.10'}},runtime,pin);
-});
-
 import {publishedFullFixture} from './full-report-fixture.mjs';
 test('published full joins every existing report and live image identity; copied summaries and partial jobs cannot pass',()=>{
   const root=mkdtempSync(path.join(tmpdir(),'published-full-join-'));
@@ -937,7 +928,7 @@ test('published pack adapter retains version, repository, launcher, optional dep
 });
 
 test('official Runtime CI fixture retries only exact pinned metadata or paired archive network failures', async () => {
-  const pin = JSON.parse(readFileSync(new URL('../../runtime-pin.json', import.meta.url), 'utf8'));
+  const pin = JSON.parse(readFileSync(new URL('../../.github/runtime-test-fixture.json', import.meta.url), 'utf8'));
   const target = 'x86_64-unknown-linux-gnu';
   const url = `https://github.com/risense-ai/respire-runtime/releases/download/v${pin.required}/runtime-build-${target}.json`;
   const prefix = `release metadata request failed (${url}): ${url}: `;
@@ -951,7 +942,7 @@ test('official Runtime CI fixture retries only exact pinned metadata or paired a
     let calls = 0; const waits = [], output = [], errors = []; const env = {RSRS_DATA_DIR: 'isolated-fixture'};
     const actual = await installPinnedRuntime('fixture-cli', {env}, target, {
       spawn(cli, args, options) {
-        calls++; assert.equal(cli, 'fixture-cli'); assert.deepEqual(args, ['--json', 'runtime', 'install']);
+        calls++; assert.equal(cli, 'fixture-cli'); assert.deepEqual(args, ['--json', 'runtime', 'install', '--version', pin.required]);
         assert.equal(options.env, env); assert.deepEqual(options.stdio, ['inherit', 'pipe', 'pipe']);
         return calls === 1 ? first : second;
       },

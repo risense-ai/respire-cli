@@ -276,7 +276,7 @@ jobs:
           const result = await installPinnedRuntime(cli, {env}, process.env.CLI_TARGET);
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
-          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const pin = JSON.parse(readFileSync('.github/runtime-test-fixture.json', 'utf8'));
           const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.match(selected.sha256, /^[0-9a-f]{64}$/);

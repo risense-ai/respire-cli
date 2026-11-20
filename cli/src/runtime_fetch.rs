@@ -6,7 +6,7 @@
 //!
 //! * Discovery order (see [`resolve_runtime_bin`]): explicit `RSRS_RUNTIME_BIN`
 //!   override, the managed directory (verified against `runtime.json`), the
-//!   legacy combined-binary stable location, and finally an automatic pinned
+//!   legacy combined-binary stable location, and finally a release-channel
 //!   download. Portable images require the explicit override.
 //! * Downloads come from the official release assets with a gh-proxy mirror
 //!   fallback (same rule as client2 `mirrorURL` and the model installer's
@@ -22,17 +22,9 @@
 //!   `<installation_root>/bin/runtime/<version>/` is atomic; the previous version
 //!   directory is kept as a rollback point.
 //!
-//! `runtime-pin.json` (repository root, embedded at build time) selects the
-//! download version: `required` is the exact pinned version fetched by
-//! [`download_and_install`]; `accept` is a range such as `>=1.0.21-dev.1,<2.0.0`
-//! (comma-separated `>=min` / `<max` bounds, min inclusive, max exclusive,
-//! compared with the same numeric rules as `respire_client_host::version_cmp`) that
-//! an already-installed runtime must satisfy to be reused instead of replaced.
 //! Runtime releases publish `runtime-build-<triple>.json` with
-//! `{"runtime_version","tag","triple","binary_sha256","binary_file","compat":{"min_cli","max_cli"}}`
-//! (`sha256` is an alias for `archive_sha256` only);
-//! `compat` states which CLI versions the runtime accepts and is enforced
-//! before an archive is installed.
+//! `{"runtime_version","tag","triple","binary_sha256","binary_file"}`
+//! (`sha256` is an alias for `archive_sha256` only).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -41,6 +33,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Component;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -49,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model_progress;
+use respire_commands::autostart::RuntimeChannel;
 use respire_commands::rpc_client::PROTOCOL_V;
 
 /// Release repository that publishes the runtime artifacts.
@@ -114,73 +108,14 @@ const MAX_MANAGED_MANIFEST_BYTES: u64 = (MAX_METADATA_BYTES * 6 + 64 * 1024) as 
 /// Concurrent CLI installs serialize on this lock in the existing CLI layout.
 const INSTALL_LOCK_WAIT: Duration = Duration::from_secs(120);
 
-/// Build-time embedded pin file (repository root `runtime-pin.json`).
-const PIN_JSON: &str = include_str!("../../runtime-pin.json");
+/// Version selected for local regression fixtures.
+#[cfg(test)]
+const PIN_JSON: &str = include_str!("../../.github/runtime-test-fixture.json");
 
 // ---------------------------------------------------------------------------
-// Version pin and accept range
+// Runtime release versions
 // ---------------------------------------------------------------------------
 
-/// Inclusive lower / exclusive upper accept bounds parsed from `runtime-pin.json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AcceptRange {
-    min: Option<String>,
-    max: Option<String>,
-}
-
-impl AcceptRange {
-    /// Parse a range such as `>=1.0.21-dev.1,<2.0.0`. Bounds are comma
-    /// separated; `>=min` is inclusive, `<max` is exclusive. Empty bounds are
-    /// rejected so a typo never silently accepts every version.
-    pub fn parse(raw: &str) -> Result<Self> {
-        let mut range = Self {
-            min: None,
-            max: None,
-        };
-        for part in raw.split(',') {
-            let part = part.trim();
-            if let Some(min) = part.strip_prefix(">=") {
-                anyhow::ensure!(range.min.is_none(), "duplicate accept lower bound");
-                anyhow::ensure!(valid_version(min), "invalid accept lower bound: {part:?}");
-                range.min = Some(min.to_owned());
-            } else if let Some(max) = part.strip_prefix('<') {
-                anyhow::ensure!(range.max.is_none(), "duplicate accept upper bound");
-                anyhow::ensure!(valid_version(max), "invalid accept upper bound: {part:?}");
-                range.max = Some(max.to_owned());
-            } else {
-                bail!("unsupported accept bound {part:?}; use >=min or <max");
-            }
-        }
-        anyhow::ensure!(
-            range.min.is_some() || range.max.is_some(),
-            "empty accept range"
-        );
-        if let (Some(min), Some(max)) = (range.min.as_deref(), range.max.as_deref()) {
-            anyhow::ensure!(
-                respire_client_host::version_cmp(min, max) == std::cmp::Ordering::Less,
-                "accept lower bound is not below its upper bound"
-            );
-        }
-        Ok(range)
-    }
-
-    /// True when `version` satisfies every configured bound.
-    pub fn contains(&self, version: &str) -> bool {
-        let ordering = |bound: &str| semver_cmp(version, bound);
-        self.min
-            .as_deref()
-            .is_none_or(|min| ordering(min) != std::cmp::Ordering::Less)
-            && self
-                .max
-                .as_deref()
-                .is_none_or(|max| ordering(max) == std::cmp::Ordering::Less)
-    }
-}
-
-/// Semver-aware ordering for `M.m.p[-pre]` release names. Core triples
-/// compare numerically; a release outranks any prerelease of the same
-/// triple; prerelease identifiers compare per semver (numeric numerically,
-/// alphanumeric lexically, numeric below alphanumeric).
 fn semver_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
     fn split(value: &str) -> (Vec<u64>, Option<String>) {
         let (core, pre) = match value.split_once('-') {
@@ -223,46 +158,20 @@ fn semver_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
 }
 
 /// The build-time pinned runtime version plus its accept range.
-#[derive(Clone, Debug)]
-pub struct RuntimePin {
+#[cfg(test)]
+#[derive(Debug, Deserialize)]
+pub struct RuntimeFixture {
     pub required: String,
-    pub accept: AcceptRange,
-    /// The raw `accept` expression, for display in inventory output.
-    pub accept_raw: String,
 }
 
-static PIN: OnceLock<std::result::Result<RuntimePin, String>> = OnceLock::new();
+#[cfg(test)]
+static PIN: OnceLock<std::result::Result<RuntimeFixture, String>> = OnceLock::new();
 
-/// Parse the embedded `runtime-pin.json`. Pin errors are cached so every
-/// caller reports the same configuration defect.
-pub fn pinned() -> Result<&'static RuntimePin> {
-    PIN.get_or_init(|| parse_pin(PIN_JSON).map_err(|error| format!("{error:#}")))
+#[cfg(test)]
+pub fn pinned() -> Result<&'static RuntimeFixture> {
+    PIN.get_or_init(|| serde_json::from_str(PIN_JSON).map_err(|error| error.to_string()))
         .as_ref()
-        .map_err(|error| anyhow::anyhow!("invalid runtime-pin.json: {error}"))
-}
-
-fn parse_pin(raw: &str) -> Result<RuntimePin> {
-    #[derive(Deserialize)]
-    struct PinDocument {
-        required: String,
-        accept: String,
-    }
-    let document: PinDocument =
-        serde_json::from_str(raw).context("pin document is not valid JSON")?;
-    anyhow::ensure!(valid_version(&document.required), "invalid pinned version");
-    Ok(RuntimePin {
-        required: document.required,
-        accept: AcceptRange::parse(&document.accept)?,
-        accept_raw: document.accept,
-    })
-}
-
-/// True when `version` satisfies the build-time accept range.
-pub fn version_in_accept(version: &str) -> bool {
-    if let Some(selected) = crate::embedding::selection() {
-        return version == selected.version();
-    }
-    pinned().is_ok_and(|pin| pin.accept.contains(version))
+        .map_err(|error| anyhow::anyhow!("invalid Runtime test fixture: {error}"))
 }
 
 /// Semver-shaped version charset shared with client2 (`semver.IsValid` plus a
@@ -571,7 +480,6 @@ pub(crate) fn require_offline_keygen_handoff() -> Result<(PathBuf, String)> {
     let metadata = manifest.bound_metadata(&release_triple()?)
         .context("offline_keygen_handoff_unsupported: authenticated capability metadata required")?;
     require_handoff_capability(&metadata.capabilities)?;
-    anyhow::ensure!(version_in_accept(&manifest.version), "offline_keygen_handoff_unsupported: Runtime incompatible");
     Ok((binary, manifest.sha256))
 }
 
@@ -595,12 +503,11 @@ pub enum ResolvedRuntime {
     LegacyCombined(PathBuf),
 }
 
-/// Discover the runtime binary, downloading the pinned release when nothing
+/// Discover the runtime binary, downloading from the release channel when nothing
 /// usable is installed.
 ///
 /// Order: `RSRS_RUNTIME_BIN` (explicit override, no integrity check), the
-/// managed directory (version within the accept range plus binary sha256
-/// verified), the legacy combined stable location, and finally
+/// managed directory (verified against its recorded release), the legacy combined stable location, and finally
 /// [`download_and_install`]. Portable images require the explicit override.
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
     if let Some(selected) = crate::embedding::selection() {
@@ -615,12 +522,12 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
         anyhow::ensure!(explicit.is_file(), "RSRS_RUNTIME_BIN does not name a file");
         return Ok(ResolvedRuntime::Ready(explicit));
     }
-    shared::migrate_legacy()?;
     if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
-        let binary = validate_installed(&manifest)?;
-        if version_in_accept(&manifest.version) {
-            return Ok(ResolvedRuntime::Ready(binary));
-        }
+        return Ok(ResolvedRuntime::Ready(validate_installed(&manifest)?));
+    }
+    shared::migrate_legacy()?;
+    if let Some(binary) = managed_runtime_path()? {
+        return Ok(ResolvedRuntime::Ready(binary));
     }
     let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
     if legacy.is_file() {
@@ -632,14 +539,6 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
 // ---------------------------------------------------------------------------
 // Release metadata and download sources
 // ---------------------------------------------------------------------------
-
-/// `compat` block of `runtime-build-<triple>.json`: which CLI versions the
-/// runtime release accepts.
-#[derive(Clone, Debug, Deserialize)]
-pub struct CompatBounds {
-    pub min_cli: String,
-    pub max_cli: String,
-}
 
 /// Released runtime build metadata consumed by the CLI downloader and client2.
 #[derive(Clone, Debug, Deserialize)]
@@ -664,7 +563,6 @@ pub struct BuildMetadata {
     pub source_commit: Option<String>,
     /// Archive-side binary file name, the full-triple name.
     pub binary_file: String,
-    pub compat: CompatBounds,
     #[serde(default)]
     pub protocol_range: Option<ProtocolRange>,
     #[serde(default, deserialize_with = "deserialize_capabilities")]
@@ -764,10 +662,6 @@ impl BuildMetadata {
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
-        self.validate_for_cli(required, triple, env!("CARGO_PKG_VERSION"))
-    }
-
-    fn validate_for_cli(&self, required: &str, triple: &str, cli: &str) -> Result<()> {
         anyhow::ensure!(
             self.schema_version == 1 || self.schema_version == 2,
             "unsupported runtime metadata schema {}",
@@ -814,27 +708,6 @@ impl BuildMetadata {
         if self.schema_version == 2 {
             self.validate_schema2()?;
         }
-        anyhow::ensure!(
-            valid_version(&self.compat.min_cli),
-            "release metadata has an invalid compat range"
-        );
-        anyhow::ensure!(
-            self.compat.max_cli == "*" || valid_version(&self.compat.max_cli),
-            "release metadata has an invalid compat range"
-        );
-        anyhow::ensure!(
-            semver_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
-            "runtime {} requires CLI >= {}; upgrade the CLI first",
-            self.runtime_version,
-            self.compat.min_cli
-        );
-        anyhow::ensure!(
-            self.compat.max_cli == "*"
-                || semver_cmp(cli, &self.compat.max_cli) == std::cmp::Ordering::Less,
-            "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
-            self.runtime_version,
-            self.compat.max_cli
-        );
         Ok(())
     }
 
@@ -1079,6 +952,59 @@ struct PublicRelease {
     assets: Vec<PublicAsset>,
 }
 
+fn default_runtime_channel() -> RuntimeChannel {
+    if env!("CARGO_PKG_VERSION").contains("-dev.") {
+        RuntimeChannel::Dev
+    } else {
+        RuntimeChannel::Stable
+    }
+}
+
+fn runtime_channel_name(channel: RuntimeChannel) -> &'static str {
+    match channel {
+        RuntimeChannel::Stable => "stable",
+        RuntimeChannel::Dev => "dev",
+    }
+}
+
+pub(crate) fn default_runtime_channel_name() -> &'static str {
+    runtime_channel_name(default_runtime_channel())
+}
+
+fn latest_runtime_release(channel: RuntimeChannel) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Release {
+        tag_name: String,
+        draft: bool,
+        prerelease: bool,
+        published_at: Option<String>,
+    }
+
+    let mut latest: Option<String> = None;
+    for page in 1.. {
+        let url = format!("https://api.github.com/repos/{RUNTIME_REPO}/releases?per_page=100&page={page}");
+        let releases: Vec<Release> = serde_json::from_slice(&fetch_metadata(&url)?)
+            .context("invalid Runtime release listing")?;
+        let last_page = releases.len() < 100;
+        for release in releases {
+            let Some(version) = release.tag_name.strip_prefix('v') else { continue };
+            let matches_channel = match channel {
+                RuntimeChannel::Stable => !release.prerelease && !version.contains('-'),
+                RuntimeChannel::Dev => release.prerelease && version.contains("-dev."),
+            };
+            if !release.draft && release.published_at.is_some() && matches_channel && valid_version(version)
+                && latest.as_deref().is_none_or(|previous| semver_cmp(version, previous).is_gt())
+            {
+                latest = Some(version.to_owned());
+            }
+        }
+        if last_page {
+            break;
+        }
+    }
+    latest.with_context(|| format!("no public Runtime release in the {} channel", runtime_channel_name(channel)))
+}
+
 #[derive(Deserialize)]
 struct PublicAsset {
     id: u64,
@@ -1137,6 +1063,7 @@ fn release_response(
 ) -> Result<(ureq::Response, Option<PublicAsset>)> {
     let request = download_agent(DownloadTimeouts::default())
         .get(url)
+        .set("User-Agent", "respire-cli")
         .set("Accept-Encoding", "identity");
     let request = match timeout {
         Some(timeout) => request.timeout(timeout),
@@ -1736,7 +1663,7 @@ fn is_progress_abort(error: &anyhow::Error) -> bool {
 
 /// Read-only admission before progress, downloads, install locks or selection writes.
 /// A different pin is not permission to discard an unverified existing selection.
-fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
+fn automatic_install_preflight(required: Option<&str>) -> Result<Option<PathBuf>> {
     let manifest = read_manifest().context(ManagedRuntimeRepairRequired)?;
     let selected = if let Some(manifest) = &manifest {
         let binary = validate_installed(manifest).map_err(|error| {
@@ -1746,9 +1673,7 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
                 error
             }
         })?;
-        (manifest.version == required
-            || (semver_cmp(&manifest.version, required) == std::cmp::Ordering::Greater
-                && version_in_accept(&manifest.version))).then_some(binary)
+        required.is_none_or(|version| manifest.version == version).then_some(binary)
     } else {
         // Account data does not establish process ownership or authorize an unlock.
         // Validate configured paths without opening or migrating the old database.
@@ -1841,16 +1766,8 @@ pub(crate) fn with_stopped_runtime_locked(action: impl FnOnce(&Path) -> Result<(
     let parent = path.parent().context("Runtime endpoint directory missing")?;
     anyhow::ensure!(parent.canonicalize()? == root.join("runtime"), "Runtime endpoint directory is outside the installation");
     anyhow::ensure!(fs::symlink_metadata(&path)?.is_file(), "invalid Runtime endpoint file");
-    // Old records are untrusted hints about other loopback listeners. A recycled
-    // PID alone proves nothing about either the listener or the locked library.
-    let bytes = fs::read(&path)?;
-    if let Some(recorded) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|value| value["url"].as_str()?.strip_prefix("http://")?.parse::<std::net::SocketAddr>().ok())
-        .filter(|recorded| recorded.ip().is_loopback() && recorded.port() != 0 && *recorded != address)
-    {
-        require_runtime_port_closed(recorded)?;
-    }
+    // The endpoint's historical PID and port say nothing about the current
+    // listener or the locked library.
     let archive = path.with_file_name(format!("endpoint.stopped-{}.json", uuid::Uuid::new_v4()));
     respire_spawn::durable::publish_new_file(&path, &archive)
         .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))?;
@@ -1888,12 +1805,15 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
         // or materialize a CLI; installation entry points reject embedding.
         return selected.verify().map(|_| ());
     }
+    if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
+        return validate_installed(&manifest).map(|_| ());
+    }
     verify_install_host()?;
     shared::migrate_legacy()?;
-    automatic_install_preflight(&pinned()?.required).map(|_| ())
+    automatic_install_preflight(None).map(|_| ())
 }
 
-/// Install the pinned release (or an explicit `pin` version override),
+/// Install a release from the default channel (or an explicit version),
 /// returning the managed binary path. Only an explicit `mirror` origin changes
 /// Runtime download sources. Already-installed matching
 /// builds are reused. Concurrent CLI instances serialize on the install lock;
@@ -1903,16 +1823,17 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 /// A damaged selected build requires repair; it never triggers automatic
 /// replacement. An explicit trusted offline install can re-establish proof.
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
-    download_runtime_release(pin, mirror, true)
+    download_runtime_release(pin, mirror, default_runtime_channel(), true)
 }
 
-pub(crate) fn install_published_runtime(mirror: Option<&str>) -> Result<PathBuf> {
-    download_runtime_release(None, mirror, false)
+pub(crate) fn install_published_runtime(version: Option<&str>, mirror: Option<&str>, channel: Option<RuntimeChannel>) -> Result<PathBuf> {
+    download_runtime_release(version, mirror, channel.unwrap_or_else(default_runtime_channel), false)
 }
 
 fn download_runtime_release(
     pin: Option<&str>,
     mirror: Option<&str>,
+    channel: RuntimeChannel,
     migrate_existing: bool,
 ) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
@@ -1921,21 +1842,12 @@ fn download_runtime_release(
         verify_install_host()?;
         shared::migrate_legacy()?;
     }
-    let required = match pin {
-        Some(explicit) => {
-            anyhow::ensure!(
-                valid_version(explicit),
-                "invalid runtime version: {explicit:?}"
-            );
-            explicit.to_owned()
-        }
-        None => pinned()?.required.clone(),
-    };
+    if let Some(explicit) = pin {
+        anyhow::ensure!(valid_version(explicit), "invalid runtime version: {explicit:?}");
+    }
     if migrate_existing {
-        if let Some(binary) = automatic_install_preflight(&required)? {
-            if pin.is_none() || binary == managed_binary_path(&required) {
-                return Ok(binary);
-            }
+        if let Some(binary) = automatic_install_preflight(pin)? {
+            return Ok(binary);
         }
     }
     let triple = release_triple()?;
@@ -1946,12 +1858,14 @@ fn download_runtime_release(
     );
     let lock = install_lock()?;
     if migrate_existing {
-        if let Some(binary) = automatic_install_preflight(&required)? {
-            if pin.is_none() || binary == managed_binary_path(&required) {
-                return Ok(binary);
-            }
+        if let Some(binary) = automatic_install_preflight(pin)? {
+            return Ok(binary);
         }
     }
+    let required = match pin {
+        Some(version) => version.to_owned(),
+        None => latest_runtime_release(channel)?,
+    };
     let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");
     let origins = download_origins(mirror)?;
@@ -1992,7 +1906,7 @@ fn download_runtime_release(
             // bare managed name before switching the version directory.
             place_managed_binary(&unpacked, &metadata.binary_file)?;
             if migrate_existing {
-                automatic_install_preflight(&required)?;
+                automatic_install_preflight(Some(&required))?;
             }
             adopt_or_verify_version_dir(&unpacked, &manifest)?;
             publish_manifest(&manifest)?;

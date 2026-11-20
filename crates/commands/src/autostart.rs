@@ -5,7 +5,13 @@
 
 use std::path::PathBuf;
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum RuntimeChannel {
+    Stable,
+    Dev,
+}
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeCommand {
@@ -92,14 +98,17 @@ pub enum RuntimeCommand {
         #[command(subcommand)]
         command: AutostartCommand,
     },
-    /// Install the managed runtime release; the pinned version downloads by default.
+    /// Install a Runtime release from the selected channel or a local archive.
     Install {
         /// Install from a local release archive instead of downloading.
         #[arg(long, value_name = "ARCHIVE")]
         file: Option<PathBuf>,
-        /// Runtime version to record for a --file install (required with --file).
-        #[arg(long)]
+        /// Exact Runtime release or the version of a local archive.
+        #[arg(long, conflicts_with = "channel")]
         version: Option<String>,
+        /// Release channel (defaults to this CLI's release channel).
+        #[arg(long, value_enum, conflicts_with = "file")]
+        channel: Option<RuntimeChannel>,
         /// Override the download mirror origin (http/https, no path or credentials).
         #[arg(long, value_name = "ORIGIN")]
         mirror: Option<String>,
@@ -108,8 +117,12 @@ pub enum RuntimeCommand {
     List,
     /// Remove old managed runtime versions, keeping the current and one rollback.
     Clean,
-    /// Fetch and install the runtime release pinned by runtime-pin.json.
-    Update,
+    /// Fetch and install the latest Runtime from the selected channel.
+    Update {
+        /// Release channel (defaults to this CLI's release channel).
+        #[arg(long, value_enum)]
+        channel: Option<RuntimeChannel>,
+    },
     /// Supervise the managed runtime child process (startup registration entry point).
     Supervise {
         /// Installation root that owns the supervised runtime registration.

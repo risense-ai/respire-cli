@@ -127,10 +127,9 @@ pub(in crate::autostart) fn installed_model_runtime() -> Result<(PathBuf, crate:
     let manifest = crate::runtime_fetch::read_manifest()?.context("model control Runtime manifest is missing")?;
     // This verifier authenticates the official metadata, full inventory and binary hash.
     let (binary, image_sha256) = super::control::installed_auth_runtime()?;
-    anyhow::ensure!(crate::runtime_fetch::version_in_accept(&manifest.version)
-        && image_sha256.eq_ignore_ascii_case(&manifest.sha256)
+    anyhow::ensure!(image_sha256.eq_ignore_ascii_case(&manifest.sha256)
         && binary == crate::runtime_fetch::managed_binary_path(&manifest.version).canonicalize()?,
-        "model control Runtime version or image differs from the verified release manifest");
+        "model control Runtime image differs from the verified release manifest");
     Ok((binary, manifest))
 }
 

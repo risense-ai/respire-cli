@@ -389,9 +389,8 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
     let manifest = crate::runtime_fetch::read_manifest()?
         .context("host control Runtime manifest is missing")?;
     anyhow::ensure!(
-        crate::runtime_fetch::version_in_accept(&manifest.version)
-            && hash_file(&binary)?.eq_ignore_ascii_case(&manifest.sha256),
-        "host control Runtime version or image does not match the managed manifest"
+        hash_file(&binary)?.eq_ignore_ascii_case(&manifest.sha256),
+        "host control Runtime image does not match the managed manifest"
     );
     let (root, profile) = respire_client_host::config::control_roots()?;
     let root = root.canonicalize()?;

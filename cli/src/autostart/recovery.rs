@@ -268,7 +268,7 @@ impl StaleOwner {
                 && receipt["pid"] == runtime_pid
                 && supervisor_pid != runtime_pid
                 && health.process_start_id == format!("{prefix}{birth}")
-                && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+                && health.v == crate::rpc::PROTOCOL_V
                 && health.bin == health.runtime_version,
             "crash recovery identity/root/account/version mismatch"
         );

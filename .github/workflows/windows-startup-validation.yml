@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       runtime_source_sha:
-        description: Exact reviewed source of the compatible newly published Runtime; update runtime-pin.json before product validation
+        description: Exact reviewed source of the compatible newly published Runtime; update .github/runtime-test-fixture.json before product validation
         type: string
         required: true
 permissions:
@@ -88,7 +88,7 @@ jobs:
           const result = await installPinnedRuntime(cli, {env}, 'x86_64-pc-windows-msvc');
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
-          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const pin = JSON.parse(readFileSync('.github/runtime-test-fixture.json', 'utf8'));
           const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
           assert.equal(selected.version, pin.required);

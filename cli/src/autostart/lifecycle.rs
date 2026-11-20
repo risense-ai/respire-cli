@@ -1074,10 +1074,8 @@ pub(super) fn registered_runtime_image(config: &Registration, migrated_image: Op
         }
     }
     // The registered supervisor clears runtime overrides before selecting its child.
-    let accepted = crate::runtime_fetch::read_manifest()?
-        .is_some_and(|manifest| crate::runtime_fetch::version_in_accept(&manifest.version));
     let runtime =
-        if let Some(managed) = crate::runtime_fetch::managed_runtime_path()?.filter(|_| accepted) {
+        if let Some(managed) = crate::runtime_fetch::managed_runtime_path()? {
             managed
         } else {
             config
@@ -1168,8 +1166,8 @@ fn wait_ready_with_expectation(config: &Registration,
         if let Some(health) = crate::rpc::probe_runtime()? {
             verify_owned_runtime(config, &health)?;
             anyhow::ensure!(
-                crate::runtime_fetch::version_in_accept(&health.runtime_version),
-                "managed runtime version mismatch"
+                health.v == crate::rpc::PROTOCOL_V,
+                "managed Runtime protocol mismatch"
             );
             if health.credential_state == "required" || health.store_ready
                 || respire_client_host::settings::off_mode()? {
@@ -1774,13 +1772,14 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             file,
             version,
             mirror,
-        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref()),
+            channel,
+        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref(), *channel),
         RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
         RuntimeCommand::Clean => {
             let removed = crate::runtime_fetch::clean_old()?;
             emit("runtime.clean", json!({"removed": removed}))
         }
-        RuntimeCommand::Update => install_runtime("runtime.update", None, None, None),
+        RuntimeCommand::Update { channel } => install_runtime("runtime.update", None, None, None, *channel),
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
@@ -1796,21 +1795,21 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
     }
 }
 
-/// `runtime install`: pinned download by default, or an offline archive with
+/// `runtime install`: channel download by default, or an offline archive with
 /// `--file`/`--version`, with an optional explicit `--mirror` origin.
-fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
+fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>,
+    channel: Option<respire_commands::autostart::RuntimeChannel>) -> Result<()> {
     let (binary, source) = match (file, version) {
         (Some(archive), Some(explicit_version)) => {
             anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
             (crate::runtime_fetch::install_from_file(archive, explicit_version)?, "file")
         }
         (Some(_), None) => bail!("--file requires --version"),
-        (None, Some(_)) => bail!("--version is only accepted together with --file"),
-        (None, None) => {
+        (None, explicit_version) => {
             if let Some(origin) = mirror {
                 respire_commands::model_download::validate_mirror(origin)?;
             }
-            (crate::runtime_fetch::install_published_runtime(mirror)?, "download")
+            (crate::runtime_fetch::install_published_runtime(explicit_version, mirror, channel)?, "download")
         }
     };
     let selected_version = crate::runtime_fetch::read_manifest()?
@@ -1820,7 +1819,6 @@ fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mi
 }
 
 fn runtime_inventory() -> Result<Value> {
-    let pin = crate::runtime_fetch::pinned()?;
     let installed = crate::runtime_fetch::list_installed()?;
     let versions: Vec<Value> = installed
         .iter()
@@ -1829,8 +1827,7 @@ fn runtime_inventory() -> Result<Value> {
         )
         .collect();
     Ok(json!({
-        "required": pin.required.clone(),
-        "accept": pin.accept_raw.clone(),
+        "channel": crate::runtime_fetch::default_runtime_channel_name(),
         "installed": versions,
     }))
 }
@@ -2948,11 +2945,13 @@ mod tests {
         let installed = root.join("bin/runtime").join(&version);
         fs::create_dir_all(&installed)?;
         let inventory = runtime_inventory()?;
-        anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
+        anyhow::ensure!(inventory["channel"] == crate::runtime_fetch::default_runtime_channel_name()
+            && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);
-        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None).is_err());
-        anyhow::ensure!(install_runtime("runtime.install", None, Some(&version), None).is_err());
-        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", None, Some("invalid-version"), None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version),
+            Some("https://example.invalid"), None).is_err());
 
         // Recovery must revalidate the registered owner again at the cleanup boundary.
         {

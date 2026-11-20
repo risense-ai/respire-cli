@@ -1145,7 +1145,7 @@ def run(args):
                       cli_version_origin="official-release-metadata" if args.official_cli_metadata else "source-manifest")
         if args.official_cli_metadata:
             report["official_cli_metadata_sha256"] = digest(args.official_cli_metadata)
-        pin = json.loads((args.cli_source / "runtime-pin.json").read_text())["required"]
+        pin = json.loads((args.cli_source / ".github/runtime-test-fixture.json").read_text())["required"]
         require(version != pin, "candidate_must_not_impersonate_official_pin")
         require((args.cli_source / "sdk/core-sdk.lock.json").read_bytes()
                 == (args.runtime_source / "sdk/core-sdk.lock.json").read_bytes()

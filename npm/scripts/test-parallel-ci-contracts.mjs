@@ -89,7 +89,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   const runEvidence=(output,status='0',mutate={})=>{
     const printed=[],exits=[];
     const files={'runtime-tests-source.json':JSON.stringify({source_sha:harnessSha}),
-      'runtime-pin.json':JSON.stringify({required:'synthetic'}),'/runtime.json':JSON.stringify(receiptNative),
+      '.github/runtime-test-fixture.json':JSON.stringify({required:'synthetic'}),'/runtime.json':JSON.stringify(receiptNative),
       '/runtime/version/rsrs-runtime':runtimeBytes,'/private-log':output,'/cli':'CLI bytes','/harness':'harness bytes',...mutate};
     runInNewContext(evidenceProgram,{assert,createHash,dirname:path.posix.dirname,join:path.posix.join,
       realpathSync:value=>value,readFileSync:name=>{assert(Object.hasOwn(files,name),name);return files[name];},
@@ -398,7 +398,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.equal(expectedProduct,'e2590eb034be26243f12f8a68b303727343f796a');
   const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
   const binary=Buffer.from('synthetic official runtime'),cliBytes=Buffer.from('instrumented CLI'),archive=Buffer.from('source archive');
-  const pinVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url),'utf8')).required;
+  const pinVersion=JSON.parse(readFileSync(new URL('../../.github/runtime-test-fixture.json',import.meta.url),'utf8')).required;
   const releaseMetadata={schema_version:2,runtime_version:pinVersion,source_commit:expectedProduct,binary_sha256:hash(binary)};
   const selection=()=>{const metadata_json=JSON.stringify(releaseMetadata);return {version:pinVersion,sha256:hash(binary),
     release:{metadata_json,metadata_sha256:hash(metadata_json)}};};
@@ -417,7 +417,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     const runFixture=async(selected,actualBinary=binary)=>{
       let written;
       await runInNewContext(`(async()=>{${fixture}\n})()`,{assert,createHash,
-        readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:pinVersion}):file==='cli/Cargo.toml'?`version = "${pinVersion}"`:
+        readFileSync:file=>file==='.github/runtime-test-fixture.json'?JSON.stringify({required:pinVersion}):file==='cli/Cargo.toml'?`version = "${pinVersion}"`:
           file.endsWith('/runtime.json')?JSON.stringify(selected):file.endsWith('.json')?JSON.stringify(initialReceipt('core')):actualBinary,
         mkdtempSync:()=>'/fixture',join:path.posix.join,resolve:file=>`/workspace/${file}`,realpathSync:file=>file,
         statSync:()=>({isFile:()=>true}),
@@ -448,7 +448,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   const mergeProgram=stripImports(report.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]);
   const runMerge=receipt=>runInNewContext(mergeProgram,{assert,createHash,process:{env:productEnv},
     readFileSync:file=>file==='runtime-tests-source.json'?JSON.stringify({source_sha:'b'.repeat(40)}):
-      file==='runtime-pin.json'?JSON.stringify({required:pinVersion}):file.endsWith('.json')?
+      file==='.github/runtime-test-fixture.json'?JSON.stringify({required:pinVersion}):file.endsWith('.json')?
         JSON.stringify({...receipt,source_artifact:`coverage-${file.includes('runtime_smoke')?'runtime_smoke':'core'}`}):archive,
     execFileSync:()=>cliBytes});
   runMerge(boundReceipt);

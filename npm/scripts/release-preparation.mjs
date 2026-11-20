@@ -50,7 +50,7 @@ export function preparationInputs(sha,version,{cwd=process.cwd()}={}){
   const manifest=JSON.parse(load('npm/artifact-manifest.json'));
   const frontend=frontendLayout(manifest);
   const files=['Cargo.lock','rust-toolchain.toml',
-    ...(frontend?['runtime-pin.json']:['sdk/core-sdk.lock.json','crates/core-sdk/core-sdk.lock.json']),
+    ...(frontend?['.github/runtime-test-fixture.json']:['sdk/core-sdk.lock.json','crates/core-sdk/core-sdk.lock.json']),
     '.github/workflows/release.yml','.github/workflows/release-validation.yml','.github/workflows/release-native-validation.yml'];
   const hashes=Object.fromEntries(files.map(file=>[file,digest(load(file))]));
   manifest.cliVersion=version;
