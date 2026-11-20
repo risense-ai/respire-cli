@@ -795,16 +795,16 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     let recycled = serde_json::to_vec(&serde_json::json!({
         "v": 1, "pid": std::process::id(), "bin": "1.0.21-dev.3", "url": url,
     }))?;
+    let binary = install_lifecycle_fixture()?;
     fs::write(&endpoint, &recycled)?;
-    let _takeover = crate::runtime_policy::takeover_lock()?;
-    archive_stopped_endpoint_locked()?;
+    let _error = crate::rpc::restart_runtime(Duration::from_secs(1))
+        .err().context("the synthetic runtime started")?;
     anyhow::ensure!(!endpoint.exists());
     let archived = fs::read_dir(endpoint.parent().context("endpoint parent missing")?)?
         .collect::<std::io::Result<Vec<_>>>()?;
     let archive = archived.into_iter().find(|entry| entry.file_name().to_string_lossy().starts_with("endpoint.stopped-"))
         .context("endpoint archive missing")?;
     anyhow::ensure!(fs::read(archive.path())? == recycled);
-    let binary = install_lifecycle_fixture()?;
     let directory = binary.parent().context("fixture directory missing")?;
     let legacy = dir.path().join("runtime").join(required);
     fs::create_dir_all(legacy.join("lib"))?;

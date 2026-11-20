@@ -130,6 +130,7 @@ impl StaleOwner {
         Self::prepare(false)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_restart_locked() -> Result<Self> {
         Self::prepare(true)
     }
