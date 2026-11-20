@@ -1522,6 +1522,59 @@ function Set-OfflineAutoRuntime([bool]$Enabled) {
     $report.offline.action_stage = 'settings_' + $phase + '_persist'
     Wait-OfflinePreferences 'autoRuntime' $Enabled $observation
 }
+function Test-Client2RunRegistration($Key, [string]$ExpectedCommand) {
+    if ($null -eq $Key -or $Key.GetValueNames() -notcontains 'respire') { return $false }
+    if ($Key.GetValueKind('respire') -ne [Microsoft.Win32.RegistryValueKind]::String -or
+        $Key.GetValue('respire') -cne $ExpectedCommand) {
+        throw 'Client2 login startup entry has the wrong type, executable or arguments'
+    }
+    return $true
+}
+
+function Read-OfflineLoginAutostart {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+    try { return Test-Client2RunRegistration $key $binding.autostart_expected_command }
+    finally { if ($key) { $key.Dispose() } }
+}
+
+function Invoke-OfflineLoginAutostart {
+    if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
+        $env:RUNNER_OS -cne 'Windows' -or -not $env:RUNNER_TEMP -or -not $binding.verified_candidate_assets -or
+        $binding.final_public_assets -or $binding.fixture_mode -or
+        -not $binding.exe.StartsWith(([IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Login startup registration requires the hosted sealed candidate fixture'
+    }
+    $result = @{status='failed'; initially_absent=$false; registered=$false; removed_via_ui=$false; sign_in_invocation='not-evaluated'}
+    $report.offline.autostart_registration = $result
+    $report.offline.action_stage = 'login_autostart_preflight'
+    if (Read-OfflineLoginAutostart) { throw 'Client2 login startup entry was present before UI input' }
+    $result.initially_absent = $true
+    $label = [regex]::Unescape('^(?:\u767b\u5f55\u7cfb\u7edf\u540e\u542f\u52a8|Start at login)$')
+    foreach ($enabled in @($true, $false)) {
+        $report.offline.action_stage = if ($enabled) { 'login_autostart_enable' } else { 'login_autostart_disable' }
+        $checkbox = Find-OfflineControl 'ControlType.CheckBox' $label
+        $id = $checkbox.GetRuntimeId() -join '.'
+        if (-not $id) { throw 'Login startup checkbox identity unavailable' }
+        $toggle = $checkbox.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+        $before = if ($enabled) { [Windows.Automation.ToggleState]::Off } else { [Windows.Automation.ToggleState]::On }
+        $after = if ($enabled) { [Windows.Automation.ToggleState]::On } else { [Windows.Automation.ToggleState]::Off }
+        if ($toggle.Current.ToggleState -ne $before) { throw 'Login startup checkbox differs before input' }
+        Focus-OfflineControl $checkbox
+        Send-OfflineKey 32 -ExpectedRuntimeId $id
+        for ($attempt=0; $attempt -lt 50; $attempt++) {
+            $registered = Read-OfflineLoginAutostart
+            if ($registered -eq $enabled -and $toggle.Current.ToggleState -eq $after -and $checkbox.Current.IsEnabled) { break }
+            Pause-Probe
+        }
+        $null = Assert-Target $true
+        if ($attempt -eq 50 -or ($checkbox.GetRuntimeId() -join '.') -cne $id) {
+            throw 'Login startup UI toggle did not yield the expected registry state'
+        }
+        if ($enabled) { $result.registered = $true } else { $result.removed_via_ui = $true }
+    }
+    $result.status = 'round-trip-passed'
+}
+
 function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
     $report.offline.action_stage = $(if ($Diary) { 'diary_editor_open' } else { 'important_editor_open' })
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bb0\u5fc6\u0028\u003f\u003a\u005c\u0073\u007c\u0024\u0029'))
@@ -1878,6 +1931,7 @@ function Invoke-OfflineGuiAcceptance {
     Set-OfflineAutoRuntime $true
     if (-not $binding.final_public_assets -and -not $binding.verified_candidate_assets) { Set-OfflineAutoRuntime $false }
     $report.offline.settings_persisted = $true
+    if ($binding.autostart_expected_command) { Invoke-OfflineLoginAutostart }
     $report.offline.action_stage = 'runtime_pre_stop_check'
     $null = Assert-OfflineRuntime
     $report.offline.action_stage = 'overview_navigation'
