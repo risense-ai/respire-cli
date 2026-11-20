@@ -47,12 +47,21 @@ def private_provider_stderr(root):
     return os.fdopen(os.open(root / "provider.stderr", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
 
 
+# GNOME Keyring's secure allocator uses libc assert() to avoid GLib allocations.
+PROVIDER_LIBC_ASSERTION = re.compile(
+    rb"(?m)^gnome-keyring-daemon: (?:[^\r\n:]+/)?"
+    rb"(?P<file>egg-secure-memory\.c):(?P<line>[1-9][0-9]*): "
+    rb"(?P<function>[A-Za-z_][A-Za-z0-9_]*): Assertion `[^\r\n]+' failed\.\r?$")
+
+
 def provider_abort_type(stderr, exit_code):
     # Linux SIGTRAP/SIGABRT; raw text, paths and assertion values stay private.
     if exit_code not in (-5, -6):
         return "unknown"
     if re.search(rb"(?m)^(?:Bail out! )?(?:[A-Za-z0-9_-]+:)?ERROR:[^\r\n]+: assertion failed", stderr):
         return "glib_assertion"
+    if exit_code == -6 and PROVIDER_LIBC_ASSERTION.search(stderr):
+        return "libc_assertion"
     for marker, kind in ((b"free(): double free detected", "allocator_double_free"),
                          (b"double free or corruption", "allocator_corruption"),
                          (b"malloc(): corrupted", "allocator_corruption"),
@@ -82,6 +91,8 @@ def provider_abort_location(stderr, exit_code):
         rb"slist|closure|error|quark|atomic|strfuncs))\.c):"
         rb"(?P<line>[1-9][0-9]*):(?P<function>[A-Za-z_][A-Za-z0-9_]*): "
         rb"assertion failed(?:[: ][^\r\n]*)?\r?$", stderr)
+    if match is None and exit_code == -6:
+        match = PROVIDER_LIBC_ASSERTION.search(stderr)
     if match is None:
         return "unknown"
     return {"file": match["file"].decode("ascii"), "line": int(match["line"]),
