@@ -1772,13 +1772,14 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             file,
             version,
             mirror,
-        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref()),
+            channel,
+        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref(), *channel),
         RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
         RuntimeCommand::Clean => {
             let removed = crate::runtime_fetch::clean_old()?;
             emit("runtime.clean", json!({"removed": removed}))
         }
-        RuntimeCommand::Update => install_runtime("runtime.update", None, None, None),
+        RuntimeCommand::Update { channel } => install_runtime("runtime.update", None, None, None, *channel),
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
@@ -1794,21 +1795,21 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
     }
 }
 
-/// `runtime install`: pinned download by default, or an offline archive with
+/// `runtime install`: channel download by default, or an offline archive with
 /// `--file`/`--version`, with an optional explicit `--mirror` origin.
-fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
+fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>,
+    channel: Option<respire_commands::autostart::RuntimeChannel>) -> Result<()> {
     let (binary, source) = match (file, version) {
         (Some(archive), Some(explicit_version)) => {
             anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
             (crate::runtime_fetch::install_from_file(archive, explicit_version)?, "file")
         }
         (Some(_), None) => bail!("--file requires --version"),
-        (None, Some(_)) => bail!("--version is only accepted together with --file"),
-        (None, None) => {
+        (None, explicit_version) => {
             if let Some(origin) = mirror {
                 respire_commands::model_download::validate_mirror(origin)?;
             }
-            (crate::runtime_fetch::install_published_runtime(mirror)?, "download")
+            (crate::runtime_fetch::install_published_runtime(explicit_version, mirror, channel)?, "download")
         }
     };
     let selected_version = crate::runtime_fetch::read_manifest()?
@@ -1818,7 +1819,6 @@ fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mi
 }
 
 fn runtime_inventory() -> Result<Value> {
-    let pin = crate::runtime_fetch::pinned()?;
     let installed = crate::runtime_fetch::list_installed()?;
     let versions: Vec<Value> = installed
         .iter()
@@ -1827,8 +1827,7 @@ fn runtime_inventory() -> Result<Value> {
         )
         .collect();
     Ok(json!({
-        "required": pin.required.clone(),
-        "accept": pin.accept_raw.clone(),
+        "channel": crate::runtime_fetch::default_runtime_channel_name(),
         "installed": versions,
     }))
 }

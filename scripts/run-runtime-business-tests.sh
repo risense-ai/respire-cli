@@ -62,7 +62,7 @@ const receipt = JSON.parse(readFileSync(join(dirname(dirname(dirname(env.RSRS_RU
 assert.equal(hash(receipt.release.metadata_json), receipt.release.metadata_sha256);
 const metadata = JSON.parse(receipt.release.metadata_json);
 assert.equal(metadata.schema_version, 2);
-assert.equal(metadata.runtime_version, JSON.parse(readFileSync('runtime-pin.json', 'utf8')).required);
+assert.equal(metadata.runtime_version, JSON.parse(readFileSync('.github/runtime-test-fixture.json', 'utf8')).required);
 assert.equal(metadata.source_commit, env.EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA);
 assert.equal(metadata.binary_sha256, receipt.sha256);
 assert.equal(hash(readFileSync(realpathSync(env.RSRS_RUNTIME_BIN))), receipt.sha256);

@@ -24,7 +24,7 @@ pub(crate) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
         .context("Runtime fixture installation root missing")?;
     let receipt = source_root.join("runtime.json");
     let selected: Value = serde_json::from_slice(&std::fs::read(&receipt)?)?;
-    let pin: Value = serde_json::from_str(include_str!("../../../runtime-pin.json"))?;
+    let pin: Value = serde_json::from_str(include_str!("../../../.github/runtime-test-fixture.json"))?;
     let version = pin["required"]
         .as_str()
         .context("Runtime pin required missing")?;

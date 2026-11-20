@@ -104,7 +104,7 @@ test('real model probe does not inherit the unit-test Core mode',()=>{
    selected.release.metadata_json=JSON.stringify(metadata);selected.release.metadata_sha256=hash(selected.release.metadata_json);
   };
   seal();change({core,metadata,selected,files,seal});
-  files.set('/data/bin/runtime.json',JSON.stringify(selected));files.set('runtime-pin.json',JSON.stringify({required:metadata.runtime_version}));
+  files.set('/data/bin/runtime.json',JSON.stringify(selected));files.set('.github/runtime-test-fixture.json',JSON.stringify({required:metadata.runtime_version}));
   const output=[];
   runInNewContext(program,{assert,createHash,join:posix.join,dirname:posix.dirname,
    readFileSync:name=>{assert(files.has(name),`Unexpected input ${name}`);return files.get(name);},

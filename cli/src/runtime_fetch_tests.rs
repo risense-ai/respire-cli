@@ -1,4 +1,4 @@
-//! Tests for the managed runtime fetcher: pin parsing, whitelist extraction,
+//! Tests for the managed runtime fetcher: version validation, whitelist extraction,
 //! stage verification and offline installation against fixture archives.
 use super::*;
 
@@ -140,125 +140,6 @@ fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
         (RUNTIME_BINARY, b'0', 0o755, BINARY),
     ]);
     Ok((gz(&raw)?, hash))
-}
-
-#[test]
-fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
-    let pin = pinned()?;
-    anyhow::ensure!(pin.required == "2.0.0-dev.27", "unexpected pin {pin:?}");
-    anyhow::ensure!(pin.accept.contains("2.0.0-dev.27"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.26"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.25"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.24"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.23"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.22"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.21"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.20"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.19"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.18"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.17"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.16"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.15"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.14"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.13"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.12"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.11"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.10"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.9"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.5"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.4"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.3"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.2"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.1"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.17"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.16"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.15"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.14"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.13"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.12"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.11"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.10"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.9"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.8"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.7"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.6"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.5"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.4"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.3"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.2"));
-    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.1"));
-    anyhow::ensure!(pin.accept.contains("2.0.1"));
-    anyhow::ensure!(pin.accept.contains("2.9.9"));
-    anyhow::ensure!(!pin.accept.contains("1.0.20"));
-    anyhow::ensure!(!pin.accept.contains("3.0.0"));
-    anyhow::ensure!(!pin.accept.contains("3.1.0-dev.1"));
-    anyhow::ensure!(
-        version_in_accept("2.0.0-dev.27")
-            && !version_in_accept("2.0.0-dev.26")
-            && !version_in_accept("2.0.0-dev.25")
-            && !version_in_accept("2.0.0-dev.24")
-            && !version_in_accept("2.0.0-dev.23")
-            && !version_in_accept("2.0.0-dev.22")
-            && !version_in_accept("2.0.0-dev.21")
-            && !version_in_accept("2.0.0-dev.20")
-            && !version_in_accept("2.0.0-dev.19")
-            && !version_in_accept("2.0.0-dev.18")
-            && !version_in_accept("2.0.0-dev.17")
-            && !version_in_accept("2.0.0-dev.16")
-            && !version_in_accept("2.0.0-dev.15")
-            && !version_in_accept("2.0.0-dev.14")
-            && !version_in_accept("2.0.0-dev.13")
-            && !version_in_accept("2.0.0-dev.12")
-            && !version_in_accept("2.0.0-dev.11")
-            && !version_in_accept("2.0.0-dev.10")
-            && !version_in_accept("2.0.0-dev.9")
-            && !version_in_accept("2.0.0-dev.5")
-            && !version_in_accept("2.0.0-dev.4")
-            && !version_in_accept("2.0.0-dev.3")
-            && !version_in_accept("2.0.0-dev.2")
-            && !version_in_accept("2.0.0-dev.1")
-            && !version_in_accept("1.0.21-dev.17")
-            && !version_in_accept("1.0.21-dev.16")
-            && !version_in_accept("1.0.21-dev.15")
-            && !version_in_accept("1.0.21-dev.14")
-            && !version_in_accept("1.0.21-dev.13")
-            && !version_in_accept("1.0.21-dev.12")
-            && !version_in_accept("1.0.21-dev.11")
-            && !version_in_accept("1.0.21-dev.10")
-            && !version_in_accept("1.0.21-dev.9")
-            && !version_in_accept("1.0.21-dev.8")
-            && !version_in_accept("1.0.21-dev.7")
-            && !version_in_accept("1.0.21-dev.6")
-            && !version_in_accept("1.0.21-dev.5")
-            && !version_in_accept("1.0.21-dev.4")
-            && !version_in_accept("1.0.21-dev.3")
-            && !version_in_accept("1.0.21-dev.2")
-            && !version_in_accept("0.9.0")
-    );
-    Ok(())
-}
-
-#[test]
-fn accept_ranges_reject_malformed_bounds() -> Result<()> {
-    for raw in [
-        "",
-        "1.2.3",
-        ">=",
-        "<1.0.0,>=2.0.0",
-        ">=1.0.0,<=2.0.0",
-        "<:>",
-    ] {
-        anyhow::ensure!(
-            AcceptRange::parse(raw).is_err(),
-            "malformed range {raw:?} was accepted"
-        );
-    }
-    anyhow::ensure!(AcceptRange::parse("<2.0.0")?.contains("1.9.9"));
-    anyhow::ensure!(!AcceptRange::parse("<2.0.0")?.contains("2.0.0"));
-    anyhow::ensure!(AcceptRange::parse(">=1.0.21-dev.1")?.contains("1.0.21-dev.2"));
-    anyhow::ensure!(!AcceptRange::parse(">=2.0.0-dev.15")?.contains("2.0.0-beta.99"));
-    anyhow::ensure!(!AcceptRange::parse(">=2.0.0-dev.15")?.contains("2.0.0-99"));
-    Ok(())
 }
 
 #[test]
@@ -760,10 +641,10 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
     let required = &pinned()?.required;
-    anyhow::ensure!(automatic_install_preflight(required)?.is_none());
+    anyhow::ensure!(automatic_install_preflight(Some(required))?.is_none());
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     fs::write(dir.path().join("client.json"), br#"{"language":"en"}"#)?;
-    anyhow::ensure!(automatic_install_preflight(required)?.is_none(),
+    anyhow::ensure!(automatic_install_preflight(Some(required))?.is_none(),
         "fresh preferences were mistaken for an old installation");
     fs::create_dir(dir.path().join("bin"))?;
     let legacy_cli = crate::mcp::stable_bin_path();
@@ -780,9 +661,9 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
         "v": 1, "pid": pid, "bin": "1.0.21-dev.3", "url": url,
     }))?;
     fs::write(&endpoint, &record)?;
-    anyhow::ensure!(automatic_install_preflight(required).is_err(), "occupied port was admitted");
+    anyhow::ensure!(automatic_install_preflight(Some(required)).is_err(), "occupied port was admitted");
     drop(port);
-    anyhow::ensure!(automatic_install_preflight(required)?.is_none());
+    anyhow::ensure!(automatic_install_preflight(Some(required))?.is_none());
     let error = download_and_install(None, None)
         .err()
         .context("hermetic download was allowed")?;
@@ -850,7 +731,7 @@ fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Resul
     }
     fs::write(dir.path().join("client.json"),
         serde_json::json!({"data_dir": profile}).to_string())?;
-    anyhow::ensure!(automatic_install_preflight(&pinned()?.required)?.is_none());
+    anyhow::ensure!(automatic_install_preflight(None)?.is_none());
     let error = download_and_install(None, None)
         .err().context("source test unexpectedly downloaded a Runtime")?;
     anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>(),

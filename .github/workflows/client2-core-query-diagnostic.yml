@@ -106,7 +106,7 @@ jobs:
           const job=jobs[0];
           assert.equal(job.run_id,source.run_id);assert.equal(job.run_attempt,source.run_attempt);assert.equal(job.head_sha,source.sha);
           assert.equal(job.status,'completed');assert.equal(job.conclusion,'success');
-          for(const path of ['runtime-pin.json','npm/artifact-manifest.json']) {
+          for(const path of ['.github/runtime-test-fixture.json','npm/artifact-manifest.json']) {
             const body=api(`repos/risense-ai/respire-cli/contents/${path}?ref=${source.sha}`);
             assert.deepEqual(JSON.parse(Buffer.from(body.content,'base64')),JSON.parse(readFileSync(path)),'Harness consumer contract differs from selected CLI source');
           }

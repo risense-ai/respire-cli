@@ -18,8 +18,10 @@ remain available for recovery; account data and Runtime state under `~/.rsrs/run
 are not relocated. Existing running owners are drained through normal lifecycle
 operations before a replacement starts.
 
-`rsrs runtime install` stages and selects the verified Runtime release. Start it
-with `rsrs runtime start`. Model settings (`model_mirror` and `RSRS_MIRROR`) apply
+`rsrs runtime install` stages and selects the latest verified Runtime release
+in the CLI's release channel. Use `--channel stable`, `--channel dev`, or an
+exact `--version` to select a different source release. Start it with
+`rsrs runtime start`. Model settings (`model_mirror` and `RSRS_MIRROR`) apply
 to model files. For a deliberate Runtime source override, use the Runtime
 command's `--mirror` option with an approved origin.
 

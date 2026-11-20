@@ -45,13 +45,13 @@ function retryable(result, url) {
 export async function installPinnedRuntime(cli, {env}, target, {
   spawn = spawnSync, pause = delay, stdout = process.stdout, stderr = process.stderr,
 } = {}) {
-  const pin = JSON.parse(readFileSync(new URL('../runtime-pin.json', import.meta.url), 'utf8'));
+  const pin = JSON.parse(readFileSync(new URL('../.github/runtime-test-fixture.json', import.meta.url), 'utf8'));
   if (!/^\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?$/.test(pin.required) || !/^[a-z0-9_]+(?:-[a-z0-9_]+)+$/.test(target)) {
     throw new Error('Invalid pinned Runtime metadata identity');
   }
   const url = `https://github.com/risense-ai/respire-runtime/releases/download/v${pin.required}/runtime-build-${target}.json`;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const result = spawn(cli, ['--json', 'runtime', 'install'], {env, stdio: ['inherit', 'pipe', 'pipe']});
+    const result = spawn(cli, ['--json', 'runtime', 'install', '--version', pin.required], {env, stdio: ['inherit', 'pipe', 'pipe']});
     if (result.stdout) stdout.write(result.stdout);
     if (result.stderr) stderr.write(result.stderr);
     if (attempt === 2 || !retryable(result, url)) return result;
@@ -81,7 +81,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const result = await installPinnedRuntime(cli, {env}, target);
   if (result.error) throw result.error;
   assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
-  const pin = JSON.parse(readFileSync(new URL('../runtime-pin.json', import.meta.url), 'utf8'));
+  const pin = JSON.parse(readFileSync(new URL('../.github/runtime-test-fixture.json', import.meta.url), 'utf8'));
   const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
   assert.equal(selected.version, pin.required);
   assert.match(selected.sha256, /^[0-9a-f]{64}$/);

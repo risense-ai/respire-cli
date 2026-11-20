@@ -428,7 +428,7 @@ class FixtureInstallationTests(unittest.TestCase):
             installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
 
             def installer(command, **kwargs):
-                self.assertEqual(command, ['fixture-cli', '--json', 'runtime', 'install'])
+                self.assertEqual(command, ['fixture-cli', '--json', 'runtime', 'install', '--version', version])
                 for key in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN'):
                     self.assertNotIn(key, kwargs['env'])
                 self.assertEqual(kwargs['env']['RSRS_DATA_DIR'], str(root))
@@ -566,7 +566,7 @@ for(const {target,program} of programs)for(const fault of ['', 'input', 'source'
  if(fault==='target')metadata.target_triple='wrong-target';
  const encoded=JSON.stringify(metadata);
  const receipt={version:fault==='version'?'3.4.0-dev.2':version,sha256:hash(image),release:{metadata_json:encoded,metadata_sha256:fault==='proof'?'0'.repeat(64):hash(encoded)}};
- const files=new Map([['runtime-pin.json',JSON.stringify({required:version})],['/fixture/bin/runtime.json',JSON.stringify(receipt)],
+ const files=new Map([['.github/runtime-test-fixture.json',JSON.stringify({required:version})],['/fixture/bin/runtime.json',JSON.stringify(receipt)],
   [runtime,fault==='image'?Buffer.from('changed'):image],[`/fixture/bin/runtime/${version}/core-runtime.json`,fault==='core'?Buffer.from('changed'):core]]);
  const writes=[];
  const sandbox={assert,createHash,join:posix.join,resolve:()=>'/cli',spawnSync:()=>assert.fail('No product execution in self-check'),

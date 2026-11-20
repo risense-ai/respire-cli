@@ -245,7 +245,7 @@ foreach ($private in @('native-binding.json','core-query-proxy-ready.json','core
 @'
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const workflow=fs.readFileSync(process.argv[2],'utf8');
-const guard=workflow.slice(workflow.indexOf('const run=api('),workflow.indexOf("for(const path of ['runtime-pin.json'"))+
+const guard=workflow.slice(workflow.indexOf('const run=api('),workflow.indexOf("for(const path of ['.github/runtime-test-fixture.json'"))+
   workflow.slice(workflow.indexOf('assert.match(e.CLI_ARTIFACT_ID'),workflow.indexOf("const root=join(e.RUNNER_TEMP,'core-query-assets')"));
 assert.ok(guard.includes('const job=jobs[0]')&&guard.includes('Date.parse(artifact.created_at)'));
 const source={run_id:1,run_attempt:2,sha:'a'.repeat(40)},repo={full_name:'risense-ai/respire-cli'};

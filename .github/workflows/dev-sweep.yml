@@ -177,11 +177,10 @@ jobs:
           const env={...process.env,HOME:path.join(root,'home'),USERPROFILE:path.join(root,'home'),RSRS_UPDATE_CHECK:'0',RSRS_NO_AUTOSYNC:'1'};
           for(const key of Object.keys(env)) if(['RSRS_RUNTIME_BIN','RSRS_CORE_TEST_MODE','GH_TOKEN','GITHUB_TOKEN'].includes(key)||key.endsWith('_TOKEN')||key.endsWith('_API_KEY')) delete env[key];
           const invoke=args=>cp.execFileSync(binary,args,{env,encoding:'utf8',timeout:30000}).trim();
-          const pin=JSON.parse(fs.readFileSync('runtime-pin.json','utf8'));
+          const pin=JSON.parse(fs.readFileSync('.github/runtime-test-fixture.json','utf8'));
           const inventory=JSON.parse(invoke(['--json','runtime','list']));
           assert.equal(inventory.command,'runtime.list');assert.equal(inventory.status,'ok');
-          assert.equal(inventory.summary.required,pin.required,'Harness and actual CLI Runtime pins differ');
-          assert.equal(inventory.summary.accept,pin.accept,'Harness and actual CLI Runtime accept ranges differ');
+          assert.equal(inventory.summary.installed.find(entry=>entry.current)?.version,pin.required,'Selected Runtime differs from the test fixture');
           const metadata=JSON.parse(fs.readFileSync(`validated-cli/cli-build-${process.env.RSRS_RUNTIME_TRIPLE}.json`,'utf8'));
           assert.equal(metadata.git_sha,process.env.CLI_SHA);
           assert.equal(String(metadata.producer.run_id),process.env.CLI_RUN_ID,'CLI artifact producer differs');
@@ -207,7 +206,7 @@ jobs:
             full_acceptance:false,harness_sha:process.env.GITHUB_SHA,cli_source_sha:metadata.git_sha,
             diagnostic_run_id:process.env.GITHUB_RUN_ID,diagnostic_run_attempt:process.env.GITHUB_RUN_ATTEMPT,
             producer:metadata.producer,target:metadata.target,cli:{version:version.summary.version,version_display:display,binary_sha256:metadata.binary_sha256},
-            runtime:{version:receipt.version,binary_sha256:receipt.sha256,required:inventory.summary.required,accept:inventory.summary.accept,
+            runtime:{version:receipt.version,binary_sha256:receipt.sha256,fixture_version:pin.required,
               release_metadata_sha256:receipt.release.metadata_sha256,release_metadata:runtimeMetadata},
             limits:['Installation identity only; fixture outcomes are separate','An old CLI producer cannot establish full acceptance or publication of the new harness']};
           if(process.env.BUSINESS_ONLY==='true') evidence.expected_runtime_source_sha=process.env.EXPECTED_RUNTIME_SHA;

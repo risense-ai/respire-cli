@@ -170,7 +170,7 @@ test('supported Linux ARM targets require native runners, every source feedback 
       await runInNewContext(`(async()=>{${script}\n})()`,{assert,createHash,join:p.join,resolve:(...parts)=>p.resolve(...parts),process:{platform,env},
         mkdirSync:()=>{},statSync:()=>({isFile:()=>true}),
         realpathSync:file=>state.sameImage?'same-image':file,
-        readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:version}):file===p.join(root,'bin','runtime.json')?JSON.stringify(selected):image,
+        readFileSync:file=>file==='.github/runtime-test-fixture.json'?JSON.stringify({required:version}):file===p.join(root,'bin','runtime.json')?JSON.stringify(selected):image,
         appendFileSync:(_file,line)=>output.push(line),
         installPinnedRuntime:async(cli,options,target)=>{assert.equal(target,'synthetic-target');
           calls.push({cli,env:options.env});return {status:state.status}}});

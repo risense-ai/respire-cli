@@ -303,13 +303,13 @@ test('actual attester subprocess reads only main-bound mock APIs and rejects sta
       return {name,version,file,sha256:createHash('sha256').update(bytes).digest('hex')};
     });
     writeFileSync(join(packs,'source-version.json'),JSON.stringify({schema_version:1,git_sha:sha,version,packages}));
-    const runtimeVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url))).required;
+    const runtimeVersion=JSON.parse(readFileSync(new URL('../../.github/runtime-test-fixture.json',import.meta.url))).required;
     const candidate={schema:1,kind:'unpublished-cli-candidate',client2:{release:'v2.0.0-dev.6',source_sha:'f'.repeat(40)},source:{repository:source.repository,sha,version,run_id:44276673815,run_attempt:1},
       runtime:{repository:'risense-ai/respire-runtime',release_id:22,version:runtimeVersion,source_sha:'b'.repeat(40),producer:{run_id:91,run_attempt:2},
         assets:manifest.targets.flatMap((t,i)=>publishedAssetNames('runtime',t.triple).map((name,n)=>({id:i*3+n+1,name,size:64,sha256:'b'.repeat(64)})))}};
     const raw=publishedFullFixture(reports,{candidate,assets:inventory,packsFolder:packs});
     const inputs={'Cargo.lock':'synthetic locked dependencies','rust-toolchain.toml':'[toolchain]\nchannel="1.95.0"',
-      'runtime-pin.json':JSON.stringify({required:runtimeVersion}),'.github/workflows/release.yml':'      - name: Bind fixtures to an independent official pinned Runtime\n        run: original-cloud-scope\n',
+      '.github/runtime-test-fixture.json':JSON.stringify({required:runtimeVersion}),'.github/workflows/release.yml':'      - name: Bind fixtures to an independent official pinned Runtime\n        run: original-cloud-scope\n',
       '.github/workflows/release-validation.yml':'synthetic trusted build and package validation',
       '.github/workflows/release-native-validation.yml':'      - name: Verify and extract the release binary\n        run: original-native-scope\n','npm/artifact-manifest.json':JSON.stringify(manifest)};
     const state=join(directory,'state.json'),reads=join(directory,'reads'),output=join(directory,'proof.json'),mock=join(directory,'mock.mjs');

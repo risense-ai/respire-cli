@@ -195,7 +195,7 @@ impl RuntimeCleanup<'_> {
         .timeout(Duration::from_secs(3))
         .call()?
         .into_json()?;
-        let pin: Value = serde_json::from_str(include_str!("../../runtime-pin.json"))?;
+        let pin: Value = serde_json::from_str(include_str!("../../.github/runtime-test-fixture.json"))?;
         let version = pin["required"].as_str().context("Runtime pin missing")?;
         let binary = root
             .join("bin/runtime")

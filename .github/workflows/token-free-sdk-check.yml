@@ -152,7 +152,7 @@ jobs:
           exe="target/ci/$SDK_TARGET/$profile/rsrs$suffix"
           "$exe" --version
           bash scripts/verify-linux-arm64-elf.sh "$SDK_TARGET" "$exe"
-          "$exe" --json runtime install
+          "$exe" --json runtime install --version "$(node -p "require('./.github/runtime-test-fixture.json').required")"
           "$exe" --direct model install-m3 --json
           mkdir -p "$RSRS_DATA_DIR/bin"
           cp "$exe" "$RSRS_DATA_DIR/bin/rsrs$suffix"
@@ -165,7 +165,7 @@ jobs:
           import {dirname, join} from 'node:path';
           import {spawnSync} from 'node:child_process';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
-          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const pin = JSON.parse(readFileSync('.github/runtime-test-fixture.json', 'utf8'));
           const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.match(selected.sha256, /^[0-9a-f]{64}$/);
@@ -403,7 +403,7 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN RSRS_CORE_TEST_MODE
           cargo build --locked -p respire --bin rsrs
-          target/debug/rsrs --json runtime install
+          target/debug/rsrs --json runtime install --version "$(node -p "require('./.github/runtime-test-fixture.json').required")"
           target/debug/rsrs --json model install-m3
           python - <<'PY'
           import os, sys
@@ -417,7 +417,7 @@ jobs:
           import {appendFileSync, readFileSync, realpathSync, statSync} from 'node:fs';
           import {join} from 'node:path';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
-          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const pin = JSON.parse(readFileSync('.github/runtime-test-fixture.json', 'utf8'));
           const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.ok(selected.release);

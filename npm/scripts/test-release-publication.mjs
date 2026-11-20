@@ -685,7 +685,7 @@ test('published target downloads and verifies both real file sets but records no
     const kind = url.includes('/respire-runtime/') ? 'runtime' : 'cli', selected = spec[kind];
     if (url.includes('/jobs?') || url.includes('/artifacts?')) return producer.fetcher(url);
     if(url.includes('/contents/')) {
-      const value=url.includes('runtime-pin.json')?{required:version,accept:`>=${version},<2.0.0`}:url.includes('artifact-manifest.json')?{artifactLayout:'cli-frontend-v2',cliVersion:version,targets:[{triple:target}]}:{targets:{[target]:sdk}};
+      const value=url.includes('.github/runtime-test-fixture.json')?{required:version,accept:`>=${version},<2.0.0`}:url.includes('artifact-manifest.json')?{artifactLayout:'cli-frontend-v2',cliVersion:version,targets:[{triple:target}]}:{targets:{[target]:sdk}};
       const body=Buffer.from(JSON.stringify(value));
       return {status:200,json:async()=>({type:'file',encoding:'base64',size:body.length,content:body.toString('base64'),sha:createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${body.length}\0`),body])).digest('hex')})};
     }
@@ -928,7 +928,7 @@ test('published pack adapter retains version, repository, launcher, optional dep
 });
 
 test('official Runtime CI fixture retries only exact pinned metadata or paired archive network failures', async () => {
-  const pin = JSON.parse(readFileSync(new URL('../../runtime-pin.json', import.meta.url), 'utf8'));
+  const pin = JSON.parse(readFileSync(new URL('../../.github/runtime-test-fixture.json', import.meta.url), 'utf8'));
   const target = 'x86_64-unknown-linux-gnu';
   const url = `https://github.com/risense-ai/respire-runtime/releases/download/v${pin.required}/runtime-build-${target}.json`;
   const prefix = `release metadata request failed (${url}): ${url}: `;
@@ -942,7 +942,7 @@ test('official Runtime CI fixture retries only exact pinned metadata or paired a
     let calls = 0; const waits = [], output = [], errors = []; const env = {RSRS_DATA_DIR: 'isolated-fixture'};
     const actual = await installPinnedRuntime('fixture-cli', {env}, target, {
       spawn(cli, args, options) {
-        calls++; assert.equal(cli, 'fixture-cli'); assert.deepEqual(args, ['--json', 'runtime', 'install']);
+        calls++; assert.equal(cli, 'fixture-cli'); assert.deepEqual(args, ['--json', 'runtime', 'install', '--version', pin.required]);
         assert.equal(options.env, env); assert.deepEqual(options.stdio, ['inherit', 'pipe', 'pipe']);
         return calls === 1 ? first : second;
       },
