@@ -1755,8 +1755,9 @@ foreach ($resolveAction in @('keep-current', 'take-incoming', 'merge')) {
     Invoke-Om -Name "$resolveName-upload-a" -ArgList @('--json', 'sync') -DataDir $DirA | Out-Null
     Invoke-Om -Name "$resolveName-upload-b" -ArgList @('--json', 'sync') -DataDir $DirB | Out-Null
     $resolveConflicts = Invoke-Om -Name "$resolveName-conflict" -ArgList @('--json', 'sync-conflicts', '--id', $resolveId, '--refresh') -DataDir $DirB
+    if (-not $resolveConflicts.Ok) { throw "Release smoke conflict refresh failed: $resolveName-conflict" }
     $resolveCandidates = @($resolveConflicts.Envelope.details | Where-Object { [string]$_.id -eq $resolveId -and [string]$_.state -eq 'pending' })
-    Assert-Smoke "$resolveName-distinct-conflict" ($resolveConflicts.Ok -and $resolveCandidates.Count -eq 1 -and [string]$resolveCandidates[0].candidate.entry.content -ne [string]$resolveCandidates[0].current.value.entry.content)
+    Assert-Smoke "$resolveName-distinct-conflict" ($resolveCandidates.Count -eq 1 -and [string]$resolveCandidates[0].candidate.entry.content -ne [string]$resolveCandidates[0].current.value.entry.content)
     $candidate = $resolveCandidates[0]
     $expectedContent = switch ($resolveAction) {
         'keep-current' { [string]$candidate.current.value.entry.content }
