@@ -6,12 +6,12 @@ on:
         description: Exact approved unpublished CLI producer
         type: choice
         required: true
-        options: ['44276673815', '44362424899']
+        options: ['44276673815', '44362424899', '44718206331']
 permissions:
   contents: read
   actions: read
 env:
-  CLI_VERSION: ${{ inputs.cli_run_id == '44362424899' && '2.0.0-dev.20' || '2.0.0-dev.19' }}
+  CLI_VERSION: ${{ inputs.cli_run_id == '44718206331' && '2.0.0-dev.24' || inputs.cli_run_id == '44362424899' && '2.0.0-dev.20' || '2.0.0-dev.19' }}
   CLI_PRODUCER_RUN_ID: ${{ inputs.cli_run_id }}
   CLI_PRODUCER_ATTEMPT: '1'
   ARTIFACT_SOURCE: build
@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.cli_run_id == '44362424899' && '0acf92481b29b69e6bf9536dc6a13b2c569c5abd' || '3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f' }}
+          ref: ${{ inputs.cli_run_id == '44718206331' && 'e5f36e0861b8f3615151c8db3a440711d5d14440' || inputs.cli_run_id == '44362424899' && '0acf92481b29b69e6bf9536dc6a13b2c569c5abd' || '3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f' }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v5
