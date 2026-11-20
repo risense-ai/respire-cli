@@ -652,6 +652,21 @@ test('binds the one ARM replay and all original Apple Silicon jobs to their exac
   const run=(old=original,now=[],proof=replayJob)=>recoveryJobs(old,now,p,consumer,all,{armReplayEvidence:proof});
   assert.equal(validateArmReplay(replay,rJobs),replayJob);
   const joined=run();
+  // Empty workflow matrix from recovery run 44736281076, including its synthetic job clocks.
+  const skippedCloud={
+    id:136288596510,run_id:44736281076,run_attempt:1,head_sha:'36dc605c481480554d2f31dbdc5d25a2f3326bea',
+    name:'cloud-sweep (${{ matrix.os }}, ${{ matrix.target }})',status:'completed',conclusion:'skipped',steps:[],
+    started_at:'2026-11-20T12:30:30Z',completed_at:'2026-11-20T12:30:29Z',
+  };
+  assert.deepEqual(run(original,[skippedCloud]),joined);
+  for(const invalid of [
+    {...skippedCloud,name:'cloud-sweep (ubuntu-24.04-arm, aarch64-unknown-linux-gnu)'},
+    {...skippedCloud,status:'in_progress'},
+    {...skippedCloud,conclusion:'success'},
+    {...skippedCloud,steps:undefined},
+    {...skippedCloud,steps:[{name:'Set up job',status:'completed',conclusion:'success'}]},
+  ])assert.throws(()=>run(original,[invalid]),/cannot be combined/);
+  assert.throws(()=>run(original,[skippedCloud,skippedCloud]),/cannot be combined/);
   assert.equal(joined.evidenceOwners[native(arm)].run_id,replay.id);
   assert.equal(joined.evidenceOwners[aggregate.name].run_id,Number(p.run_id));
   assert.ok(shards.every(s=>joined.evidenceOwners[s.name].run_attempt===1));
