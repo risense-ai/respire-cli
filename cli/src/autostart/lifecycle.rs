@@ -1310,11 +1310,21 @@ pub(crate) fn prepare_cold_start_locked() -> Result<()> {
     crate::runtime_fetch::archive_stopped_endpoint_locked()
 }
 
-pub(crate) fn prepare_cold_restart_locked() -> Result<()> {
-    if marker(&respire_client_host::paths::main_data_dir())?.is_some() {
-        return crate::runtime_fetch::archive_stopped_endpoint_locked();
+pub(crate) fn prepare_cold_restart_locked() -> Result<bool> {
+    let root = respire_client_host::paths::main_data_dir();
+    if marker(&root)?.is_some() {
+        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
+        return Ok(false);
     }
-    prepare_cold_start_locked()
+    prepare_cold_start_locked()?;
+    let Some(config) = read_registration(&root)?.filter(|config| !config.enabled) else {
+        return Ok(false);
+    };
+    let state = manager::inspect(&config)?;
+    anyhow::ensure!(!state.enabled && !state.running,
+        "Runtime startup registration is still active; stop it with its owning host");
+    crate::runtime_fetch::with_stopped_runtime_locked(|_| Ok(()))?;
+    Ok(true)
 }
 
 fn start_explicit_locked(takeover: &respire_client_host::lock::LibraryLock) -> Result<()> {
@@ -2762,6 +2772,16 @@ mod tests {
         let archived = fs::read_dir(path.parent().context("registration parent missing")?)?
             .collect::<std::io::Result<Vec<_>>>()?;
         anyhow::ensure!(archived.len() == 1 && fs::read(archived[0].path())? == legacy);
+
+        config.enabled = false;
+        config.manually_stopped = true;
+        save(&mut config)?;
+        let disabled = fs::read(&path)?;
+        anyhow::ensure!(prepare_cold_restart_locked()?, "stopped disabled registration forced managed recovery");
+        anyhow::ensure!(fs::read(&path)? == disabled && !marker_path(&root).exists());
+        let _library = respire_client_host::lock::LibraryLock::acquire(&root, Duration::ZERO)?;
+        anyhow::ensure!(prepare_cold_restart_locked().is_err(), "independent restart ignored the real library lock");
+        anyhow::ensure!(fs::read(&path)? == disabled && !marker_path(&root).exists());
         Ok(())
     }
 
