@@ -776,6 +776,7 @@ public static class RespireGuiNative {
         $autostartProbe = $phase -ceq 'initial' -and $candidateAssets -and $OfflineAcceptance -and
             $checkGuiCli -and $report.sealed_client2.six_package_receipts_verified -eq $true
         if ($autostartProbe) {
+            $report.native_binding.sealed_keygen_acknowledgement = $true
             Assert-GuiCliAbsent
             $runKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Run'
             $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($runKeyPath)
@@ -820,9 +821,6 @@ public static class RespireGuiNative {
         Write-Output 'GUI probe: UI Automation helper exited'
         $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
         if ($recoveryPhase) { $report.recovery_native_gui = $native } else { $report.native_gui = $native }
-        if ($autostartProbe -and $native.offline.autostart_registration.status -cne 'round-trip-passed') {
-            throw 'Client2 login startup UI registration round-trip failed; see native-gui.json'
-        }
         if ($client2Candidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
             $native.offline.account_focus_stability.status -cne 'timed-window-passed' -or
             $native.offline.account_focus_stability.completed_poll_count -cne 'not-observed')) { throw 'Source candidate focus stability was not verified' }
@@ -836,6 +834,9 @@ public static class RespireGuiNative {
         if ($driver.ExitCode -ne 0 -or $native.status -ne 'native-connectivity-passed' -or -not $native.identity_verified -or
             -not $report.native_accessibility_read -or -not $report.foreground_verified -or -not $report.gui_input_observed -or
             -not $report.target_desktop_screenshot_saved -or $native.full_gui_acceptance -ne 'not-evaluated' -or $native.g1_passed -ne $false) { throw 'Original native GUI connectivity probe failed; see native-gui.json' }
+        if ($autostartProbe -and $native.offline.autostart_registration.status -cne 'round-trip-passed') {
+            throw 'Client2 login startup UI registration round-trip failed; see native-gui.json'
+        }
         if ($CoreConfigQuery) {
             if ($native.core_query.status -cne ($phase + '-passed')) { throw 'Core query phase failed' }
             Copy-Item -LiteralPath (Join-Path $root 'native-gui.json') -Destination (Join-Path $root "$phase.json")
