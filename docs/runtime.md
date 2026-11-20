@@ -18,11 +18,15 @@ remain available for recovery; account data and Runtime state under `~/.rsrs/run
 are not relocated. Existing running owners are drained through normal lifecycle
 operations before a replacement starts.
 
-`rsrs runtime install` and `rsrs runtime update` also refresh the stable CLI
-from the invoking executable. When replacement is needed, the host first drains
-the existing owner, publishes verified CLI bytes atomically, and restarts an owner
-that was running. A failed restart retains account data and recovery records;
-inspect the reported startup error before retrying `rsrs runtime start`.
+`rsrs runtime install` stages and selects the verified Runtime release. Start it
+with `rsrs runtime start`. Model settings (`model_mirror` and `RSRS_MIRROR`) apply
+to model files. For a deliberate Runtime source override, use the Runtime
+command's `--mirror` option with an approved origin.
+
+Update an npm-installed CLI with npm, and check the executable your shell or
+agent actually calls. On Windows, `Get-Command rsrs -All` shows the matching
+entries in resolution order. Client2 uses the shared CLI in the data-root
+`bin` directory for its CLI integrations. An npm entry is a separate install.
 System credentials remain the CLI or Client2 host's responsibility. Installing
 Runtime does not authorize Runtime to read the system keychain.
 
