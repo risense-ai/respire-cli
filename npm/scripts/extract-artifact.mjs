@@ -649,8 +649,9 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     const bounded = read('resident-concurrency-'+target,'fixture-process-verification.json');
     requireValue(Array.isArray(bounded) && bounded.length > 0 && bounded.every(r => r.passed === true), 'Fixture process bounds incomplete');
     const legacyUpgrades = 'published-upgrades-'+target;
-    const attemptUpgrades = legacyUpgrades+'-'+context.run_id+'-'+context.run_attempt;
     const aggregateJob = 'native-regression / Apple Silicon upgrade aggregate';
+    const aggregateOwner = evidenceOwners?.[aggregateJob] || context;
+    const attemptUpgrades = legacyUpgrades+'-'+aggregateOwner.run_id+'-'+aggregateOwner.run_attempt;
     const sharded = target === 'aarch64-apple-darwin' && (macosShardsRequired || existsSync(join(directory,attemptUpgrades))
       || jobs.some(j => j.name === aggregateJob && j.conclusion !== 'skipped'));
     let aggregateCheckRunId;
@@ -685,12 +686,12 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
         cli_sha256:native[0].binary_sha256, runtime_sha256:spec.runtime.assets.find(a => a.name === runtimeNames[1]).sha256,
         runtime_version:spec.runtime.version, manifest_sha256:manifestHash,
         bundle_sha256:spec.runtime.assets.find(a => a.name === runtimeNames[2]).sha256,
-        model_key:policy.model_key, fixture_sha:context.sha,
+        model_key:policy.model_key, fixture_sha:aggregateOwner.sha,
       };
       const run = shardPlan.run;
       requireValue(full && proof?.plan_sha256 === reports.at(-1).sha256 && proof.check_run_id === aggregateCheckRunId
         && shardPlan.schema === 1 && shardPlan.target === target && run?.repository === spec.cli.repository
-        && run.run_id === String(context.run_id) && run.run_attempt === String(context.run_attempt) && run.workflow_sha === context.sha
+        && run.run_id === String(aggregateOwner.run_id) && run.run_attempt === String(aggregateOwner.run_attempt) && run.workflow_sha === aggregateOwner.sha
         && ownKeys(proof.run,Object.keys(run)) && Object.keys(run).every(k => run[k] === proof.run[k])
         && [shardPlan.identity,proof.identity].every(identity => ownKeys(identity,Object.keys(expectedIdentity))
           && Object.keys(expectedIdentity).every(k => expectedIdentity[k] !== undefined && identity[k] === expectedIdentity[k]))
@@ -707,7 +708,10 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
         'Unexpected Apple Silicon upgrade shard job inventory');
       shardChecks = new Map(policy.selected.map((tag,index) => {
         const name = names[index];
-        return [tag,checkRunId(job(j => j.name === name, name))];
+        const shard = job(j => j.name === name, name);
+        requireValue(shard.run_id === aggregateOwner.run_id && shard.run_attempt === aggregateOwner.run_attempt
+          && shard.head_sha === aggregateOwner.sha, 'Apple Silicon shard and aggregate owners differ: '+name);
+        return [tag,checkRunId(shard)];
       }));
       requireValue(new Set([aggregateCheckRunId,...shardChecks.values()]).size === names.length+1,
         'Duplicate Apple Silicon check run identity');

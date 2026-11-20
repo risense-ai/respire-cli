@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
+export const armRecoveryRun = '44718206331';
+
 const sources = {
+  [armRecoveryRun]: {sha: 'e5f36e0861b8f3615151c8db3a440711d5d14440', version: '2.0.0-dev.24'},
   '44276673815': {sha: '3930ba500b96a0c52eb7aa735b7ddb4117ad4e9f', version: '2.0.0-dev.19'},
   '44362424899': {sha: '0acf92481b29b69e6bf9536dc6a13b2c569c5abd', version: '2.0.0-dev.20'},
 };

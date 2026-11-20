@@ -10,7 +10,7 @@ import {api,pages,output} from './release-publication.mjs';
 import {validateCandidate,completeCandidate} from './candidate-artifact.mjs';
 import {preparationInputs,preparedAssets,preparedPacks,createPreparation,validatePreparationHistory,validatePreparationFull} from './release-preparation.mjs';
 import {readFence} from './publication-fence.mjs';
-import {approvedRecoveryProducer} from './release-recovery-sources.mjs';
+import {approvedRecoveryProducer,armRecoveryRun} from './release-recovery-sources.mjs';
 
 export const recoveryWorkflow='.github/workflows/release-recovery3930.yml';
 export const muslPreparationWorkflow='.github/workflows/release-musl3930-preparation.yml';
@@ -25,6 +25,69 @@ const osFor=t=>t.includes('windows')?(t.startsWith('aarch64')?'windows-11-arm':'
 const readJobs=s=>pages(`repos/${REPO}/actions/runs/${s.run_id}/attempts/${s.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
 const readArtifacts=s=>pages(`repos/${REPO}/actions/runs/${s.run_id}/artifacts?per_page=100`).flatMap(p=>p.artifacts);
 const originOwner=s=>({sha:s.sha,run_id:Number(s.run_id),run_attempt:Number(s.run_attempt)});
+const armTarget='aarch64-unknown-linux-gnu';
+const armNative=`native-regression / Native (${armTarget})`;
+const armReplay={run_id:44726670231,run_attempt:1,sha:'fbbe85b0aabd448d30f750d91ae488bda9284cea'};
+const armReplayJob=136255766094;
+const armOriginalFailure=136233485215;
+const armOriginalReceipt=136275017543;
+const macAggregate='native-regression / Apple Silicon upgrade aggregate';
+const macShardPrefix='native-regression / Apple Silicon upgrade (';
+const replayInputProof='native-replay-inputs-arm64-gnu';
+const armBuild='cli-release-'+armTarget;
+const armCandidate='candidate-assets-'+armTarget;
+const armOriginalDigests={
+  [armBuild]:'edba437b55930e36c7241bd57a43f1f614d9400b1b95cb8d70bd7a7f299ecb01',
+  [armCandidate]:'ef4af3e83cf138f2f9707da4b9fc883b72ff48cc71c683d0de6536d9841e4066',
+};
+function successfulStep(job,name){
+  const found=job.steps?.filter(s=>s.name===name) || [];
+  assert.equal(found.length,1,'Missing or duplicate required step: '+name);
+  assert.equal(found[0].status,'completed');
+  assert.equal(found[0].conclusion,'success');
+  return found[0].number;
+}
+const replayPinnedArtifacts={
+  [replayInputProof]:'459a6b57ff6ad34bd56b1ab3246617a82ca512af339bd9089a26fccf66272034',
+  ['resident-concurrency-'+armTarget]:'251a6c7d306a0538117f93c108f287448492224a27994a0bbafa2a9ce68a43dc',
+  ['published-upgrades-'+armTarget]:'b8aa266ebf99bce2914892ccf02c015319c2fcd67ee186783c59f564d46483cd',
+};
+const isArmRecovery=producer=>producer.run_id===armRecoveryRun;
+const replayName=logical=>(logical===replayInputProof?'candidate-assets-'+armTarget:logical)+`-replay-${armReplay.run_id}-${armReplay.run_attempt}`;
+
+export function validateArmReplay(run,jobs){
+  assert.equal(run.id,armReplay.run_id);
+  assert.equal(run.run_attempt,armReplay.run_attempt);
+  assert.equal(run.head_sha,armReplay.sha);
+  assert.equal(run.head_branch,'codex/cli-arm64-gnu-native-replay-44718206331');
+  assert.equal(run.head_repository?.full_name,REPO);
+  assert.equal(run.path,'.github/workflows/dev-sweep.yml');
+  assert.equal(run.event,'workflow_dispatch');
+  assert.equal(run.status,'completed');
+  assert.equal(run.conclusion,'success');
+  const active=jobs.filter(j=>j.conclusion!=='skipped');
+  assert.deepEqual(active.map(j=>j.name).sort(),[armNative,'verify-selection'].sort());
+  for(const j of active){
+    assert.equal(j.run_id,armReplay.run_id);
+    assert.equal(j.run_attempt,armReplay.run_attempt);
+    assert.equal(j.head_sha,armReplay.sha);
+    assert.equal(j.status,'completed');
+    assert.equal(j.conclusion,'success');
+  }
+  const job=active.find(j=>j.name===armNative);
+  assert.equal(job.id,armReplayJob);
+  for(const step of [
+    'Require real native Linux ARM64 hardware',
+    'Verify exact original CLI and official Runtime for this diagnostic replay',
+    'Install and verify the official pinned standalone Runtime',
+    'Verify OS autostart registration from verified release bytes',
+    'Install and probe BGE CPU inference',
+    'Verify selected formal release and database DEV upgrades',
+    'Verify resident foreground and background inference under concurrent CLI load',
+  ])successfulStep(job,step);
+  return job;
+}
+
 export function cloudScope(original,recovery){
   const tail=text=>{
     const marker='      - name: Bind fixtures to an independent official pinned Runtime\n',start=text.indexOf(marker);
@@ -81,18 +144,42 @@ export function recoveryScripts(producerSHA,consumerSHA,{cwd=process.cwd()}={}){
     unchanged_tree_sha256:hash(tree.split('\n').filter(line=>!allowed.has(line.split('\t')[1])||['npm/scripts/publication-acceptance.mjs','npm/scripts/release-publication.mjs','npm/scripts/cleanup-release-artifacts.mjs','scripts/create-published-assets.mjs'].includes(line.split('\t')[1])).join('\n'))};
 }
 
-export function recoveryJobs(original,current,producer,consumer,manifest,{planning=false}={}){
+export function recoveryJobs(original,current,producer,consumer,manifest,{planning=false,armReplayEvidence}={}){
   for(const j of original.filter(retryable))assert.ok(manifest.targets.some(t=>t.triple===targetOf(j))&&(!j.name.startsWith('cloud-sweep (')||targetOf(j)!=='x86_64-unknown-linux-gnu'),'Unknown recovery scope');
   const failed=original.filter(j=>retryable(j)&&j.conclusion==='failure');assert.ok(failed.length,'No failed native/cloud job');
   const failedNames=new Set(failed.map(j=>j.name));
   for(const j of failed){assert.ok(positive(j.id));assert.equal(j.status,'completed');assert.equal(j.run_id,Number(producer.run_id));assert.equal(j.run_attempt,Number(producer.run_attempt));assert.equal(j.head_sha,producer.sha);}
   const reused=original.filter(j=>j.name.startsWith('validate / Release (')||j.name==='validate / npm-dry-run'||j.name==='api-smoke'||
     retryable(j)&&!failedNames.has(j.name));
-  const replacements=current.filter(retryable);
+  const arm=isArmRecovery(producer);
+  if(arm){
+    const originalFailures=original.filter(j=>j.conclusion==='failure');
+    assert.deepEqual(originalFailures.map(j=>j.id).sort(),[armOriginalFailure,armOriginalReceipt].sort(),
+      'The frozen producer must have exactly its ARM native and downstream receipt failures');
+    const receipts=original.filter(j=>j.name==='preparation-receipt');
+    assert.equal(receipts.length,1);
+    assert.equal(receipts[0].id,armOriginalReceipt);
+    assert.equal(receipts[0].status,'completed');
+    assert.equal(receipts[0].run_id,Number(producer.run_id));
+    assert.equal(receipts[0].run_attempt,producer.run_attempt);
+    assert.equal(receipts[0].head_sha,producer.sha);
+    assert.equal(failed.length,1);
+    assert.equal(failed[0].id,armOriginalFailure);
+    assert.equal(failed[0].name,armNative);
+    assert.equal(successfulStep(failed[0],'Verify and extract the release binary'),17);
+    // Step 22 published the input receipt before historical migration failed.
+    const upload=failed[0].steps.filter(s=>s.number===22);
+    assert.equal(upload.length,1,'Missing original candidate receipt upload');
+    assert.equal(upload[0].status,'completed');
+    assert.equal(upload[0].conclusion,'success');
+    assert.equal(current.filter(retryable).length,0,'A frozen replay cannot be combined with a new native/cloud run');
+  }
+  if(arm&&!planning)assert.equal(armReplayEvidence?.id,armReplayJob,'Missing approved ARM replay job');
+  const replacements=arm ? (planning?[]:[armReplayEvidence]) : current.filter(retryable);
   assert.equal(replacements.length,planning?0:failed.length,'Require exactly the failed native/cloud scopes');
   assert.ok(replacements.every(j=>failedNames.has(j.name)),'Successful scope must not rerun');
   const owners={};
-  for(const [jobs,s] of [[reused,originOwner(producer)],[replacements,{...originOwner(consumer),sha:consumer.workflow_head_sha}]]){
+  for(const [jobs,s] of [[reused,originOwner(producer)],[replacements,arm ? armReplay : {...originOwner(consumer),sha:consumer.workflow_head_sha}]]){
     for(const j of jobs){
       assert.ok(positive(j.id));assert.equal(j.run_id,s.run_id);assert.equal(j.run_attempt,s.run_attempt);assert.equal(j.head_sha,s.sha);
       assert.equal(j.status,'completed');assert.equal(j.conclusion,'success');
@@ -107,6 +194,24 @@ export function recoveryJobs(original,current,producer,consumer,manifest,{planni
   for(const name of required){
     if(planning&&(failedNames.has(name)||failed.some(j=>j.name.startsWith('cloud-sweep (')&&targetOf(j)===name)))continue;
     assert.equal(joined.filter(j=>j.name===name||j.name.startsWith('cloud-sweep (')&&j.name.endsWith(', '+name+')')).length,1,'Missing full evidence: '+name);
+  }
+  if(arm){
+    const shards=original.filter(j=>j.name.startsWith(macShardPrefix));
+    assert.equal(shards.length,12,'Expected twelve original Apple Silicon source jobs');
+    const aggregate=original.filter(j=>j.name===macAggregate);
+    assert.equal(aggregate.length,1,'Expected one original Apple Silicon aggregate');
+    const owner=originOwner(producer);
+    for(const job of [...shards,...aggregate]){
+      assert.ok(positive(job.id));
+      assert.equal(job.status,'completed');
+      assert.equal(job.conclusion,'success');
+      assert.equal(job.run_id,owner.run_id);
+      assert.equal(job.run_attempt,owner.run_attempt);
+      assert.equal(job.head_sha,owner.sha);
+      assert.equal(owners[job.name],undefined,'Duplicate Apple Silicon job');
+      owners[job.name]=owner;
+      joined.push(job);
+    }
   }
   return {jobs:[...joined,...current.filter(j=>j.name==='preparation-receipt')],evidenceOwners:owners};
 }
@@ -162,7 +267,13 @@ export function recoveryContext(source,{planning=false}={}){
   validateRecoveryRuns(producerRun,run,producer,source);
   const scripts=recoveryScripts(producer.sha,source.workflow_head_sha);
   const inputs=preparationInputs(producer.sha,producer.version),original=readJobs(producer),current=readJobs(source);
-  const joined=recoveryJobs(original,planning?[]:current,producer,source,inputs.manifest,{planning});
+  let replayArtifacts,armReplayEvidence;
+  if(isArmRecovery(producer)){
+    const replayRun=api(`repos/${REPO}/actions/runs/${armReplay.run_id}/attempts/${armReplay.run_attempt}`);
+    armReplayEvidence=validateArmReplay(replayRun,readJobs(armReplay));
+    replayArtifacts=readArtifacts(armReplay);
+  }
+  const joined=recoveryJobs(original,planning?[]:current,producer,source,inputs.manifest,{planning,armReplayEvidence});
   const artifacts=readArtifacts(producer),consumerArtifacts=readArtifacts(source);
   const candidates=pages(`repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${source.sha}&per_page=100`).flatMap(p=>p.workflow_runs)
     .filter(r=>r.head_sha===source.sha&&r.event==='push'&&r.head_branch==='main').sort((a,b)=>b.id-a.id);
@@ -170,7 +281,7 @@ export function recoveryContext(source,{planning=false}={}){
   assert.equal(ci.id,candidates[0].id);assert.ok(positive(ci.run_attempt));assert.equal(ci.path,'.github/workflows/ci.yml');
   assert.equal(ci.head_sha,source.sha);assert.equal(ci.head_branch,'main');assert.equal(ci.event,'push');assert.equal(ci.head_repository?.full_name,REPO);
   assert.equal(ci.status,'completed');assert.equal(ci.conclusion,'success');
-  return {...inputs,source,run,ci,...joined,artifacts,consumerArtifacts,original,current,scripts};
+  return {...inputs,source,run,ci,...joined,artifacts,consumerArtifacts,original,current,scripts,armReplayEvidence,replayArtifacts};
 }
 
 function select(context,name,jobName,replacement=false){
@@ -178,13 +289,46 @@ function select(context,name,jobName,replacement=false){
   const jobs=(replacement?context.current:context.original).filter(j=>j.name===jobName);assert.equal(jobs.length,1);
   return {...recoveryArtifact(replacement?context.consumerArtifacts:context.artifacts,replacement?name+suffix(context.source):name,jobs[0],s),logical_name:name};
 }
+function selectArmReplay(context,logical){
+  const artifact=recoveryArtifact(context.replayArtifacts,replayName(logical),context.armReplayEvidence,armReplay);
+  assert.equal(artifact.digest,'sha256:'+replayPinnedArtifacts[logical],'Frozen ARM replay ZIP digest differs');
+  return {...artifact,logical_name:logical};
+}
+
+// The original failed job owns the standard input receipt, not the two successful native reports.
+function selectOriginalArmInputs(context){
+  const failed=context.original.find(j=>j.id===armOriginalFailure);
+  const found=recoveryArtifact(context.artifacts,armCandidate,failed,originOwner(context.source.producer),{failed:true});
+  assert.equal(found.digest,'sha256:'+armOriginalDigests[armCandidate],'Original ARM candidate receipt ZIP differs');
+  const upload=failed.steps.find(s=>s.number===22);
+  const metadata=context.artifacts.find(a=>String(a.id)===found.id);
+  const times=[upload.started_at,metadata.created_at,metadata.updated_at,upload.completed_at].map(Date.parse);
+  assert.ok(times.every((v,i)=>Number.isFinite(v)&&(i===0||v>=times[i-1])),'Original ARM receipt is outside the successful upload step');
+  return {...found,logical_name:armCandidate};
+}
+
 export function recoveryArtifacts(context){
   const anchors=[],take=(...args)=>anchors.push(select(context,...args));
   for(const {triple:target} of context.manifest.targets){
     take('cli-release-'+target,`validate / Release (${target})`);
     const native=`native-regression / Native (${target})`,replace=context.original.find(j=>j.name===native)?.conclusion==='failure';
-    for(const prefix of ['candidate-assets-','resident-concurrency-','published-upgrades-'])take(prefix+target,native,replace);
-    if(target===windowsTarget)take('client2-published-online-'+target,native,replace);
+    if(isArmRecovery(context.source.producer)&&target===armTarget){
+      anchors.push(selectOriginalArmInputs(context));
+      for(const logical of Object.keys(replayPinnedArtifacts))anchors.push(selectArmReplay(context,logical));
+    }else if(isArmRecovery(context.source.producer)&&target==='aarch64-apple-darwin'){
+      for(const prefix of ['candidate-assets-','resident-concurrency-'])take(prefix+target,native);
+      const p=context.source.producer;
+      take(`published-upgrades-${target}-${p.run_id}-${p.run_attempt}`,macAggregate);
+      take(`macos-upgrade-plan-${p.run_id}-${p.run_attempt}`,native);
+      for(const job of context.original.filter(j=>j.name.startsWith(macShardPrefix))){
+        const tag=job.name.slice(macShardPrefix.length,-1);
+        assert.match(tag,/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/);
+        take(`macos-upgrade-shard-${p.run_id}-${p.run_attempt}-${tag}`,job.name);
+      }
+    }else{
+      for(const prefix of ['candidate-assets-','resident-concurrency-','published-upgrades-'])take(prefix+target,native,replace);
+    }
+    if(target===windowsTarget&&!isArmRecovery(context.source.producer))take('client2-published-online-'+target,native,replace);
     if(target==='x86_64-unknown-linux-gnu'){take('gnu-login-interruption',native,replace);continue;}
     const cloud=context.original.filter(j=>j.name.startsWith('cloud-sweep (')&&j.name.endsWith(', '+target+')'));assert.equal(cloud.length,1);
     take('base-release-sweep-'+target,cloud[0].name,cloud[0].conclusion==='failure');
@@ -201,9 +345,53 @@ function failedArtifacts(context){
     for(const name of names.filter(n=>context.artifacts.some(a=>a.name===n)))out.push({...recoveryArtifact(context.artifacts,name,job,owner,{failed:true}),reused:false});
   }return out;
 }
+export function validateArmReplayInputs(replay,original,build,prior,candidate){
+  const p=approvedRecoveryProducer(armRecoveryRun);
+  const source={...originOwner(p),version:p.version};
+  assert.equal(replay.schema,1);
+  assert.equal(replay.kind,'native-replay-inputs');
+  assert.equal(replay.diagnostic_only,true);
+  assert.equal(replay.target,armTarget);
+  assert.deepEqual(replay.source,source);
+  assert.deepEqual(replay.harness,{sha:armReplay.sha,run_id:String(armReplay.run_id),run_attempt:String(armReplay.run_attempt)});
+  const {logical_name:buildName,...buildAnchor}=build;
+  const {logical_name:priorName,...priorAnchor}=prior;
+  assert.deepEqual(replay.build,{...buildAnchor,owner:source});
+  assert.deepEqual(replay.prior,{...priorAnchor,owner:source});
+  assert.equal(buildName,armBuild);
+  assert.equal(priorName,armCandidate);
+  assert.equal(build.digest,'sha256:'+armOriginalDigests[armBuild]);
+  assert.equal(prior.digest,'sha256:'+armOriginalDigests[armCandidate]);
+  assert.equal(original.kind,'candidate-assets-verification');
+  assert.equal(original.target,armTarget);
+  assert.equal(original.assets_verified,true);
+  assert.equal(original.payloads_verified,true);
+  assert.deepEqual(original.candidate,candidate);
+  assert.deepEqual(replay.candidate,candidate);
+  assert.equal(candidate.runtime.version,'2.0.0-dev.28');
+  assert.equal(replay.manifest_sha256,hash(JSON.stringify(candidate)));
+  assert.equal(original.manifest_sha256,replay.manifest_sha256);
+  assert.deepEqual(replay.runtime_producer,original.runtime_producer);
+  assert.equal(original.payload_identity.harness_sha,p.sha);
+  assert.deepEqual(replay.payload_identity,{...original.payload_identity,harness_sha:armReplay.sha});
+}
+
+function verifyArmReplayInputs(context,root,candidate){
+  const anchors=recoveryArtifacts(context);
+  const find=logical=>anchors.find(a=>a.logical_name===logical);
+  const proof=logical=>JSON.parse(readFileSync(join(root,logical,'candidate-assets-receipt.json')));
+  const prior='candidate-assets-'+armTarget;
+  validateArmReplayInputs(proof(replayInputProof),proof(prior),find('cli-release-'+armTarget),find(prior),candidate);
+  const macPlan=`macos-upgrade-plan-${context.source.producer.run_id}-${context.source.producer.run_attempt}`;
+  const aggregate=`published-upgrades-aarch64-apple-darwin-${context.source.producer.run_id}-${context.source.producer.run_attempt}`;
+  assert.deepEqual(readFileSync(join(root,macPlan,'macos-shard-plan.json')),
+    readFileSync(join(root,aggregate,'macos-shard-plan.json')),'Apple Silicon aggregate plan differs from the original artifact');
+}
+
 export function validateRecoveryEvidence(result,context){
   if(context.source.workflow===muslPreparationWorkflow)return validateMuslPreparation(result,context);
   const c=result.continuation,s=context.source;
+  if(isArmRecovery(s.producer))assert.equal(result.gui_passed,null,'Frozen recovery scope is CLI-only');
   assert.deepEqual(c?.producer,s.producer);
   assert.deepEqual(c.consumer,{run_id:s.run_id,run_attempt:s.run_attempt,sha:s.workflow_head_sha});
   assert.deepEqual(c.scripts,context.scripts);
@@ -217,7 +405,9 @@ function readCandidate(context,root){
   downloadRecoveryArtifact(select(context,name,`native-regression / Native (${target})`),join(root,name));
   const c=JSON.parse(readFileSync(join(root,name,'candidate-assets-receipt.json'))).candidate,p=context.source.producer;
   validateCandidate(c,{CLI_SHA:p.sha,CLI_VERSION:p.version,GITHUB_RUN_ID:p.run_id,GITHUB_RUN_ATTEMPT:p.run_attempt,GITHUB_SHA:p.sha});
-  assert.equal(c.source.repository,p.repository);return c;
+  assert.equal(c.source.repository,p.repository);
+  if(isArmRecovery(p))assert.equal(Object.hasOwn(c,'client2'),false,'Frozen recovery candidate is CLI-only');
+  return c;
 }
 const requestedProducer=()=>approvedRecoveryProducer(BUILD_RUN);
 const continuationProducer=()=>approvedRecoveryProducer(process.env.CLI_PRODUCER_RUN_ID);
@@ -233,7 +423,7 @@ export function recoveryPublicationEvidence(imported,candidate){
   validatePreparationHistory(receipt,imported.history);
   const evidence={candidate,acceptance:publicRecoveryResult(receipt.full_result)};
   const c=evidence.candidate,pick=(v,keys)=>Object.fromEntries(keys.map(k=>[k,v[k]]));
-  const safe={...pick(c,['schema','kind']),client2:pick(c.client2,['release','source_sha']),source:pick(c.source,['repository','sha','version','run_id','run_attempt']),
+  const safe={...pick(c,['schema','kind']),...(isArmRecovery(receipt.source.producer)?{}:{client2:pick(c.client2,['release','source_sha'])}),source:pick(c.source,['repository','sha','version','run_id','run_attempt']),
     runtime:{...pick(c.runtime,['repository','release_id','version','source_sha']),producer:pick(c.runtime.producer,['run_id','run_attempt']),assets:c.runtime.assets.map(a=>pick(a,['id','name','size','sha256']))}};
   assert.deepEqual(c,safe,'Unknown candidate field');
   const producer=approvedRecoveryProducer(receipt.source.producer.run_id);
@@ -250,7 +440,7 @@ function publicRecoveryResult(result){
   const hashes=p=>Object.fromEntries(['manifest_sha256','bundle_sha256','image_sha256'].map(k=>{assert.match(p[k],/^[a-f0-9]{64}$/);return [k,p[k]];}));
   const {actual_processes,limits,...rest}=result;
   assert.ok(Object.keys(rest).every(k=>['schema','scope','profile_import','kind','manifest_sha256','harness_sha','product_sources','sha','run_id','run_attempt','reports','historical_upgrades','full_passed','gui_passed','g1Passed','continuation'].includes(k)),'Unknown full-result field');
-  const files=new Set(['candidate-assets-receipt.json','real-account-return-verification.json','resident-stress-metrics.json','fixture-dependencies.json','fixture-process-verification.json','published-upgrades.json','coverage.json','combined-coverage.json','suite-results.json','ai-inject-coverage.json','legacy-vault-coverage.json','interruption-coverage.json','outbox-coverage.json','runtime-coverage.json','source-version.json','report.json','published-api-identity.json','dev-api-coverage.json','dev-github-api-coverage.json']);
+  const files=new Set(['candidate-assets-receipt.json','real-account-return-verification.json','resident-stress-metrics.json','fixture-dependencies.json','fixture-process-verification.json','published-upgrades.json','macos-shard-plan.json','coverage.json','combined-coverage.json','suite-results.json','ai-inject-coverage.json','legacy-vault-coverage.json','interruption-coverage.json','outbox-coverage.json','runtime-coverage.json','source-version.json','report.json','published-api-identity.json','dev-api-coverage.json','dev-github-api-coverage.json']);
   for(const r of rest.reports){
     assert.ok(r.path.split('/').every((s,i,a)=>i===a.length-1?files.has(s):['resident-concurrency','native-fixture-bounds','published-upgrades','release-supplements','release-sweep','results','outbox','ai-inject','runtime','legacy-vault','login-interruption'].includes(s)||/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(s)),'Non-whitelisted report path');
     assert.deepEqual(Object.keys(r).sort(),['artifact','path','sha256']);assert.match(r.sha256,/^[a-f0-9]{64}$/);
@@ -328,7 +518,7 @@ export async function inspectRecoveryPublication(part,release,producerRun,assets
   assert.deepEqual(candidate.source,{repository:REPO,sha:producer.sha,version:part.version,run_id:Number(producer.run_id),run_attempt:producer.run_attempt});
   assert.equal(candidate.kind,'unpublished-cli-candidate');assert.equal(candidate.schema,1);
   assert.deepEqual(result.continuation.scripts,proof.scripts);assert.equal(result.manifest_sha256,proof.manifest_sha256);
-  assert.equal(result.full_passed,true);assert.equal(result.gui_passed,true);assert.equal(result.scope,'database-in-place-upgrade');
+  assert.equal(result.full_passed,true);assert.equal(result.gui_passed,isArmRecovery(producer)?null:true);assert.equal(result.scope,'database-in-place-upgrade');
   assert.equal(result.product_sources.cli,producer.sha);assert.equal(result.product_sources.runtime,candidate.runtime.source_sha);
   assert.ok(result.actual_processes.length>0&&result.actual_processes.every(p=>p.manifest_sha256===proof.manifest_sha256&&manifest.targets.some(({triple:t})=>
     candidate.runtime.assets.some(a=>a.name===`rsrs-runtime-${t}${t.includes('windows')?'.exe':''}`&&a.sha256===p.image_sha256)&&
@@ -348,7 +538,38 @@ export async function inspectRecoveryPublication(part,release,producerRun,assets
   };
   const original=await jobs(source.producer),current=await jobs(source);
   if(source.workflow===muslPreparationWorkflow)await inspectMuslComposition(source,result,original,current,manifest,read,jobs);
-  else recoveryJobs(original,current,source.producer,source,manifest);
+  else {
+    let armReplayEvidence;
+    if(isArmRecovery(producer)){
+      const replay=await read(`actions/runs/${armReplay.run_id}/attempts/${armReplay.run_attempt}`);
+      armReplayEvidence=validateArmReplay(replay,await jobs(armReplay));
+      assert.equal(Object.hasOwn(candidate,'client2'),false);
+      for(const [logical,digest] of Object.entries(armOriginalDigests)){
+        const found=result.continuation.artifacts.filter(a=>a.logical_name===logical);
+        assert.equal(found.length,1);
+        const [artifact]=found;
+        assert.equal(artifact.name,logical);
+        assert.equal(artifact.digest,'sha256:'+digest);
+        assert.deepEqual(artifact.owner,originOwner(producer));
+        const inputJob=logical===armBuild?original.find(j=>j.name===`validate / Release (${armTarget})`):original.find(j=>j.id===armOriginalFailure);
+        assert.equal(artifact.job_id,inputJob?.id);
+        assert.equal(artifact.conclusion,logical===armBuild?'success':'failure');
+      }
+      const expected=Object.entries(replayPinnedArtifacts);
+      assert.equal(result.continuation.artifacts.filter(a=>a.owner.run_id===armReplay.run_id).length,expected.length);
+      for(const [logical,digest] of expected){
+        const found=result.continuation.artifacts.filter(a=>a.logical_name===logical);
+        assert.equal(found.length,1);
+        const [artifact]=found;
+        assert.equal(artifact.name,replayName(logical));
+        assert.equal(artifact.digest,'sha256:'+digest);
+        assert.equal(artifact.job_id,armReplayEvidence.id);
+        assert.deepEqual(artifact.owner,armReplay);
+        assert.equal(artifact.conclusion,'success');
+      }
+    }
+    recoveryJobs(original,current,source.producer,source,manifest,{armReplayEvidence});
+  }
   const receiptJobs=current.filter(j=>j.name==='preparation-receipt');assert.equal(receiptJobs.length,1);
   assert.equal(receiptJobs[0].status,'completed');assert.equal(receiptJobs[0].conclusion,'success');
   assert.equal(publisher.repository,REPO);assert.equal(publisher.workflow,'.github/workflows/release.yml');
@@ -381,8 +602,8 @@ export function planContinuation(root){
   const producer=continuationProducer(),source=currentSource(producer),context=recoveryContext(source,{planning:true});
   const candidate=readCandidate(context,root);
   output({sha:producer.sha,version:producer.version,producer_run:producer.run_id,producer_attempt:producer.run_attempt,
-    candidate:JSON.stringify(candidate),client2_release:candidate.client2.release,client2_commit:candidate.client2.source_sha,
-    native:JSON.stringify(context.original.filter(j=>j.name.startsWith('native-regression')&&j.conclusion==='failure').map(j=>({target:targetOf(j),os:osFor(targetOf(j))}))),
+    candidate:JSON.stringify(candidate),client2_release:candidate.client2?.release || '',client2_commit:candidate.client2?.source_sha || '',
+    native:JSON.stringify(isArmRecovery(producer)?[]:context.original.filter(j=>j.name.startsWith('native-regression')&&j.conclusion==='failure').map(j=>({target:targetOf(j),os:osFor(targetOf(j))}))),
     cloud:JSON.stringify(context.original.filter(j=>j.name.startsWith('cloud-sweep (')&&j.conclusion==='failure').map(j=>({target:targetOf(j),os:osFor(targetOf(j))}))),
     suffix:suffix(source)});
   return context;
@@ -401,9 +622,11 @@ export function attestContinuation(root,outputFile){
     const target=t.triple;
     for(const file of [`rsrs-${target}${target.includes('windows')?'.exe':''}`,`cli-build-${target}.json`])copyFileSync(join(root,'cli-release-'+target,file),join(assetsFolder,file));
   }
+  if(isArmRecovery(producer))verifyArmReplayInputs(context,root,candidate);
   // Native fixtures and all bytes are verified by the unchanged full requirements.
   const assets=preparedAssets(assetsFolder,source,context.manifest);
-  const full_result=completeCandidate(candidate,assets,root,context.jobs,source,{evidenceOwners:context.evidenceOwners});
+  const full_result=completeCandidate(candidate,assets,root,context.jobs,source,{evidenceOwners:context.evidenceOwners,
+    macosShardsRequired:isArmRecovery(producer)});
   full_result.continuation={producer,consumer:{run_id:source.run_id,run_attempt:source.run_attempt,sha:source.workflow_head_sha},
     scripts:context.scripts,artifacts:anchors,failed_artifacts:failedArtifacts(context),failed_jobs:context.original.filter(j=>retryable(j)&&j.conclusion==='failure').map(j=>({id:j.id,name:j.name,run_attempt:j.run_attempt}))};
   const receipt=createPreparation({...context,assets,packs:preparedPacks(join(root,'npm-release-packages'),source,context.manifest),full_result});

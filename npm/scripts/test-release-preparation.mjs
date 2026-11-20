@@ -1,4 +1,6 @@
 import test from 'node:test';
+import {approvedRecoveryProducer} from './release-recovery-sources.mjs';
+import {validateArmReplay, validateArmReplayInputs} from './release-recovery3930.mjs';
 import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,rmSync,readFileSync,mkdirSync,existsSync,readdirSync} from 'node:fs';
 import {join} from 'node:path';
@@ -612,4 +614,84 @@ test('preparation requires full GUI and DB evidence and never upgrades critical 
   assert.throws(()=>createPreparation({...f.context,run:{...f.context.run,status:'in_progress'},profile:'critical'}));
   const skipped=structuredClone(f.context);skipped.jobs.find(j=>j.name.startsWith('validate / Release')).conclusion='skipped';
   assert.throws(()=>validatePreparation(f.receipt,skipped));
+});
+
+test('binds the one ARM replay and all original Apple Silicon jobs to their exact owners',()=>{
+  const p=approvedRecoveryProducer('44718206331');
+  const producerOwner={run_id:Number(p.run_id),run_attempt:1,head_sha:p.sha};
+  const arm='aarch64-unknown-linux-gnu';
+  const native=t=>`native-regression / Native (${t})`;
+  const all={targets:[...manifest.targets,{triple:arm}]};
+  const completed={status:'completed',conclusion:'success'};
+  const job=(name,id)=>({name,id,...producerOwner,...completed});
+  const armFailed={...job(native(arm),136233485215),conclusion:'failure',steps:[
+    {name:'Verify and extract the release binary',number:17,...completed},
+    {name:'Upload candidate receipt',number:22,...completed},
+  ]};
+  const shards=Array.from({length:12},(_,i)=>job(`native-regression / Apple Silicon upgrade (v1.0.${i+6})`,200+i));
+  const aggregate=job('native-regression / Apple Silicon upgrade aggregate',240);
+  const original=[...all.targets.flatMap(({triple:t},i)=>[
+    job(`validate / Release (${t})`,50+i),t===arm?armFailed:job(native(t),60+i),
+    ...(t==='x86_64-unknown-linux-gnu'?[]:[job(`cloud-sweep (test-runner, ${t})`,70+i)]),
+  ]),job('validate / npm-dry-run',80),job('api-smoke',81),...shards,aggregate,
+  {...job('preparation-receipt',136275017543),conclusion:'failure'}];
+  const harness='fbbe85b0aabd448d30f750d91ae488bda9284cea';
+  const replay={id:44726670231,run_attempt:1,head_sha:harness,head_branch:'codex/cli-arm64-gnu-native-replay-44718206331',
+    head_repository:{full_name:p.repository},path:'.github/workflows/dev-sweep.yml',event:'workflow_dispatch',...completed};
+  const replayJob={name:native(arm),id:136255766094,run_id:replay.id,run_attempt:1,head_sha:harness,...completed,steps:[
+    'Require real native Linux ARM64 hardware',
+    'Verify exact original CLI and official Runtime for this diagnostic replay',
+    'Install and verify the official pinned standalone Runtime',
+    'Verify OS autostart registration from verified release bytes',
+    'Install and probe BGE CPU inference',
+    'Verify selected formal release and database DEV upgrades',
+    'Verify resident foreground and background inference under concurrent CLI load',
+  ].map(name=>({name,...completed}))};
+  const rJobs=[replayJob,{...replayJob,name:'verify-selection',id:136255731145}];
+  const consumer={...p,workflow:recoveryWorkflow,run_id:'701',workflow_head_sha:'c'.repeat(40),producer:p};
+  const run=(old=original,now=[],proof=replayJob)=>recoveryJobs(old,now,p,consumer,all,{armReplayEvidence:proof});
+  assert.equal(validateArmReplay(replay,rJobs),replayJob);
+  const joined=run();
+  assert.equal(joined.evidenceOwners[native(arm)].run_id,replay.id);
+  assert.equal(joined.evidenceOwners[aggregate.name].run_id,Number(p.run_id));
+  assert.ok(shards.every(s=>joined.evidenceOwners[s.name].run_attempt===1));
+  assert.throws(()=>approvedRecoveryProducer('44731065057'),/Unapproved/);
+  assert.throws(()=>validateArmReplay({...replay,run_attempt:2},rJobs));
+  assert.throws(()=>validateArmReplay({...replay,head_sha:p.sha},rJobs));
+  assert.throws(()=>validateArmReplay(replay,[{...replayJob,steps:replayJob.steps.slice(0,-1)},rJobs[1]]));
+  assert.throws(()=>run(original,[],{...replayJob,id:9}));
+  assert.throws(()=>run(original,[replayJob]),/cannot be combined/);
+  assert.throws(()=>run(original.filter(j=>j!==aggregate)),/aggregate/);
+  assert.throws(()=>run(original.filter(j=>j!==shards[0])),/twelve/);
+  assert.throws(()=>run(original.map(j=>j===aggregate?{...j,run_attempt:2}:j)));
+  assert.throws(()=>run(original.map(j=>j.name==='api-smoke'?{...j,conclusion:'failure'}:j)),/exactly/);
+  assert.throws(()=>run(original.map(j=>j===armFailed?{...j,steps:j.steps.slice(1)}:j)),/required step/);
+});
+
+test('requires the original ARM build and standard receipt to match the unmodified replay proof',()=>{
+  const p=approvedRecoveryProducer('44718206331');
+  const owner={run_id:Number(p.run_id),run_attempt:1,sha:p.sha};
+  const source={...owner,version:p.version};
+  const target='aarch64-unknown-linux-gnu';
+  const harness={sha:'fbbe85b0aabd448d30f750d91ae488bda9284cea',run_id:'44726670231',run_attempt:'1'};
+  const candidate={runtime:{version:'2.0.0-dev.28'}};
+  const manifest_sha256=createHash('sha256').update(JSON.stringify(candidate)).digest('hex');
+  const anchor=(prefix,digest,conclusion)=>({name:prefix+target,digest:'sha256:'+digest,owner,conclusion});
+  const build=anchor('cli-release-','edba437b55930e36c7241bd57a43f1f614d9400b1b95cb8d70bd7a7f299ecb01','success');
+  const prior=anchor('candidate-assets-','ef4af3e83cf138f2f9707da4b9fc883b72ff48cc71c683d0de6536d9841e4066','failure');
+  const original={kind:'candidate-assets-verification',target,manifest_sha256,candidate,
+    assets_verified:true,payloads_verified:true,runtime_producer:{run_id:39},
+    payload_identity:{harness_sha:p.sha,cli_binary_sha256:'1'.repeat(64),runtime_binary_sha256:'2'.repeat(64)}};
+  const replay={schema:1,kind:'native-replay-inputs',diagnostic_only:true,target,source,harness,candidate,manifest_sha256,
+    build:{...build,owner:source},prior:{...prior,owner:source},runtime_producer:original.runtime_producer,
+    payload_identity:{...original.payload_identity,harness_sha:harness.sha}};
+  const check=(input=replay,previous=original)=>validateArmReplayInputs(input,previous,
+    {...build,logical_name:build.name},{...prior,logical_name:prior.name},candidate);
+  check();
+  assert.throws(()=>check({...replay,diagnostic_only:false}));
+  assert.throws(()=>check({...replay,prior:{...replay.prior,digest:build.digest}}));
+  assert.throws(()=>check({...replay,kind:'candidate-assets-verification'}));
+  assert.throws(()=>check({...replay,runtime_producer:{run_id:40}}));
+  assert.throws(()=>check({...replay,payload_identity:{...replay.payload_identity,cli_binary_sha256:'3'.repeat(64)}}));
+  assert.throws(()=>check(replay,{...original,assets_verified:false}));
 });
