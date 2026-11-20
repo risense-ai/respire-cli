@@ -772,6 +772,9 @@ public static class RespireGuiNative {
             $report.native_binding.account_fixture_addr = $accountAddress
             $report.native_binding.recovery_phase = $phase
             if ($phase -in @('recovery-resume','recovery-verified')) { $report.native_binding.recovery_request = $report.recovery.request }
+            if ($phase -ceq 'recovery-verified' -and $candidateAssets -and $report.sealed_client2.six_package_receipts_verified -eq $true) {
+                $report.native_binding.sealed_recovery_explicit_start = $true
+            }
         }
         $autostartProbe = $phase -ceq 'initial' -and $candidateAssets -and $OfflineAcceptance -and
             $checkGuiCli -and $report.sealed_client2.six_package_receipts_verified -eq $true
@@ -894,6 +897,10 @@ public static class RespireGuiNative {
                     $report.recovery.original_operation_not_repeated = $true
                 } else {
                     if (-not $native.recovery.saved_restart_no_prompt) { throw 'Saved acknowledgement was not verified after another restart' }
+                    if ($report.native_binding.sealed_recovery_explicit_start -and
+                        (-not $native.recovery.saved_key_ui_verified -or -not $native.offline.runtime_normal_stop_confirmed)) {
+                        throw 'Saved recovery UI or normal Runtime stop was not verified'
+                    }
                     $report.recovery.saved_restart = $native.recovery
                     $report.recovery.status = 'recovery-subset-passed'
                 }

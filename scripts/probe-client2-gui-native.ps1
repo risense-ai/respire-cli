@@ -1802,8 +1802,23 @@ function Invoke-RecoveryMaterialAcceptance {
             $record.transaction.source_profile -cne $binding.recovery_request.transaction.source_profile) {
             throw 'Saved restart changed the original reset identity'
         }
+        if ($binding.sealed_recovery_explicit_start -eq $true) {
+            # The account label uses live Runtime status. This fixture keeps autoRuntime off.
+            Wait-OfflinePreferences 'autoRuntime' $false
+            $report.offline.action_stage = 'saved_recovery_runtime_start'
+            Press-OfflineButton ([regex]::Unescape('^\u6982\u89c8$'))
+            Press-OfflineButton ([regex]::Unescape('^\u542f\u52a8 Runtime$'))
+            $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u505c\u6b62 Runtime$')) 60
+            Bind-OfflineRuntime
+            if ($offlineRuntime.started_ticks -lt $binding.desktop_started_ticks -or
+                $offlineRuntime.record.ParentProcessId -ne $binding.desktop_pid) { throw 'Saved recovery did not start a new Client2-owned Runtime' }
+        }
         Press-OfflineButton ([regex]::Unescape('^\u8d26\u6237\u4e0e\u7a7a\u95f4$'))
         $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u5df2\u4fdd\u5b58$'))
+        if ($binding.sealed_recovery_explicit_start -eq $true) {
+            Assert-OfflineLocalKeys (Read-OfflineRpc @('--json','status'))
+            $report.recovery.saved_key_ui_verified = $true
+        }
         for ($sample=0; $sample -lt 3; $sample++) {
             $title = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u8bf7\u4fdd\u5b58\u6062\u590d\u6750\u6599$')) 1 -AllowAbsent
             $material = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('^\u6062\u590d\u6750\u6599$')) 1 -AllowAbsent
@@ -1814,6 +1829,7 @@ function Invoke-RecoveryMaterialAcceptance {
         $report.recovery.saved_restart_no_prompt = $true
         $report.recovery.absence_samples = 3
         Invoke-NativeGuiProbe
+        if ($binding.sealed_recovery_explicit_start -eq $true) { Stop-OfflineRuntime }
         $report.recovery.status = 'recovery-subset-passed'
         return
     }
