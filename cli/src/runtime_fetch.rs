@@ -1763,16 +1763,8 @@ pub(crate) fn with_stopped_runtime_locked(action: impl FnOnce(&Path) -> Result<(
     let parent = path.parent().context("Runtime endpoint directory missing")?;
     anyhow::ensure!(parent.canonicalize()? == root.join("runtime"), "Runtime endpoint directory is outside the installation");
     anyhow::ensure!(fs::symlink_metadata(&path)?.is_file(), "invalid Runtime endpoint file");
-    // Old records are untrusted hints about other loopback listeners. A recycled
-    // PID alone proves nothing about either the listener or the locked library.
-    let bytes = fs::read(&path)?;
-    if let Some(recorded) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|value| value["url"].as_str()?.strip_prefix("http://")?.parse::<std::net::SocketAddr>().ok())
-        .filter(|recorded| recorded.ip().is_loopback() && recorded.port() != 0 && *recorded != address)
-    {
-        require_runtime_port_closed(recorded)?;
-    }
+    // The endpoint's historical PID and port say nothing about the current
+    // listener or the locked library.
     let archive = path.with_file_name(format!("endpoint.stopped-{}.json", uuid::Uuid::new_v4()));
     respire_spawn::durable::publish_new_file(&path, &archive)
         .with_context(|| format!("could not archive the stopped Runtime endpoint at {}", archive.display()))?;

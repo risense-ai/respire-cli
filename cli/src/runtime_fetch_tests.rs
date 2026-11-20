@@ -673,8 +673,10 @@ fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
     anyhow::ensure!(fs::read(&endpoint)? == record);
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     std::env::set_var("RSRS_RPC_PORT", url.rsplit_once(':').context("fixture port missing")?.1);
+    let old_listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let recycled = serde_json::to_vec(&serde_json::json!({
-        "v": 1, "pid": std::process::id(), "bin": "1.0.21-dev.3", "url": url,
+        "v": 1, "pid": std::process::id(), "bin": "1.0.21-dev.3",
+        "url": format!("http://{}", old_listener.local_addr()?),
     }))?;
     let binary = install_lifecycle_fixture()?;
     fs::write(&endpoint, &recycled)?;
