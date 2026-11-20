@@ -220,9 +220,9 @@ class SecretServiceKeys(_base.TrackedKeys):
         return env
 
     def verify_owner(self):
-        from jeepney import DBusAddress, new_method_call
         require(self.daemon is not None and self.daemon.poll() is None,
                 "fixture_secret_service_daemon_exited")
+        from jeepney import DBusAddress, new_method_call
         address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus", "org.freedesktop.DBus")
         reply = self.connection.send_and_get_reply(new_method_call(
             address, "GetConnectionUnixProcessID", "s", ("org.freedesktop.secrets",)))
@@ -393,7 +393,15 @@ class SecretServiceKeys(_base.TrackedKeys):
         daemon_started = self.daemon is not None
         daemon_exit_code = self.daemon.poll() if daemon_started else None
         events, remaining = [], []
-        for index, (service, slot) in enumerate(sorted(self.entries)):
+        collection_owned = True
+        if daemon_started and hasattr(self, "collection"):
+            try:
+                self.verify_owner()
+            except Exception:
+                collection_owned = False
+                remaining.append({"code": "fixture_secret_service_cleanup_owner_unverified"})
+        entries = sorted(self.entries) if collection_owned else []
+        for index, (service, slot) in enumerate(entries):
             try:
                 self.verify_cleanup_material(service, slot)
                 item = self._find(service, slot, check_snapshot=False)
@@ -426,17 +434,19 @@ class SecretServiceKeys(_base.TrackedKeys):
             report["business_credential_classification"] = self.business_classification
         if hasattr(self, "collection"):
             collection = report["collection_cleanup"] = {"passed": False,
-                "stage": "enumeration", "remaining_entries": None}
-            try:
-                collection["remaining_entries"] = len(list(self.collection.get_all_items()))
-                collection["stage"] = "empty_check"
-                require(collection["remaining_entries"] == 0, "fixture_collection_not_empty")
-                collection.update(passed=True, stage="complete")
-            except Exception:
-                report["passed"] = False
-                code = "fixture_collection_not_empty" if collection["remaining_entries"] is not None \
-                    else "fixture_collection_enumeration_failed"
-                report["remaining_entries"].append({"code": code})
+                "stage": "owner_check", "remaining_entries": None}
+            if collection_owned:
+                collection["stage"] = "enumeration"
+                try:
+                    collection["remaining_entries"] = len(list(self.collection.get_all_items()))
+                    collection["stage"] = "empty_check"
+                    require(collection["remaining_entries"] == 0, "fixture_collection_not_empty")
+                    collection.update(passed=True, stage="complete")
+                except Exception:
+                    report["passed"] = False
+                    code = "fixture_collection_not_empty" if collection["remaining_entries"] is not None \
+                        else "fixture_collection_enumeration_failed"
+                    report["remaining_entries"].append({"code": code})
         if self.connection is not None:
             try:
                 self.connection.close()

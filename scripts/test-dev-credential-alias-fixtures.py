@@ -1047,15 +1047,18 @@ class SnapshotTests(unittest.TestCase):
             daemon.poll.return_value = -6
             self.keys.daemon = daemon
             # A dead provider cannot prove collection cleanup; null must stay unknown.
-            with patch.object(self.keys.collection, 'get_all_items', side_effect=RuntimeError('private')):
+            with (patch.object(self.keys.collection, 'get_all_items') as enumerate_items,
+                  patch.object(self.keys.collection, 'search_items') as search_items):
                 report = self.keys.cleanup()
+            enumerate_items.assert_not_called()
+            search_items.assert_not_called()
             self.assertFalse(report['passed'])
             self.assertEqual(report['provider_daemon'], dict(started=True,
                 exit_code_at_cleanup_start=-6, abort_type='glib_assertion',
                 abort_location=dict(file='gkm-secret-item.c', line=42, function='gkm_secret_item_get')))
             self.assertEqual(report['collection_cleanup'], dict(passed=False,
-                stage='enumeration', remaining_entries=None))
-            self.assertIn({'code': 'fixture_collection_enumeration_failed'}, report['remaining_entries'])
+                stage='owner_check', remaining_entries=None))
+            self.assertIn({'code': 'fixture_secret_service_cleanup_owner_unverified'}, report['remaining_entries'])
             daemon.terminate.assert_not_called()
             daemon.kill.assert_not_called()
             for forbidden in (PASSWORD, SUPER, USER, ALIAS, OTHER, '/private/', 'assertion failed'):
