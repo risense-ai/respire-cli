@@ -1027,34 +1027,6 @@ pub(crate) fn with_explicit_recovery<T>(action: impl FnOnce() -> Result<T>) -> R
     action()
 }
 
-pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
-    crate::runtime_fetch::require_automatic_migration_safe()?;
-    if current_boot_token().is_some() {
-        return Ok(None);
-    }
-    let root = respire_client_host::paths::main_data_dir();
-    let Some(config) = read_registration(&root)?.filter(|c| c.enabled) else {
-        return Ok(None);
-    };
-    let _ownership = crate::runtime_policy::takeover_lock()?;
-    let current = crate::rpc::probe_runtime()?;
-    if current.as_ref().is_some_and(|health| health.managed_id.is_none()) {
-        return Ok(None);
-    }
-    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
-    owned(&config)?;
-    let was_running = current.is_some();
-    let mut guard = Maintenance::begin(config, false)?;
-    reset_attempts(guard.config.as_ref().context("registration missing")?)?;
-    raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
-    let executable = crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
-    if was_running {
-        start_candidate(&mut guard)?;
-    }
-    guard.finish()?;
-    Ok(Some(executable))
-}
-
 pub(super) fn registered_runtime_image(config: &Registration, migrated_image: Option<&str>) -> Result<PathBuf> {
     let root = config.installation.canonicalize()?;
     let registered_root = PathBuf::from(
@@ -1838,8 +1810,6 @@ fn enable(now: bool) -> Result<()> {
     manager::validate_executable(Platform::current()?, &crate::mcp::stable_bin_path())?;
     let _ownership = crate::runtime_policy::takeover_lock()?;
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
-    // Resolve before creating the registration: otherwise our new registration
-    // would look like an unbound legacy owner to the materialization preflight.
     crate::rpc::resolve_runtime_executable()?;
     anyhow::ensure!(crate::runtime_fetch::managed_runtime_path()?.is_some(),
         "autostart requires a verified managed Runtime before registration; install the trusted release first");
@@ -3167,21 +3137,15 @@ mod tests {
         fs::remove_file(&config.executable)?;
         fs::write(&config.executable, executable)?;
         reset_attempts(&config)?;
-        for materialize in [false, true] {
-            state.borrow_mut().running = true;
-            let error = if materialize {
-                coordinate_materialization().map(|_| ())
-            } else {
-                ensure_managed_locked().map(|_| ())
-            }
+        state.borrow_mut().running = true;
+        let error = ensure_managed_locked()
             .err()
             .context("maintenance without owner proof unexpectedly succeeded")?;
-            anyhow::ensure!(format!("{error:#}").contains("manager stop is blocked")
-                && state.borrow().running && background_paused());
-            state.borrow_mut().running = false;
-            let mut recovered = restart_maintenance_locked()?;
-            recovered.finish()?;
-        }
+        anyhow::ensure!(format!("{error:#}").contains("manager stop is blocked")
+            && state.borrow().running && background_paused());
+        state.borrow_mut().running = false;
+        let mut recovered = restart_maintenance_locked()?;
+        recovered.finish()?;
         config = read_registration(&root)?.context("recovered registration disappeared")?;
         let cold_changes = state.borrow().changes.clone();
         raw_stop_owned(&config)?;
