@@ -1418,6 +1418,13 @@ function Read-OfflineHttp([string]$Path, $Body = $null) {
         } finally { $stream.Dispose(); $output.Dispose() }
     } finally { $response.Dispose() }
 }
+function Test-OfflineProfilePath([string]$Actual, [string]$Expected) {
+    # Runtime can report the same verified local profile in the extended DOS namespace.
+    if ($Actual -match '\A\\\\\?\\([A-Za-z]:\\.*)\z') { $Actual = $Matches[1] }
+    if ($Actual -notmatch '\A[A-Za-z]:\\') { return $false }
+    return [string]::Equals([IO.Path]::GetFullPath($Actual), $Expected, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Bind-OfflineRuntime {
     $report.offline.runtime_binding_stage = 'health'
     $health = Read-OfflineHttp '/api/health'
@@ -1436,7 +1443,7 @@ function Bind-OfflineRuntime {
         -not ($identityChecks.protocol=(-not ($health.v -ne 1))) -or
         -not ($identityChecks.health_image=[string]::Equals($healthImage,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase)) -or
         -not ($identityChecks.process_image=[string]::Equals($process.Path,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase)) -or
-        -not ($identityChecks.data_directory=[string]::Equals([IO.Path]::GetFullPath($health.data_dir),$binding.data_directory,[StringComparison]::OrdinalIgnoreCase)) -or
+        -not ($identityChecks.data_directory=(Test-OfflineProfilePath $health.data_dir $binding.data_directory)) -or
         -not ($identityChecks.process_record=[bool]$record) -or
         -not ($identityChecks.session=(-not ($process.SessionId -ne $binding.session_id))) -or
         -not ($identityChecks.image_digest=(-not ((Get-FileHash -LiteralPath $process.Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $binding.runtime_sha256)))) {
@@ -1457,7 +1464,7 @@ function Assert-OfflineRuntime {
     $process = Get-Process -Id $offlineRuntime.pid -ErrorAction Stop
     if ($health.pid -ne $offlineRuntime.pid -or $process.StartTime.ToUniversalTime().Ticks -ne $offlineRuntime.started_ticks -or
         -not [string]::Equals($process.Path,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals([IO.Path]::GetFullPath($health.data_dir),$binding.data_directory,[StringComparison]::OrdinalIgnoreCase)) {
+        -not (Test-OfflineProfilePath $health.data_dir $binding.data_directory)) {
         throw 'Offline Runtime actor changed during business acceptance'
     }
     return $health
