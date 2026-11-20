@@ -1318,7 +1318,7 @@ class Smoke:
     def update_check_comparisons(self):
         previous = self.env.get('RSRS_UPDATE_CHECK')
         self.env['RSRS_UPDATE_CHECK'] = '1'
-        cache = self.library / 'update_check.json'
+        cache = self.root / 'update_check.json'
         try:
             for latest, ahead, outdated in [('0.0.1', True, False), (self.args.version, False, False),
                                              ('99.0.0', False, True)]:
