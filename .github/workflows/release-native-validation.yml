@@ -817,8 +817,17 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(uname -m)" = arm64
+          [[ "$INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]]
           archive="$RUNNER_TEMP/macos-upgrade-download/macos-upgrade-inputs.tar"
-          printf '%s  %s\n' "$INPUTS_SHA256" "$archive" | shasum -a 256 -c -
+          verify_inputs() { printf '%s  %s\n' "$INPUTS_SHA256" "$1" | shasum -a 256 -c -; }
+          if ! verify_inputs "$archive"; then
+            echo "::warning::Apple Silicon shard input verification failed; downloading the same run-attempt artifact once more"
+            retry_dir="$(mktemp -d "$RUNNER_TEMP/macos-upgrade-download-retry.XXXXXX")"
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "macos-upgrade-inputs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --dir "$retry_dir"
+            archive="$retry_dir/macos-upgrade-inputs.tar"
+            verify_inputs "$archive"
+          fi
           bundle="$RUNNER_TEMP/macos-upgrade-inputs"
           mkdir "$bundle"
           tar -xf "$archive" -C "$bundle"
