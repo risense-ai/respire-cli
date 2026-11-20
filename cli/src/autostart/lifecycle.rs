@@ -2945,11 +2945,13 @@ mod tests {
         let installed = root.join("bin/runtime").join(&version);
         fs::create_dir_all(&installed)?;
         let inventory = runtime_inventory()?;
-        anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
+        anyhow::ensure!(inventory["channel"] == crate::runtime_fetch::default_runtime_channel_name()
+            && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);
-        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None).is_err());
-        anyhow::ensure!(install_runtime("runtime.install", None, Some(&version), None).is_err());
-        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", None, Some("invalid-version"), None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version),
+            Some("https://example.invalid"), None).is_err());
 
         // Recovery must revalidate the registered owner again at the cleanup boundary.
         {
