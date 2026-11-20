@@ -1644,6 +1644,23 @@ fn staging_dir() -> Result<PathBuf> {
     Ok(stage)
 }
 
+fn finish_install<T>(stage: &Path, outcome: Result<T>) -> Result<T> {
+    match (outcome, fs::remove_dir_all(stage)) {
+        (result, Ok(())) => result,
+        (Ok(installed), Err(cleanup)) => {
+            eprintln!(
+                "WARN Runtime installed and selected, but failed to remove staging directory {}: {cleanup}",
+                stage.display()
+            );
+            Ok(installed)
+        }
+        (Err(error), Err(cleanup)) => Err(error.context(format!(
+            "failed to remove staging directory {}: {cleanup}",
+            stage.display()
+        ))),
+    }
+}
+
 fn is_progress_abort(error: &anyhow::Error) -> bool {
     error.is::<LegacyRuntimeMigrationRequired>()
         || error.is::<ManagedRuntimeRepairRequired>()
@@ -1837,7 +1854,7 @@ fn download_runtime_release(
         !respire_client_host::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
         "runtime downloads are disabled in core test mode"
     );
-    let lock = install_lock()?;
+    let _lock = install_lock()?;
     if reuse_selected {
         if let Some(binary) = selected_install_for_reuse(pin)? {
             return Ok(binary);
@@ -1859,7 +1876,6 @@ fn download_runtime_release(
         serde_json::from_slice(&metadata_bytes).context("invalid runtime release metadata")?;
     metadata.validate(&required, &triple)?;
     let manifest = ManagedManifest::from_release(&metadata, &metadata_bytes)?;
-    let mut installed = None;
     let mut failures = Vec::new();
     for origin in &origins {
         let stage = staging_dir()?;
@@ -1890,37 +1906,20 @@ fn download_runtime_release(
             publish_manifest(&manifest)?;
             Ok(managed_binary_path(&required))
         })();
-        let outcome = match (outcome, fs::remove_dir_all(&stage)) {
-            (result, Ok(())) => result,
-            (Ok(_), Err(cleanup)) => Err(anyhow::anyhow!(
-                "runtime staged successfully but staging cleanup failed: {cleanup}"
-            )),
-            (Err(error), Err(cleanup)) => {
-                Err(error.context(format!("staging cleanup also failed: {cleanup}")))
-            }
-        };
-        match outcome {
-            Ok(binary) => {
-                installed = Some(binary);
-                break;
-            }
+        match finish_install(&stage, outcome) {
+            // Running older instances may still load resources. Retire versions only via explicit cleanup.
+            Ok(binary) => return Ok(binary),
             Err(error) => {
                 // Cancellation and local filesystem failures do not advance to
                 // the next source; network/checksum failures do.
                 if is_progress_abort(&error) {
-                    drop(lock);
                     return Err(error);
                 }
                 failures.push(format!("{origin}: {error:#}"));
             }
         }
     }
-    drop(lock);
-    let Some(binary) = installed else {
-        anyhow::bail!("runtime download failed: {}", failures.join("; "));
-    };
-    // Running older instances may still load resources; retire versions only via explicit cleanup.
-    Ok(binary)
+    anyhow::bail!("runtime download failed: {}", failures.join("; "))
 }
 
 /// Offline manual installation from a local release archive
@@ -1966,7 +1965,7 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
         "archive exceeds size limit"
     );
     let _operation = model_progress::Operation::begin_download()?;
-    let lock = install_lock()?;
+    let _lock = install_lock()?;
     let stage = staging_dir()?;
     let outcome = (|| -> Result<()> {
         let unpacked = stage.join("unpacked");
@@ -1996,18 +1995,9 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
         publish_manifest(&manifest)?;
         Ok(())
     })();
-    let cleanup = fs::remove_dir_all(&stage);
-    if let Err(error) = outcome {
-        return Err(match cleanup {
-            Ok(()) => error,
-            Err(cleanup) => error.context(format!("staging cleanup also failed: {cleanup}")),
-        });
-    }
-    cleanup.context("runtime staged successfully but staging cleanup failed")?;
-    let installed = managed_binary_path(version);
-    drop(lock);
+    finish_install(&stage, outcome)?;
     // Keep the prior installation intact while its instance may still be running.
-    Ok(installed)
+    Ok(managed_binary_path(version))
 }
 
 // ---------------------------------------------------------------------------
