@@ -172,7 +172,12 @@ export function recoveryJobs(original,current,producer,consumer,manifest,{planni
     assert.equal(upload.length,1,'Missing original candidate receipt upload');
     assert.equal(upload[0].status,'completed');
     assert.equal(upload[0].conclusion,'success');
-    assert.equal(current.filter(retryable).length,0,'A frozen replay cannot be combined with a new native/cloud run');
+    const retryJobs=current.filter(retryable);
+    assert.ok(retryJobs.length<=1 && retryJobs.every(j=>
+      j.name==='cloud-sweep (${{ matrix.os }}, ${{ matrix.target }})'
+        && j.status==='completed' && j.conclusion==='skipped'
+        && Array.isArray(j.steps) && j.steps.length===0
+    ),'A frozen replay cannot be combined with a new native/cloud run');
   }
   if(arm&&!planning)assert.equal(armReplayEvidence?.id,armReplayJob,'Missing approved ARM replay job');
   const replacements=arm ? (planning?[]:[armReplayEvidence]) : current.filter(retryable);
