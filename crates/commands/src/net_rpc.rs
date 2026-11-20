@@ -386,6 +386,10 @@ pub fn request_stop_for(health: &Health, timeout: Duration) -> Result<String> {
 }
 
 pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result<Value> {
+    read_final_stop_receipt(health, operation_id)?.context("final runtime stop receipt is missing")
+}
+
+pub fn read_final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result<Option<Value>> {
     anyhow::ensure!(
         !health.instance_id.is_empty()
             && health.instance_id.len() <= 128
@@ -404,7 +408,13 @@ pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result
     let path = root
         .join("runtime")
         .join(format!("stop-{}.json", health.instance_id));
-    let file = fs::File::open(&path).context("final runtime stop receipt is missing")?;
+    let entry = match fs::symlink_metadata(&path) {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("cannot read final runtime stop receipt"),
+    };
+    anyhow::ensure!(entry.is_file(), "invalid stop receipt file");
+    let file = fs::File::open(&path).context("cannot read final runtime stop receipt")?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
         metadata.is_file() && metadata.len() <= 1024 * 1024,
@@ -416,7 +426,7 @@ pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result
     anyhow::ensure!(data.len() <= 1024 * 1024, "stop receipt exceeds 1 MiB");
     let receipt: Value = serde_json::from_slice(&data).context("invalid final stop receipt")?;
     validate_final_stop_receipt(health, operation_id, &receipt)?;
-    Ok(receipt)
+    Ok(Some(receipt))
 }
 
 pub fn validate_final_stop_receipt(
