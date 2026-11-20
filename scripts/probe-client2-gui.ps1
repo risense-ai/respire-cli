@@ -690,6 +690,7 @@ public static class RespireGuiNative {
         }
         if ($checkGuiCli) { Assert-GuiCliAbsent }
         Write-Output ('GUI probe: starting desktop ' + $phase)
+        $startupClock = [Diagnostics.Stopwatch]::StartNew()
         $desktopProcess = Child-Start $exe @()
         $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
         if ($checkGuiCli) { $cliTraceActors.Add($desktopProcess.Id) }
@@ -699,7 +700,8 @@ public static class RespireGuiNative {
         $report.desktop = @{pid=$desktopProcess.Id; session_id=$desktopProcess.SessionId; path=$nativeRoot.ExecutablePath; started_ticks=$desktopStarted}
         if ($desktopProcess.SessionId -ne $report.environment.session_id) { throw 'Desktop launched into a different session' }
         $windows = @()
-        for ($attempt=0; $attempt -lt 80; $attempt++) {
+        # Match the 60-second budget in Client2's published startup diagnostic.
+        while ($startupClock.Elapsed.TotalSeconds -lt 60) {
             if ($desktopProcess.HasExited) { throw 'Official desktop exited before a native window appeared' }
             $windows = @([RespireGuiNative]::Windows($desktopProcess.Id))
             if (@($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count) { break }
