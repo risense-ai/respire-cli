@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Candidate launcher parse failed' }
-foreach ($name in @('Assert-SourceClient2Manifest','Assert-CandidateRegularPath','Copy-SourceClient2Candidate','Assert-DesktopClient2Candidate','Save-DownloadedClient2')) {
+foreach ($name in @('Assert-SourceClient2Manifest','Assert-CandidateRegularPath','Copy-SourceClient2Candidate','Assert-DesktopClient2Candidate','Save-DownloadedClient2','Assert-GuiCliAbsent','Assert-GuiProcessTrace')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Candidate contract function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -31,7 +31,47 @@ $bind=[scriptblock]::Create('[CmdletBinding(DefaultParameterSetName="Official")]
 $common=@{Cli='x';RuntimeArchive='x';RuntimeVersion='1.0.0';OutputDirectory='x'}
 $official=@{Client2Release='v2.0.0-dev.6';Client2Commit=('a'*40)}
 if ((& $bind @common @official) -cne 'Official' -or (& $bind @common @official -OfflineAcceptance) -cne 'Official') { throw 'Explicit release binding changed' }
-if ((& $bind @common -Client2CandidateRunId 123 -Client2Commit ('a'*40)) -cne 'DesktopCandidate') { throw 'Desktop candidate binding is not distinct' }
+if ((& $bind @common -Client2CandidateRunId 123 -Client2Commit ('a'*40)) -cne 'DesktopCandidate' -or
+    (& $bind @common -Client2CandidateRunId 123 -Client2Commit ('a'*40) -LegacyGuiCli) -cne 'DesktopCandidate') { throw 'Desktop candidate binding is not distinct' }
+$legacyRejected = $false
+try { $null = & $bind @common @official -LegacyGuiCli } catch { $legacyRejected = $true }
+if (-not $legacyRejected -or $source.Contains("'prepare-cli'") -or $source.Contains('respire-cli/releases?')) {
+    throw 'Current GUI acceptance still permits CLI installation or CLI channel discovery'
+}
+& {
+    $root = 'C:/fixture/gui'
+    $taskProfile = 'C:/fixture/profile'
+    $taskHome = 'C:/fixture/home'
+    $childEnv = @{PATH='C:/fixture/system'}
+    $report = @{environment=@{session_id=7}}
+    function Test-Path([string]$LiteralPath) { $LiteralPath.Replace('\','/') -ceq $installedCli }
+    function Get-CimInstance([string]$ClassName, [string]$Filter) {
+        if ($ClassName -cne 'Win32_Process' -or $Filter -cne "Name = 'rsrs.exe' AND SessionId = 7") {
+            throw 'CLI check queried the wrong process scope'
+        }
+        if ($liveCli) { @{ProcessId=123} }
+    }
+    $installedCli='C:/external/rsrs.exe'; $liveCli=$false
+    Assert-GuiCliAbsent
+    foreach ($installedCli in @('C:/fixture/gui/rsrs.exe','C:/fixture/profile/bin/rsrs.exe',
+        'C:/fixture/home/.rsrs/bin/rsrs.exe','C:/fixture/system/rsrs.exe','')) {
+        $liveCli = -not $installedCli
+        $rejected=$false
+        try { Assert-GuiCliAbsent } catch { $rejected=$true }
+        if (-not $rejected) { throw 'Client2 accepted a discoverable or running CLI' }
+    }
+}
+$fixture = @{ProcessName='rsrs.exe';ProcessID=21;ParentProcessID=20}
+$desktop = @{ProcessName='respire-windows-amd64.exe';ProcessID=22;ParentProcessID=20}
+Assert-GuiProcessTrace @($fixture,$desktop) @(22) @(21) 20
+foreach ($events in @(
+    @{events=@($fixture)}, @{events=@($desktop,@{ProcessName='rsrs.exe';ProcessID=21;ParentProcessID=22})},
+    @{events=@($desktop,@{ProcessName='rsrs.exe';ProcessID=23;ParentProcessID=20})}
+)) {
+    $rejected=$false
+    try { Assert-GuiProcessTrace $events.events @(22) @(21) 20 } catch { $rejected=$true }
+    if (-not $rejected) { throw 'GUI process trace missed an incomplete launch or a CLI outside explicit seeding' }
+}
 foreach ($name in @('Client2Release','Client2CandidateRunId','Client2Commit')) {
     $parameter=@($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq $name })
     if ($parameter.Count -ne 1 -or $parameter[0].DefaultValue -or $parameter[0].Extent.Text -notmatch 'Mandatory') { throw 'Client2 identity input is not explicit and mandatory' }

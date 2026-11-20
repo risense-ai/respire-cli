@@ -299,8 +299,7 @@ impl AssetState {
 
 /// Published metadata for one runtime build (`runtime-build-<triple>.json`).
 ///
-/// Consumed verbatim by the CLI downloader and client2; `tag` strips to
-/// `runtime_version` by dropping the leading `v`.
+/// `tag` strips to `runtime_version` by dropping the leading `v`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeBuildMeta {
     pub schema_version: u32,
@@ -318,7 +317,9 @@ pub struct RuntimeBuildMeta {
     pub binary_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
-    pub compat: RuntimeCompat,
+    /// Historical CLI version window retained for reading older metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<RuntimeCompat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_range: Option<ProtocolRange>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -417,9 +418,6 @@ impl RuntimeBuildMeta {
         let binary = raw
             .binary_sha256
             .ok_or(RuntimeBuildMetaError::MissingField("binary_sha256"))?;
-        let compat = raw
-            .compat
-            .ok_or(RuntimeBuildMetaError::MissingField("compat"))?;
         if tag.strip_prefix('v') != Some(runtime_version.as_str()) {
             return Err(RuntimeBuildMetaError::AliasConflict("tag/runtime_version"));
         }
@@ -484,7 +482,7 @@ impl RuntimeBuildMeta {
             binary_file,
             binary_sha256: binary,
             source_commit: raw.source_commit,
-            compat,
+            compat: raw.compat,
             protocol_range: raw.protocol_range,
             capabilities: raw.capabilities,
             files: raw.files,
@@ -598,10 +596,7 @@ mod tests {
             binary_sha256: "2222222222222222222222222222222222222222222222222222222222222222"
                 .to_owned(),
             source_commit: Some("dd45330c9848ebb73f2d98a363e6af0de3fc5a91".to_owned()),
-            compat: RuntimeCompat {
-                min_cli: "1.0.20".to_owned(),
-                max_cli: "*".to_owned(),
-            },
+            compat: None,
             protocol_range: Some(ProtocolRange {
                 minimum: 1,
                 maximum: 1,
@@ -615,8 +610,11 @@ mod tests {
             }],
         };
         let json = serde_json::to_string(&meta)?;
+        let payload: serde_json::Value = serde_json::from_str(&json)?;
+        assert!(payload.get("compat").is_none());
         let back: RuntimeBuildMeta = serde_json::from_str(&json)?;
         assert_eq!(back, meta);
+        assert_eq!(RuntimeBuildMeta::from_json(&payload)?, meta);
         assert_eq!(back.tag.trim_start_matches('v'), back.runtime_version);
         Ok(())
     }
@@ -634,6 +632,7 @@ mod tests {
         assert_eq!(meta.target_triple, "x86_64-pc-windows-msvc");
         assert_ne!(meta.archive_sha256, meta.binary_sha256);
         assert!(meta.source_commit.is_none());
+        assert_eq!(serde_json::to_value(&meta)?["compat"], v1["payload"]["compat"]);
 
         let v2: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
             root.join("release-metadata-v2.json"),
@@ -643,6 +642,10 @@ mod tests {
         assert_eq!(canonical.schema_version, 2);
         assert!(canonical.target_is("x86_64-pc-windows-msvc"));
         assert_ne!(canonical.archive_sha256, canonical.binary_sha256);
+        assert_eq!(
+            serde_json::to_value(&canonical)?["compat"],
+            v2["payload"]["compat"]
+        );
         Ok(())
     }
 

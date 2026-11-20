@@ -32,13 +32,14 @@ the fixtures and this document in one contract commit.
 | `binary_file` | Exact archive-relative path of the primary executable. |
 | `binary_sha256` | SHA-256 of the extracted primary executable. |
 | `source_commit` | Full Git commit SHA used to build the release. |
-| `compat` | Minimum and maximum supported CLI versions. |
 | `protocol_range` | Minimum and maximum supported wire protocol versions. |
 | `capabilities` | Required capability keys with versions. |
 | `files` | Archive-relative path, byte size, and SHA-256 for every required file. |
 
 The archive and binary hashes describe different byte sequences and never have
-to be equal. Both are mandatory.
+to be equal. Both are mandatory. Historical schema 1 and 2 metadata may include
+the optional `compat` field. CLI reads can preserve this field and determine
+interoperability through wire protocol `v=1` and the required methods or capabilities.
 
 ### Legacy schema 1 mapping
 
@@ -59,7 +60,7 @@ metadata; otherwise the combination is unsupported.
 
 ## Installation
 
-1. Resolve a pinned compatible release from an approved source.
+1. Resolve a release from an approved source using the Runtime channel or an explicitly requested version.
 2. Download the archive to private staging.
 3. Verify the downloaded bytes against `archive_sha256`.
 4. Reject absolute paths, parent traversal, symlinks, devices, FIFOs, duplicate

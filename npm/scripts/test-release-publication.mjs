@@ -795,6 +795,7 @@ test('published full joins every existing report and live image identity; copied
     const selected={release:'v2.0.0-dev.6',source_sha:'f'.repeat(40),
       sealed:{run_id:102,run_attempt:2,artifact_id:103,artifact_zip_digest:'sha256:'+'b'.repeat(64)}};
     const sealedGui=JSON.parse(guiBytes);
+    sealedGui.cli_independence.phases.shift();
     Object.assign(sealedGui,{official_exe_verified:false,source_candidate_verified:true,candidate_inputs:sealedGui.published_inputs,
       sealed_client2:{...selected.sealed,repository:'risense-ai/respire-client2',source_sha:selected.source_sha,
         version:selected.release.slice(1),manifest_sha256:'c'.repeat(64),exe_sha256:sealedGui.exe_sha256,six_package_receipts_verified:true}});
@@ -804,21 +805,27 @@ test('published full joins every existing report and live image identity; copied
     for(const mutate of [g=>g.sealed_client2.run_attempt++,g=>g.sealed_client2.artifact_id++,
       g=>g.sealed_client2.artifact_zip_digest='sha256:'+'0'.repeat(64),g=>g.sealed_client2.six_package_receipts_verified=false,
       g=>g.sealed_client2.exe_sha256='0'.repeat(64),g=>g.restart_native_gui.offline.automatic_key_handoff=false,
-      g=>g.cli_processes.pop(),g=>g.cleanup_exit_confirmed=false]){
+      g=>g.cli_independence.phases.pop(),g=>g.cleanup_exit_confirmed=false]){
       const altered=copy(sealedGui);mutate(altered);assert.throws(()=>checkSeal(altered));
     }
-    for(const mutate of [g=>delete g.cli_processes,g=>g.cli_processes.pop(),g=>g.cli_processes[0].sha256='0'.repeat(64),
-      g=>g.cli_processes[0].parent_verified=false,g=>g.cli_processes[0].lifetime_verified=false,g=>g.source_sha='0'.repeat(40),
+    for(const mutate of [g=>delete g.cli_independence,g=>g.cli_independence.phases.pop(),
+      g=>g.cli_independence.mode='legacy-diagnostic',g=>g.cli_independence.process_start_trace_clear=false,g=>g.cli_processes=[{phase:'initial',pid:42}],
+      g=>g.online_install.runtime_release_id++,g=>g.online_install.runtime_sha256='0'.repeat(64),g=>g.online_install.runtime_channel='stable',
+      g=>g.cli_sha256='0'.repeat(64),g=>g.source_sha='0'.repeat(40),
       g=>g.release='v2.0.0-dev.5',g=>g.restart_native_gui.offline.automatic_key_handoff=false,g=>g.cleanup_error='observer failed']){
       const gui=JSON.parse(guiBytes);mutate(gui);writeFileSync(guiFile,JSON.stringify(gui));assert.throws(run);
     }
-    const originalGui=JSON.parse(guiBytes);
-    originalGui.cli_processes.unshift(null);
-    writeFileSync(guiFile,JSON.stringify(originalGui));
-    assert.equal(run().full_passed,true);
-    originalGui.cli_processes.pop();
-    writeFileSync(guiFile,JSON.stringify(originalGui));
-    assert.throws(run,/GUI did not observe the actual CLI image/);
+    const historical=copy(sealedGui);
+    delete historical.cli_independence;
+    historical.cli_processes=[null,...['initial','restart'].map(phase=>({phase,pid:42,parent_pid:40,started_ticks:'12345',
+      sha256:historical.cli_sha256,parent_verified:true,session_verified:true,lifetime_verified:true}))];
+    assert.throws(()=>checkSeal(historical),/Missing CLI independence evidence/);
+    const checkHistorical=report=>validateFullGUI(report,f.spec,f.manifestHash,{candidate:true,client2:selected,historicalProducerGui:true});
+    assert.equal(checkHistorical(historical),historical);
+    for(const mutate of [g=>delete g.cli_processes,g=>g.cli_processes.pop(),g=>g.cli_processes[1].sha256='0'.repeat(64),
+      g=>g.cli_processes[1].parent_verified=false,g=>g.cli_processes[1].lifetime_verified=false]){
+      const altered=copy(historical);mutate(altered);assert.throws(()=>checkHistorical(altered),/Historical GUI did not observe the actual CLI image/);
+    }
     writeFileSync(guiFile,guiBytes);
     assert(complete.historical_upgrades.every(r=>r.profile==='full'&&r.all_published_sources_covered));
     for(const target of f.targets) {

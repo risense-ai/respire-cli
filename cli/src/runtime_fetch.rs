@@ -157,7 +157,7 @@ fn semver_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
     }
 }
 
-/// The build-time pinned runtime version plus its accept range.
+/// Runtime release selected for validation fixtures.
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
 pub struct RuntimeFixture {

@@ -600,7 +600,7 @@
     },
     {
       "path": "schema/release-metadata.schema.json",
-      "sha256": "769e34a3fe927ec1e7d2a2a4b6b06c62a4b769123723ab42820a6b018296e3c8"
+      "sha256": "97671242ac925f7af3e8292c39f8a7ea7263f582baaebe4e516efa364e4f3e76"
     },
     {
       "path": "fixtures/positive/stop-final-forced-timeout.json",

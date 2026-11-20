@@ -17,6 +17,8 @@
     "binary_sha256": { "$ref": "#/$defs/sha256" },
     "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "compat": {
+      "description": "Optional historical CLI version window. Wire interoperability uses the protocol and required methods or capabilities.",
+      "deprecated": true,
       "type": "object",
       "required": ["min_cli", "max_cli"],
       "properties": {

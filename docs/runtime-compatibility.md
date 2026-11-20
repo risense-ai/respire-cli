@@ -3,11 +3,10 @@
 ## Version selection
 
 Components match through the wire protocol and required capabilities, not equal
-product versions, SDK versions or source commits. The upgraded CLI obtains the
-current supported Runtime through its published download pin. Resolve and verify
-that release's target, assets and integrity before installation; a `latest`
-label alone does not prove compatibility. Candidate hashes identify tested
-artifacts and do not bind independently released components in production.
+product versions, SDK versions or source commits. For a fresh installation,
+the CLI resolves a public release from the selected Runtime channel and verifies
+its target, assets and integrity. CI selects an exact release and records its
+hashes for reproducible validation.
 
 Upgrade regression prepares data with each supported historical stack, upgrades
 the components, then verifies database migration, integrity and memory operations
@@ -75,7 +74,7 @@ integrity evidence. Missing platform evidence blocks candidate promotion.
 ## Migration admission
 
 Automatic selection and CLI materialization stop before replacing an unbound
-legacy process or startup registration. A different pinned version does not
+legacy process or startup registration. A different release version does not
 bypass verification of the existing Runtime selection. Stop the previous service
 and disable any startup task that can relaunch it. A valid endpoint from the
 stopped process allows installation. The CLI archives the record after checking
@@ -88,7 +87,7 @@ an unlock; those operations still require the host key and Runtime admission.
 
 Historical upgrade acceptance seeds both libraries with the historical binary,
 ends its fixture-owned process, stages the upgraded CLI, then uses that CLI's real
-default-pin download. No new Runtime is preinstalled before the historical data.
+default-channel download. No new Runtime is preinstalled before the historical data.
 The report requires verified installed bytes, unchanged ciphertext, sync work and
 session keys, and SQLite integrity checks before opening the upgraded libraries.
 This proves the stopped-library upgrade and download path, not automatic takeover

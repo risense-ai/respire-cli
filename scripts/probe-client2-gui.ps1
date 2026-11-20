@@ -1,6 +1,6 @@
 [CmdletBinding(DefaultParameterSetName="Official")]
 param(
-    [Parameter(Mandatory)][string]$Cli,
+    [Parameter(Mandatory)][Alias('Cli')][string]$FixtureCli,
     [Parameter(Mandatory)][string]$RuntimeArchive,
     [Parameter(Mandatory)][string]$RuntimeVersion,
     [Parameter(Mandatory)][string]$OutputDirectory,
@@ -15,6 +15,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Commit,
     [Parameter(Mandatory,ParameterSetName='Official')][string]$Client2Release,
     [Parameter(Mandatory,ParameterSetName='DesktopCandidate')][string]$Client2CandidateRunId,
+    [Parameter(ParameterSetName='DesktopCandidate')][switch]$LegacyGuiCli,
     [Parameter(Mandatory,ParameterSetName='Official')][Parameter(Mandatory,ParameterSetName='DesktopCandidate')][Parameter(Mandatory,ParameterSetName='CoreQuery')][string]$Client2Commit
 )
 $ErrorActionPreference = 'Stop'
@@ -24,6 +25,8 @@ $publishedOnline = $publishedAssets -and -not $client2Candidate
 $candidateAssets = $env:ARTIFACT_SOURCE -ceq 'build' -and -not [string]::IsNullOrEmpty($env:CANDIDATE_ASSETS)
 $candidate = if ($candidateAssets) { $env:CANDIDATE_ASSETS | ConvertFrom-Json }
 $fullFixture = $publishedOnline -or $candidateAssets
+if ($LegacyGuiCli -and ($fullFixture -or $publishedAssets)) { throw 'Legacy GUI CLI staging is restricted to the historical launcher diagnostic' }
+$checkGuiCli = -not ($CoreConfigQuery -or $LegacyGuiCli)
 if ($PSCmdlet.ParameterSetName -ne 'SourceCandidate' -and $Client2Commit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Require the exact protocol-compatible Client2 source commit' }
 if ($PSCmdlet.ParameterSetName -eq 'Official' -and $Client2Release -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?\z') { throw 'Require an explicit new protocol-compatible Client2 release' }
 if ($publishedAssets -and (-not $OfflineAcceptance -or
@@ -38,7 +41,7 @@ $report = [ordered]@{
     native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
     target_desktop_screenshot_saved = $false
     cleanup_exit_confirmed = $false; cleanup_pending_absence = @()
-    cli_processes = @(); cli_observation_diagnostics = @()
+    cli_independence = @{mode='external-fixture-only'; phases=@(); process_start_trace_clear=$false}
     full_gui_acceptance = 'not-evaluated'; g1_passed = $false; status = 'failed'
     cloud_login = 'not-evaluated-no-gui-account-fixture'
 }
@@ -61,6 +64,9 @@ $desktopProcess = $null
 $accountFixture = $null
 $coreProxy = $null
 $coreRuntimeRecord = $null
+$cliTrace = $null
+$cliTraceActors = [Collections.Generic.List[int]]::new()
+$cliTraceFixtures = [Collections.Generic.List[int]]::new()
 $tracked = @()
 function Assert-SourceClient2Manifest($Manifest, [string]$ExpectedCommit, [string]$RunId, [string]$RunAttempt, [string]$Job) {
     $keys=@('schema_version','mode','repository','source_commit','platform','exe_file','exe_sha256','build_version','build_command','run_id','run_attempt','job')
@@ -214,6 +220,24 @@ function Save-DownloadedClient2([string]$Destination) {
         $report.official_exe_verified = $true
     }
     $report.exe_sha256 = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+function Assert-GuiCliAbsent {
+    $directories = @($root, (Join-Path $taskProfile 'bin'), (Join-Path $taskHome '.rsrs/bin')) + ($childEnv['PATH'] -split ';')
+    foreach ($directory in $directories) {
+        if (Test-Path -LiteralPath (Join-Path $directory 'rsrs.exe')) { throw "CLI is present on a Client2 lookup path: $directory" }
+    }
+    if (Get-CimInstance Win32_Process -Filter "Name = 'rsrs.exe' AND SessionId = $($report.environment.session_id)") {
+        throw 'A live CLI is present in the isolated Client2 session'
+    }
+}
+function Assert-GuiProcessTrace($Events, $DesktopIds, $FixtureIds, [int]$ParentId) {
+    $unexpected = @($Events | Where-Object { $_.ProcessName -ieq 'rsrs.exe' -and
+        ($_.ParentProcessID -ne $ParentId -or $_.ProcessID -notin $FixtureIds) })
+    if ($unexpected.Count) { throw 'Process start trace observed a CLI outside explicit fixture execution' }
+    $desktopEvents = @($Events | Where-Object { $_.ProcessName -ieq 'respire-windows-amd64.exe' -and $_.ParentProcessID -eq $ParentId })
+    foreach ($actor in $DesktopIds) {
+        if ($actor -notin $desktopEvents.ProcessID) { throw 'Process start trace did not observe an expected Client2 launch' }
+    }
 }
 function Save-Report { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root 'report.json') -Encoding utf8NoBOM }
 function Descendants([int]$parentId) {
@@ -370,7 +394,7 @@ public static class RespireGuiNative {
         if ($client2Candidate -and -not $OfflineAcceptance) { throw 'Desktop candidate requires the complete offline GUI subset' }
         Save-DownloadedClient2 $exe
     }
-    $cliPath = (Resolve-Path -LiteralPath $Cli).Path
+    $cliPath = (Resolve-Path -LiteralPath $FixtureCli).Path
     $archivePath = (Resolve-Path -LiteralPath $RuntimeArchive).Path
     $report.cli_sha256 = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.runtime_archive_sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -427,17 +451,15 @@ public static class RespireGuiNative {
         }
         $report.published_inputs = @{manifest_sha256=$manifestHash; cli_source=$published.cli.source_sha; runtime_source=$published.runtime.source_sha}
         if ($publishedOnline) {
-            $report.online_install = @{mode='published-assets'; manifest_sha256=$manifestHash; cli_version=$published.cli.version
-                cli_source=$published.cli.source_sha; runtime_version=$RuntimeVersion; runtime_source=$published.runtime.source_sha
+            $report.online_install = @{mode='published-assets'; manifest_sha256=$manifestHash
+                runtime_version=$RuntimeVersion; runtime_source=$published.runtime.source_sha; runtime_release_id=$published.runtime.release_id
                 home=$taskHome; data_root=$taskProfile; channel_source='product-default'; completed=$false}
-            foreach ($kind in @('cli','runtime')) {
-                $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/risense-ai/respire-$kind/releases?per_page=20" -TimeoutSec 60
-                $releases | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root "online-$kind-releases-before.json") -Encoding utf8NoBOM
-                $latest = $releases | Where-Object { -not $_.draft -and $_.tag_name -cmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$' } |
-                    Sort-Object -Property @{Expression={[semver]$_.tag_name.Substring(1)}; Descending=$true} | Select-Object -First 1
-                if ($latest.tag_name -cne ('v'+$published.$kind.version) -or $latest.id -ne $published.$kind.release_id) {
-                    throw "Dev discovery does not select the exact published $kind reference; no product installation attempted"
-                }
+            $releases = Invoke-RestMethod -Uri 'https://api.github.com/repos/risense-ai/respire-runtime/releases?per_page=20' -TimeoutSec 60
+            $releases | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root 'online-runtime-releases-before.json') -Encoding utf8NoBOM
+            $latest = $releases | Where-Object { -not $_.draft -and $_.tag_name -cmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$' } |
+                Sort-Object -Property @{Expression={[semver]$_.tag_name.Substring(1)}; Descending=$true} | Select-Object -First 1
+            if ($latest.tag_name -cne ('v'+$published.runtime.version) -or $latest.id -ne $published.runtime.release_id) {
+                throw 'Dev discovery does not select the exact published Runtime reference; no product installation attempted'
             }
         } else {
             $report.online_install = @{mode='not-evaluated'; completed=$false; reason='authenticated Client2 CI candidate; not public product upgrade evidence'}
@@ -497,14 +519,24 @@ public static class RespireGuiNative {
         foreach ($arg in $argv) { [void]$start.ArgumentList.Add($arg) }
         return [Diagnostics.Process]::Start($start)
     }
+    if ($checkGuiCli) {
+        $session = $report.environment.session_id
+        $traceId = 'respire-gui-process-start-' + [Guid]::NewGuid()
+        $traceQuery = "SELECT * FROM Win32_ProcessStartTrace WHERE SessionID = $session AND (ProcessName = 'rsrs.exe' OR ProcessName = 'respire-windows-amd64.exe')"
+        Register-CimIndicationEvent -Query $traceQuery -SourceIdentifier $traceId | Out-Null
+        $cliTrace = $true
+        Assert-GuiCliAbsent
+    } else {
+        $report.cli_independence = @{mode='legacy-diagnostic'}
+    }
     $managed = Join-Path $taskProfile "bin/runtime/$RuntimeVersion"
     if ($publishedOnline) {
-        $installedCli = Join-Path $taskProfile 'bin/rsrs.exe'
-        $report.online_install.cli_absent_before = -not (Test-Path -LiteralPath $installedCli)
+        $report.online_install.cli_absent_before = $true
         $report.online_install.runtime_absent_before = -not (Test-Path -LiteralPath (Join-Path $taskProfile 'bin/runtime.json'))
-        if (-not $report.online_install.cli_absent_before -or -not $report.online_install.runtime_absent_before -or
+        if (-not $report.online_install.runtime_absent_before -or
             (Test-Path -LiteralPath (Join-Path $root 'bootstrap'))) { throw 'Online installation requires absent CLI, Runtime and bootstrap payload' }
         $install = Child-Start $exe @('--headless','install-runtime') -CaptureOutput
+        $cliTraceActors.Add($install.Id)
         $stdout = $install.StandardOutput.ReadToEndAsync(); $stderr = $install.StandardError.ReadToEndAsync()
         if (-not $install.WaitForExit(960000)) { $install.Kill($true); throw 'Client2 online installation exceeded its bounded deadline' }
         $installText = $stdout.GetAwaiter().GetResult()
@@ -512,19 +544,11 @@ public static class RespireGuiNative {
         $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $root 'online-install.stderr.txt') -Encoding utf8NoBOM
         $report.online_install.exit_code = $install.ExitCode
         if ($install.ExitCode -ne 0 -or ($installText | ConvertFrom-Json).ok -ne $true) { throw 'Released Client2 online installation failed' }
-        if (Test-Path -LiteralPath $installedCli) { throw 'Preparing Runtime unexpectedly installed the CLI' }
-        $prepareCli = Child-Start $exe @('--headless','prepare-cli') -CaptureOutput
-        $cliStdout = $prepareCli.StandardOutput.ReadToEndAsync(); $cliStderr = $prepareCli.StandardError.ReadToEndAsync()
-        if (-not $prepareCli.WaitForExit(960000)) { $prepareCli.Kill($true); throw 'Client2 online CLI preparation exceeded its bounded deadline' }
-        $cliText = $cliStdout.GetAwaiter().GetResult()
-        $cliText | Set-Content -LiteralPath (Join-Path $root 'online-prepare-cli.stdout.json') -Encoding utf8NoBOM
-        $cliStderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $root 'online-prepare-cli.stderr.txt') -Encoding utf8NoBOM
-        if ($prepareCli.ExitCode -ne 0 -or ($cliText | ConvertFrom-Json).ok -ne $true) { throw 'Released Client2 online CLI preparation failed' }
+        Assert-GuiCliAbsent
+        $report.cli_independence.phases += 'install-runtime'
         $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
         if ($selection.version -cne $RuntimeVersion -or $selection.sha256 -cne $consumer.runtime_binary_sha256 -or
-            (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256 -or
-            (Get-FileHash -LiteralPath $installedCli -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.cli_binary_sha256 -or
-            (Get-Item -LiteralPath $installedCli).Length -ne (Get-Item -LiteralPath $cliPath).Length) { throw 'Online installed CLI/Runtime differs from the exact published assets' }
+            (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256) { throw 'Online installed Runtime differs from the exact published asset' }
         # The installer verifies the full archive, then removes release-only core-notices.
         foreach ($file in @($runtimeMetadata.files | Where-Object { -not $_.path.StartsWith('core-notices/', [StringComparison]::Ordinal) })) {
             $installedFile = Join-Path $managed $file.path
@@ -534,23 +558,14 @@ public static class RespireGuiNative {
             }
         }
         if (@(Get-ChildItem -LiteralPath (Join-Path $taskProfile 'client2') -Directory -Filter '.cli-download-*').Count) { throw 'CLI download staging survived installation' }
-        $versionProcess = Child-Start $installedCli @('--version') -CaptureOutput
-        $versionOut = $versionProcess.StandardOutput.ReadToEndAsync(); $versionErr = $versionProcess.StandardError.ReadToEndAsync()
-        if (-not $versionProcess.WaitForExit(10000)) { $versionProcess.Kill($true); throw 'Installed CLI version check timed out' }
-        $versionText = $versionOut.GetAwaiter().GetResult()
-        $versionText | Set-Content -LiteralPath (Join-Path $root 'online-cli-version.stdout.txt') -Encoding utf8NoBOM
-        $versionErr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $root 'online-cli-version.stderr.txt') -Encoding utf8NoBOM
-        if ($versionProcess.ExitCode -ne 0 -or ($versionText.Trim() -split '\s+')[-1] -cne $published.cli.version) { throw 'Installed CLI version differs from the published reference' }
-        foreach ($kind in @('cli','runtime')) {
-            $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/risense-ai/respire-$kind/releases?per_page=20" -TimeoutSec 60
-            $releases | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root "online-$kind-releases-after.json") -Encoding utf8NoBOM
-        }
-        $report.online_install.cli_path = $installedCli
-        $report.online_install.cli_sha256 = $consumer.cli_binary_sha256
+        $releases = Invoke-RestMethod -Uri 'https://api.github.com/repos/risense-ai/respire-runtime/releases?per_page=20' -TimeoutSec 60
+        $releases | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root 'online-runtime-releases-after.json') -Encoding utf8NoBOM
         $report.online_install.runtime_sha256 = $selection.sha256
         $report.online_install.completed = $true
     } else {
+        if ((Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $report.cli_sha256) { throw 'Fixture CLI image changed before Runtime staging' }
         $install = Child-Start $cliPath @('--json','runtime','install','--file',$archivePath,'--version',$RuntimeVersion)
+        if ($checkGuiCli) { $cliTraceFixtures.Add($install.Id) }
         if (-not $install.WaitForExit(60000)) { $install.Kill($true); throw 'Staged Runtime installation timed out' }
         if ($install.ExitCode -ne 0) { throw 'Staged Runtime installation failed' }
         $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
@@ -565,7 +580,7 @@ public static class RespireGuiNative {
                     (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) { throw 'Installed candidate Runtime payload differs' }
             }
         }
-        Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
+        if (-not $checkGuiCli) { Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe') }
     }
     Write-Output 'GUI probe: Runtime installed'
     if ($CoreConfigQuery) {
@@ -652,11 +667,13 @@ public static class RespireGuiNative {
             $accountAddress = ($ready.GetAwaiter().GetResult() | ConvertFrom-Json).addr
             if ($accountFixture.HasExited -or $accountAddress -cnotmatch '\Ahttp://127\.0\.0\.1:[0-9]+\z') { throw 'Loopback account fixture failed' }
             $report.recovery = @{status='failed'; fixture='loopback synthetic account; real CLI setup and GUI reset'; exit_method='guarded-process-termination'}
-            # Prepare the account with the released CLI, not another GUI scenario.
+            # The verified external CLI seeds the loopback account before the desktop starts.
+            if ((Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $report.cli_sha256) { throw 'Fixture CLI image changed before account seeding' }
             # Registration output includes real material: drain bytes without decoding or saving.
             $recoveryStarted = [DateTime]::UtcNow
-            $registration = Child-Start (Join-Path $taskProfile 'bin/rsrs.exe') @('--json','--host-rpc-stdio') -CaptureOutput -CaptureInput
+            $registration = Child-Start $cliPath @('--json','--host-rpc-stdio') -CaptureOutput -CaptureInput
             try {
+                $cliTraceFixtures.Add($registration.Id)
                 $discardOut = $registration.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
                 $discardErr = $registration.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
                 $registration.StandardInput.WriteLine((@{v=1;id=('desktop-'+[guid]::NewGuid());method='auth.register';
@@ -671,40 +688,11 @@ public static class RespireGuiNative {
                 $registration.Dispose()
             }
         }
-        $cliObservation = [hashtable]::Synchronized(@{stop=$false; desktop_pid=0; desktop_started=0L; phase=$phase})
-        $cliObserver = Start-ThreadJob -ArgumentList $cliObservation,(Join-Path $taskProfile 'bin/rsrs.exe'),$report.cli_sha256,$report.environment.session_id -ScriptBlock {
-            param($state,$expectedPath,$expectedHash,$session)
-            $ErrorActionPreference = 'Stop'
-            $seen = [Collections.Generic.HashSet[string]]::new()
-            while (-not $state.stop) {
-                foreach ($process in [Diagnostics.Process]::GetProcessesByName('rsrs')) {
-                    try {
-                        if ($state.desktop_pid -eq 0 -or $process.HasExited) { continue }
-                        $birth = $process.StartTime.ToUniversalTime().Ticks
-                        if ($birth -lt $state.desktop_started -or $process.SessionId -ne $session) { continue }
-                        $image = $process.Path
-                        if (-not [string]::Equals($image,$expectedPath,[StringComparison]::OrdinalIgnoreCase)) { continue }
-                        $record = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)"
-                        if (-not $record -or $record.ParentProcessId -ne $state.desktop_pid) { continue }
-                        $digest = (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash.ToLowerInvariant()
-                        if ($process.HasExited -or $process.StartTime.ToUniversalTime().Ticks -ne $birth) { throw 'CLI exited during image sampling' }
-                        if ($digest -cne $expectedHash -or $record.SessionId -ne $session -or
-                            -not [string]::Equals($record.ExecutablePath,$image,[StringComparison]::OrdinalIgnoreCase)) { throw 'Running GUI CLI image differs' }
-                        if ($seen.Add("$($process.Id):$birth")) {
-                            @{phase=$state.phase;pid=$process.Id;parent_pid=$record.ParentProcessId;started_ticks=$birth.ToString();image=$image;sha256=$digest
-                                parent_verified=$true;session_verified=$true;lifetime_verified=$true}
-                        }
-                    } catch { @{phase=$state.phase;observation_error=$_.Exception.Message} }
-                    finally { $process.Dispose() }
-                }
-                Start-Sleep -Milliseconds 20
-            }
-        }
+        if ($checkGuiCli) { Assert-GuiCliAbsent }
         Write-Output ('GUI probe: starting desktop ' + $phase)
         $desktopProcess = Child-Start $exe @()
         $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
-        $cliObservation.desktop_started = $desktopStarted
-        $cliObservation.desktop_pid = $desktopProcess.Id
+        if ($checkGuiCli) { $cliTraceActors.Add($desktopProcess.Id) }
         Write-Output 'GUI probe: desktop started'
         $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
         if (-not $nativeRoot -or -not [string]::Equals($nativeRoot.ExecutablePath, $exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native process does not name the verified original EXE' }
@@ -807,17 +795,6 @@ public static class RespireGuiNative {
             } elseif (($native.core_query.transaction | ConvertTo-Json -Compress -Depth 6) -cne
                 ($report.core_query_original | ConvertTo-Json -Compress -Depth 6)) { throw 'Restart changed RequestBound identity' }
         }
-        $cliObservation.stop = $true
-        $null = Wait-Job -Job $cliObserver -Timeout 10
-        if ($cliObserver.State -cne 'Completed') { throw 'CLI image observer did not finish' }
-        $observations = @(Receive-Job -Job $cliObserver -ErrorAction Stop)
-        Remove-Job -Job $cliObserver
-        $cliObserver = $null
-        $report.cli_observation_diagnostics = @($report.cli_observation_diagnostics) + @($observations | Where-Object { $_.observation_error })
-        if (@($observations | Where-Object { $_.observation_error -ceq 'Running GUI CLI image differs' }).Count) { throw 'Observed GUI CLI image identity mismatch' }
-        $verifiedProcesses = @($observations | Where-Object { $_.lifetime_verified -eq $true })
-        $report.cli_processes = @($report.cli_processes) + $verifiedProcesses
-        if ($fullFixture -and $verifiedProcesses.Count -eq 0) { throw 'No live GUI-owned CLI image was verified; see observer diagnostics' }
         if ($CoreConfigQuery -and $phase -ceq 'core-issue') {
             $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
             foreach ($item in $tracked) { Stop-TrackedOwned $item }
@@ -882,24 +859,15 @@ public static class RespireGuiNative {
                 if ($phase -ceq 'recovery-issue') { $report.recovery.unacknowledged_tree_absent = $true }
             }
         }
+        if ($checkGuiCli) {
+            Assert-GuiCliAbsent
+            $report.cli_independence.phases += $phase
+        }
     }
     $report.status = 'connectivity-passed'
 } catch {
     $report.error = $_.Exception.Message
 } finally {
-    if ($cliObserver) {
-        try {
-            $cliObservation.stop = $true
-            $null = Wait-Job -Job $cliObserver -Timeout 10
-            if ($cliObserver.State -ne 'Completed') { Stop-Job -Job $cliObserver }
-            $report.cli_observation_diagnostics = @($report.cli_observation_diagnostics) + @(Receive-Job -Job $cliObserver -ErrorAction Stop)
-            Remove-Job -Job $cliObserver
-        } catch {
-            $report.cli_observer_cleanup_error = $_.Exception.Message
-            $report.cleanup_error = 'CLI image observer cleanup failed'
-            $report.status = 'failed'
-        }
-    }
     # Stop only the original process tree observed in this fresh hosted VM, with creation-time guards.
     try {
         Write-Output 'GUI probe: cleaning up tracked processes'
@@ -995,6 +963,24 @@ public static class RespireGuiNative {
                     $coreProxy.Dispose()
                 } catch { $report.cleanup_error = 'Real forwarding helper cleanup failed'; $report.cleanup_exit_confirmed = $false }
             }
+        }
+    }
+    if ($cliTrace) {
+        try {
+            try {
+                if ($report.status -ceq 'connectivity-passed') {
+                    Assert-GuiCliAbsent
+                    $events = @(Get-Event -SourceIdentifier $traceId -ErrorAction SilentlyContinue | ForEach-Object { $_.SourceEventArgs.NewEvent })
+                    Assert-GuiProcessTrace $events $cliTraceActors $cliTraceFixtures $PID
+                    $report.cli_independence.process_start_trace_clear = $true
+                }
+            } finally {
+                Unregister-Event -SourceIdentifier $traceId
+                Get-Event -SourceIdentifier $traceId -ErrorAction SilentlyContinue | Remove-Event
+            }
+        } catch {
+            if (-not $report.cleanup_error) { $report.cleanup_error = $_.Exception.Message }
+            $report.cleanup_exit_confirmed = $false
         }
     }
     Save-Report

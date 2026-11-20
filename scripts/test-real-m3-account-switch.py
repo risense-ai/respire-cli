@@ -1,6 +1,6 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
-from native_fixture_process import (install_official_runtime, install_published_runtime, stage_fixture_cli, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
+from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
     add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, canonical_scope_path, same_existing_path)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from contextlib import closing
@@ -287,9 +287,15 @@ for binary in BINARIES:
         return envelope
     def run_client2(action):
         desktop_env = {key: value for key, value in env.items() if key != 'RSRS_RUNTIME_BIN'}
+        system_root = pathlib.Path(os.environ['SystemRoot'])
+        system_path = (system_root / 'System32', system_root)
+        desktop_env.update(PATH=os.pathsep.join(map(str, system_path)), RSRS_BIN_DIR=str(main / 'bin'))
+        cli_paths = [p / 'rsrs.exe' for p in (main / 'bin', args.client2_binary.parent, *system_path)]
+        assert not any(os.path.lexists(p) for p in cli_paths), 'Client2 must start without an installed CLI'
         result = captured_run([str(args.client2_binary),'--headless',action],env=desktop_env,timeout=960)
         assert result.returncode==0, f'Client2 {action} failed with exit {result.returncode}'
         assert json.loads(result.stdout).get('ok') is True, f'Client2 {action} did not confirm success'
+        assert not any(os.path.lexists(p) for p in cli_paths), 'Client2 unexpectedly installed a CLI'
     def wait_index_ready(timeout=180):
         deadline = time.monotonic() + timeout
         while True:
@@ -573,15 +579,12 @@ for binary in BINARIES:
                 obsolete_receipt = main/'runtime.json'
                 with obsolete_receipt.open('xb') as stream:
                     stream.write(b'obsolete Runtime selection')
-                cli_path = main/'bin/rsrs.exe'
-                assert not cli_path.exists(), 'desktop Runtime preparation must start without a CLI'
                 run_client2('install-runtime')
-                assert not cli_path.exists(), 'desktop Runtime preparation unexpectedly installed the CLI'
                 assert obsolete_receipt.read_bytes()==b'obsolete Runtime selection', 'desktop changed the obsolete receipt'
                 installed = main/'bin/runtime'/args.runtime_version/'rsrs-runtime.exe'
                 assert hashlib.sha256(installed.read_bytes()).hexdigest()==args.runtime_sha256, 'desktop installed different Runtime bytes'
                 env['RSRS_RUNTIME_BIN'] = str(installed)
-                stage_fixture_cli(binary, env, main)
+                env['RSRS_BIN_DIR'] = str(main / 'bin')
             else:
                 installed = install_published_runtime(binary, env)
             assert installed is not None, 'database upgrade requires the verified managed or published Runtime artifact'

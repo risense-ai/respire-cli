@@ -89,7 +89,13 @@ print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps}))`],
     cli_sha256:identity.binary_sha256,runtime_archive_sha256:'b'.repeat(64),official_exe_verified:true,exe_sha256:'f'.repeat(64),source_sha:'f'.repeat(40),release:candidate?.client2.release||'v2.0.0-dev.6',
     native_window_visible:true,isolated_webview_bound:true,native_accessibility_read:true,foreground_verified:true,gui_input_observed:true,target_desktop_screenshot_saved:true,
     restart:{completed:true,original_tree_absent:true},recovery:{status:'recovery-subset-passed',original_operation_not_repeated:true,saved_restart:{saved_restart_no_prompt:true}},
-    initial_native_gui:offline,restart_native_gui:offline,cli_processes:['initial','restart'].map(phase=>({phase,pid:42,parent_pid:40,started_ticks:'12345',sha256:identity.binary_sha256,parent_verified:true,session_verified:true,lifetime_verified:true})),
+    initial_native_gui:offline,restart_native_gui:offline,
+    cli_independence:{mode:'external-fixture-only',process_start_trace_clear:true,
+      phases:[...(candidate?[]:['install-runtime']),'initial','restart','recovery-issue','recovery-resume','recovery-verified']},
+    ...(candidate?{}:{online_install:{mode:'published-assets',manifest_sha256:manifestHash,completed:true,exit_code:0,
+      cli_absent_before:true,runtime_absent_before:true,channel_source:'product-default',runtime_channel:'dev',
+      runtime_version:spec.runtime.version,runtime_release_id:spec.runtime.release_id,runtime_source:spec.runtime.source_sha,
+      runtime_sha256:spec.runtime.assets.find(a=>a.name===publishedAssetNames('runtime','x86_64-pc-windows-msvc')[1]).sha256}}),
     [candidate?'candidate_inputs':'published_inputs']:{manifest_sha256:manifestHash,cli_source:spec.cli.source_sha,runtime_source:spec.runtime.source_sha}});
   const apiReports={};
   for(const name of ['dev-api-coverage.json','dev-github-api-coverage.json']) {
