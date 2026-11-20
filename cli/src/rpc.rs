@@ -128,15 +128,15 @@ pub fn stop_if_running() -> Result<()> {
 /// Restart after an authenticated drain, or after verifying the port and library are free.
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
-    crate::runtime_fetch::require_automatic_migration_safe()?;
     let takeover = crate::runtime_policy::takeover_lock()?;
-    crate::runtime_fetch::require_automatic_migration_safe()?;
     // An unavailable health response is not permission to discover or kill a PID.
     let health = probe_runtime().context(
         "runtime restart blocked: owner health is unavailable; no process was forced to exit",
     )?;
+    // Verify the replacement before retiring any state or stopping a service.
+    resolve_runtime_executable()?;
     if health.is_none() {
-        crate::runtime_fetch::archive_stopped_endpoint_locked()?;
+        crate::autostart::prepare_cold_restart_locked()?;
     }
     let mut maintenance = crate::autostart::restart_maintenance_locked()?;
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
@@ -517,14 +517,7 @@ pub(crate) fn explicit_cli_runtime(executable: &std::path::Path) -> Result<bool>
 /// Resolution and installation failures stay errors, including typed repair errors.
 /// Neither detached, foreground nor supervised startup synthesizes a shim plan.
 pub(crate) fn resolve_runtime_executable() -> Result<PathBuf> {
-    let executable = match crate::runtime_fetch::resolve_runtime_bin()? {
-        crate::runtime_fetch::ResolvedRuntime::Ready(path) => path,
-        crate::runtime_fetch::ResolvedRuntime::LegacyCombined(legacy) => {
-            crate::runtime_fetch::download_and_install(None, None).with_context(|| {
-                format!("independent Runtime installation required; legacy CLI at {} cannot serve automatically", legacy.display())
-            })?
-        }
-    };
+    let executable = crate::runtime_fetch::resolve_runtime_bin()?;
     anyhow::ensure!(
         crate::embedding::selection().is_some()
             || !crate::mcp::same_path(&executable, &std::env::current_exe()?),
@@ -858,8 +851,8 @@ pub(crate) fn ensure_daemon() -> Result<()> {
             return Ok(());
         }
     }
-    crate::runtime_fetch::require_automatic_migration_safe()?;
     let takeover = crate::runtime_policy::takeover_lock()?;
+    crate::autostart::prepare_cold_start_locked()?;
     respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     ensure_daemon_locked()
 }
@@ -933,7 +926,6 @@ pub(crate) fn ensure_daemon_locked_with_expectation(
 fn ensure_daemon_locked_inner(
     expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
 ) -> Result<()> {
-    crate::runtime_fetch::require_automatic_migration_safe()?;
     if crate::autostart::ensure_managed_locked_with_expectation(expectation)? {
         return Ok(());
     }
@@ -1191,10 +1183,8 @@ mod runtime_resolution_tests {
         let error = restart_runtime(Duration::from_secs(1))
             .err()
             .context("restart accepted an owner without persisted recovery evidence")?;
-        anyhow::ensure!(
-            error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>(),
-            "restart did not defer the unbound legacy owner: {error:#}"
-        );
+        anyhow::ensure!(format!("{error:#}").contains("RSRS_RUNTIME_BIN does not name a file"),
+            "restart did not verify the replacement before retiring the endpoint: {error:#}");
         anyhow::ensure!(
             std::fs::read(&endpoint)? == endpoint_before
                 && !config_path.exists()

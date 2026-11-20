@@ -560,13 +560,17 @@ fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
     let explicit = dir.path().join(RUNTIME_BINARY);
     fs::write(&explicit, b"synthetic explicit runtime")?;
     std::env::set_var("RSRS_RUNTIME_BIN", &explicit);
-    anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(explicit));
+    anyhow::ensure!(resolve_runtime_bin()? == explicit);
     Ok(())
 }
 
 #[test]
 fn runtime_staging_and_cli_update_preserve_legacy_data_before_launch() -> Result<()> {
-    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE", "RSRS_RPC_PORT", "RSRS_RUNTIME_BIN"])?;
+    std::env::remove_var("RSRS_RUNTIME_BIN");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
+    drop(listener);
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
@@ -590,7 +594,9 @@ fn runtime_staging_and_cli_update_preserve_legacy_data_before_launch() -> Result
     anyhow::ensure!(materialized == legacy);
     anyhow::ensure!(!crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &legacy)
         .map_err(anyhow::Error::msg)?);
-    anyhow::ensure!(crate::autostart::restart_maintenance_locked().is_err());
+    let error = crate::rpc::restart_runtime(Duration::from_secs(1))
+        .err().context("restart was allowed without a verified replacement")?;
+    anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
     anyhow::ensure!(fs::read(&session)? == b"legacy session bytes");
     anyhow::ensure!(fs::read(&library)? == b"legacy data bytes");
     anyhow::ensure!(fs::read(&endpoint)? == br#"{"v":1,"pid":0}"#);
@@ -600,7 +606,8 @@ fn runtime_staging_and_cli_update_preserve_legacy_data_before_launch() -> Result
 
 #[test]
 fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> Result<()> {
-    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE", "RSRS_RUNTIME_BIN"])?;
+    std::env::remove_var("RSRS_RUNTIME_BIN");
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("fresh-installation");
     let blocked = dir.path().join("blocked");
@@ -627,13 +634,14 @@ fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> 
     let selected = install_lifecycle_fixture()?;
     std::env::set_var("RSRS_BIN_DIR", &blocked);
     require_automatic_migration_safe()?;
-    anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(selected));
+    anyhow::ensure!(resolve_runtime_bin()? == selected);
     Ok(())
 }
 
 #[test]
 fn automatic_install_allows_fresh_and_stopped_legacy_cli() -> Result<()> {
-    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RPC_PORT", "RSRS_CORE_TEST_MODE"])?;
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RPC_PORT", "RSRS_CORE_TEST_MODE", "RSRS_RUNTIME_BIN"])?;
+    std::env::remove_var("RSRS_RUNTIME_BIN");
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));

@@ -493,25 +493,11 @@ fn require_handoff_capability(capabilities: &BTreeMap<String, String>) -> Result
 // Discovery
 // ---------------------------------------------------------------------------
 
-/// Outcome of [`resolve_runtime_bin`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResolvedRuntime {
-    /// A verified `rsrs-runtime` executable, ready to spawn.
-    Ready(PathBuf),
-    /// A legacy `rsrs` binary occupies the stable location. Install the
-    /// independent Runtime through the regular installer before starting it.
-    LegacyCombined(PathBuf),
-}
-
-/// Discover the runtime binary, downloading from the release channel when nothing
-/// usable is installed.
-///
-/// Order: `RSRS_RUNTIME_BIN` (explicit override, no integrity check), the
-/// managed directory (verified against its recorded release), the legacy combined stable location, and finally
-/// [`download_and_install`]. Portable images require the explicit override.
-pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
+/// Resolve the explicit or verified managed Runtime, or install a release when
+/// no selection exists. The stable CLI path does not take part in discovery.
+pub fn resolve_runtime_bin() -> Result<PathBuf> {
     if let Some(selected) = crate::embedding::selection() {
-        return Ok(ResolvedRuntime::Ready(selected.verify()?.path().to_path_buf()));
+        return Ok(selected.verify()?.path().to_path_buf());
     }
     if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_BIN") {
         let explicit = PathBuf::from(raw.trim());
@@ -520,20 +506,12 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
             "RSRS_RUNTIME_BIN is empty"
         );
         anyhow::ensure!(explicit.is_file(), "RSRS_RUNTIME_BIN does not name a file");
-        return Ok(ResolvedRuntime::Ready(explicit));
+        return Ok(explicit);
     }
     if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
-        return Ok(ResolvedRuntime::Ready(validate_installed(&manifest)?));
+        return validate_installed(&manifest);
     }
-    shared::migrate_legacy()?;
-    if let Some(binary) = managed_runtime_path()? {
-        return Ok(ResolvedRuntime::Ready(binary));
-    }
-    let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
-    if legacy.is_file() {
-        return Ok(ResolvedRuntime::LegacyCombined(legacy));
-    }
-    Ok(ResolvedRuntime::Ready(download_and_install(None, None)?))
+    download_and_install(None, None)
 }
 
 // ---------------------------------------------------------------------------
