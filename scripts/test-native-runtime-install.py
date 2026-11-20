@@ -22,14 +22,32 @@ class FixtureInstallationTests(unittest.TestCase):
         workflow = (scripts.parent / '.github/workflows/release-native-validation.yml').read_text(encoding='utf-8')
         expression = re.search(r'include: \$\{\{ fromJSON\((.*)\) \}\}', workflow)
         self.assertIsNotNone(expression)
-        self.assertTrue(expression[1].startswith("inputs.recovery_matrix || "))
-        full, = [json.loads(value) for value in re.findall(r"'(\[.*?\])'", expression[1])]
+        matrix = re.fullmatch(
+            r"inputs\.recovery_matrix \|\| format\('(\[\{0\}\{1\}\{2\}\])', '([^']+)', "
+            r"!inputs\.shard_macos_upgrades && '([^']+)' \|\| '', '([^']+)'\)",
+            expression[1],
+        )
+        self.assertIsNotNone(matrix)
+        template, before, apple, after = matrix.groups()
+        full = json.loads(template.format(before, apple, after))
         manifest = json.loads((scripts.parent / 'npm/artifact-manifest.json').read_text(encoding='utf-8'))
         self.assertEqual(sorted(row['target'] for row in full), sorted(row['triple'] for row in manifest['targets']))
-        self.assertEqual([row for row in full if row['target'] == 'aarch64-apple-darwin'],
-                         [{'os': 'macos-15', 'target': 'aarch64-apple-darwin'}])
+        apple_target = 'aarch64-apple-darwin'
+        self.assertEqual([row for row in full if row['target'] == apple_target],
+                         [{'os': 'macos-15', 'target': apple_target}])
+        self.assertEqual(json.loads(template.format(before, '', after)),
+                         [row for row in full if row['target'] != apple_target])
+        workflow, apple_jobs = workflow.split('\n  macos-native:\n', 1)
+        apple_setup = apple_jobs.split('\n  macos-upgrade-shards:\n', 1)[0]
+        self.assertIn('if: inputs.shard_macos_upgrades', apple_setup)
+        self.assertIn(f'target: [{apple_target}]', apple_setup)
+        self.assertIn('runs-on: macos-15', apple_setup)
+        self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', apple_setup)
+        self.assertIn('test "$(uname -m)" = arm64', apple_setup)
+        self.assertLess(apple_setup.index('python -m venv "$RUNNER_TEMP/upgrade-python"'),
+                        apple_setup.index('      - *native_autostart'))
         name = 'Verify OS autostart registration from verified release bytes'
-        step = workflow.split('      - name: ' + name + '\n')[1].split('\n      - ')[0]
+        step = workflow.split('      - &native_autostart\n        name: ' + name + '\n')[1].split('\n      - ')[0]
         self.assertIn("if: inputs.validation_profile == 'full' && !inputs.musl_source_recovery\n", step)
         self.assertNotIn('inputs.artifact_source', step)  # Candidate and published full use the same verified archive.
         self.assertIn('set -euo pipefail', step)
@@ -42,7 +60,8 @@ class FixtureInstallationTests(unittest.TestCase):
         self.assertIn('py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"', step)
         self.assertIn('"$py" scripts/test-runtime-autostart.py --binary "$exe" --register \\\n'
                       '            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"', step)
-        self.assertLess(workflow.index('run: node npm/scripts/extract-artifact.mjs validated-cli'), workflow.index(name))
+        self.assertLess(workflow.index('run: &native_extract_run node npm/scripts/extract-artifact.mjs validated-cli'),
+                        workflow.index(name))
         preparation = 'Prepare isolated upgrade Python and the fixed Windows wheel key'
         self.assertLess(workflow.index(preparation), workflow.index(name))
         runtime_install = 'Install and verify the official pinned standalone Runtime'
