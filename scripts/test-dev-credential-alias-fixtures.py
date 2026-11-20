@@ -956,8 +956,13 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(baseline['observed_normalizations'], 4)
         self.assertFalse(baseline['initial_raw_snapshots_overwritten'])
         private = (USER + ' ' + PASSWORD + ' ' + SUPER).encode()
+        libc_assertion = (b'gnome-keyring-daemon: /private/' + private
+                          + b'/egg-secure-memory.c:560: sec_free: Assertion `' + private + b"' failed.\n")
         for stderr, code, expected in (
                 (b'Bail out! Gkm:ERROR:/private/' + private + b'.c:42:function: assertion failed: (' + private + b')', -6, 'glib_assertion'),
+                (libc_assertion, -6, 'libc_assertion'),
+                (libc_assertion, -5, 'unknown'),
+                (libc_assertion.replace(b'egg-secure-memory.c', b'unknown.c'), -6, 'unknown'),
                 (b'free(): double free detected ' + private, -6, 'allocator_double_free'),
                 (b'double free or corruption ' + private, -6, 'allocator_corruption'),
                 (b'malloc(): corrupted ' + private, -6, 'allocator_corruption'),
@@ -968,6 +973,11 @@ class SnapshotTests(unittest.TestCase):
                 (private, -6, 'unknown'), (b'ERROR:file.c:42:fn: assertion failed', None, 'unknown'),
                 (b'ERROR:file.c:42:fn: assertion failed', 0, 'unknown')):
             self.assertEqual(secret_service.provider_abort_type(stderr, code), expected)
+        location = secret_service.provider_abort_location(libc_assertion, -6)
+        self.assertEqual(location, dict(file='egg-secure-memory.c', line=560, function='sec_free'))
+        for value in (USER, PASSWORD, SUPER, '/private/', 'Assertion'):
+            self.assertNotIn(value, json.dumps(location))
+        self.assertEqual(secret_service.provider_abort_location(libc_assertion, -5), 'unknown')
         for filename in (b'gkd-secret-service.c', b'gkm-secret-item.c', b'egg-secure-memory.c', b'gmain.c'):
             header = b'Bail out! Gkm:ERROR:/private/' + private + b'/' + filename + b':42:some_function: assertion failed: (' + private + b')'
             location = secret_service.provider_abort_location(header, -6)
@@ -978,6 +988,7 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(secret_service.provider_abort_location(header, None), 'unknown')
             self.assertEqual(secret_service.provider_abort_location(header, 0), 'unknown')
         for header in (
+                libc_assertion.replace(b'egg-secure-memory.c', b'unknown.c'),
                 b'ERROR:/private/' + private + b'.c:42:some_function: assertion failed: (private)',
                 b'ERROR:/private/unknown.c:42:some_function: assertion failed: (private)',
                 b'ERROR:/private/gkm-secret-item.c:0:some_function: assertion failed: (private)',
