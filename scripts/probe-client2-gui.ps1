@@ -19,6 +19,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='Official')][Parameter(Mandatory,ParameterSetName='DesktopCandidate')][Parameter(Mandatory,ParameterSetName='CoreQuery')][string]$Client2Commit
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'client2-probe-process-tree.ps1')
 $publishedAssets = $env:ARTIFACT_SOURCE -ceq 'published-assets'
 $client2Candidate = $SourceCandidate -or $PSCmdlet.ParameterSetName -ceq 'DesktopCandidate'
 $publishedOnline = $publishedAssets -and -not $client2Candidate
@@ -267,13 +268,7 @@ function Assert-GuiProcessTrace($Events, $DesktopIds, $FixtureIds, [int]$ParentI
 }
 function Save-Report { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root 'report.json') -Encoding utf8NoBOM }
 function Descendants([int]$parentId) {
-    $all = @(Get-CimInstance Win32_Process)
-    $ids = [Collections.Generic.HashSet[int]]::new(); [void]$ids.Add($parentId)
-    do {
-        $added = $false
-        foreach ($item in $all) { if ($ids.Contains([int]$item.ParentProcessId) -and $ids.Add([int]$item.ProcessId)) { $added = $true } }
-    } while ($added)
-    @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
+    Get-Client2ProbeProcessTree @(Get-CimInstance Win32_Process) $parentId $desktopStarted $report.desktop.session_id $exe
 }
 # Checkpoint dates from Windows PowerShell 5 JSON lose sub-millisecond precision.
 # Only a decimal string preserves the full CIM UTC birth identity across hosts.

@@ -303,6 +303,9 @@ jobs:
       - name: Test focus readiness policy without product or credentials
         shell: powershell
         run: ./scripts/test-client2-focus-readiness.ps1
+      - name: Test process ownership for the Client2 GUI probe
+        shell: powershell
+        run: ./scripts/test-client2-cleanup-identity.ps1
 
   check-complete:
     if: ${{ always() }}

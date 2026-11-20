@@ -37,6 +37,25 @@ try { $null=Test-TrackedCreationIdentity ([pscustomobject]@{CreationDate='synthe
     $failed=$_.Exception.Message -ceq 'Cleanup process birth evidence is not typed'
 }
 if (-not $failed) { throw 'Untyped process birth was accepted' }
+# PID 30 belongs to a new fixture child. PID 40 has the same numeric parent but was born first.
+. (Join-Path $PSScriptRoot 'client2-probe-process-tree.ps1')
+$rootImage='C:\fixture\desktop.exe'
+$snapshot=@(
+    [pscustomobject]@{ProcessId=31;ParentProcessId=30;SessionId=2;CreationDate=$exact.AddSeconds(3)}
+    [pscustomobject]@{ProcessId=10;ParentProcessId=1;SessionId=2;CreationDate=$exact;ExecutablePath=$rootImage}
+    [pscustomobject]@{ProcessId=30;ParentProcessId=10;SessionId=2;CreationDate=$exact.AddSeconds(2)}
+    [pscustomobject]@{ProcessId=40;ParentProcessId=30;SessionId=2;CreationDate=$exact.AddSeconds(1)}
+    [pscustomobject]@{ProcessId=41;ParentProcessId=40;SessionId=2;CreationDate=$exact.AddSeconds(4)}
+    [pscustomobject]@{ProcessId=50;ParentProcessId=10;SessionId=3;CreationDate=$exact.AddSeconds(1)}
+    [pscustomobject]@{ProcessId=60;ParentProcessId=10;SessionId=2;CreationDate=$null}
+)
+$tree=@(Get-Client2ProbeProcessTree $snapshot 10 ($exact.Ticks+9) 2 $rootImage)
+if (($tree.ProcessId -join ',') -cne '31,10,30') { throw 'Process tree included a stale parent link or lost a real descendant' }
+$rejected=$false
+try { $null=Get-Client2ProbeProcessTree $snapshot 10 ($exact.Ticks+10) 2 $rootImage } catch {
+    $rejected=$_.Exception.Message -ceq 'Client2 process snapshot does not contain the original desktop'
+}
+if (-not $rejected) { throw 'Process tree accepted a different desktop lifetime' }
 Write-Output 'Synthetic cleanup identity checks passed (not native cleanup acceptance)'
 
 # Exercise the actual binding function with synthetic health/process records only.

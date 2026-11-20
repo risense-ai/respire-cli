@@ -9,6 +9,7 @@ on:
       - 'scripts/test-client2-launcher-compat.py'
       - 'scripts/probe-client2-gui.ps1'
       - 'scripts/probe-client2-gui-native.ps1'
+      - 'scripts/client2-probe-process-tree.ps1'
       - 'scripts/fetch-client2-runtime-candidate.py'
       - 'scripts/test-fetch-client2-runtime-candidate.py'
       - 'scripts/fixtures/client2-runtime-candidate.json'
