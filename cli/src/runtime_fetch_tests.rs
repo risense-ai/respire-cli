@@ -589,13 +589,11 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     anyhow::ensure!(is_progress_abort(&error));
     anyhow::ensure!(!format!("{error:#}").contains("downloads are disabled"),
         "legacy check happened after the download boundary");
-    let materialize = crate::mcp::materialize_bin()
-        .err()
-        .context("CLI materialization overwrote the old combined service")?;
-    anyhow::ensure!(materialize.contains("legacy_runtime_migration_required"));
-    anyhow::ensure!(crate::autostart::coordinate_materialization().is_err());
+    let materialized = crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(materialized == legacy);
+    anyhow::ensure!(!crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &legacy)
+        .map_err(anyhow::Error::msg)?);
     anyhow::ensure!(crate::autostart::restart_maintenance_locked().is_err());
-    anyhow::ensure!(fs::read(&legacy)? == legacy_bytes);
     anyhow::ensure!(fs::read(&session)? == b"legacy session bytes");
     anyhow::ensure!(fs::read(&library)? == b"legacy data bytes");
     anyhow::ensure!(fs::read(&endpoint)? == br#"{"v":1,"pid":0}"#);

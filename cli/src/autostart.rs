@@ -50,7 +50,7 @@ pub(crate) use supervise::{
 pub(crate) use lifecycle::current_boot_token as lifecycle_boot_token;
 pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
-    check_direct_access, check_managed_request, coordinate_materialization, credential_state,
+    check_direct_access, check_managed_request, credential_state,
     ensure_managed_locked, ensure_managed_locked_with_expectation, execute, managed_enabled, managed_id, may_reuse_runtime,
     note_credential_access, record_exit, restart_maintenance_locked, restart_stage,
     stop_managed_locked, verify_managed_boot, with_explicit_recovery,
