@@ -522,9 +522,12 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
         anyhow::ensure!(explicit.is_file(), "RSRS_RUNTIME_BIN does not name a file");
         return Ok(ResolvedRuntime::Ready(explicit));
     }
-    shared::migrate_legacy()?;
     if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
         return Ok(ResolvedRuntime::Ready(validate_installed(&manifest)?));
+    }
+    shared::migrate_legacy()?;
+    if let Some(binary) = managed_runtime_path()? {
+        return Ok(ResolvedRuntime::Ready(binary));
     }
     let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
     if legacy.is_file() {
@@ -1801,6 +1804,9 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
         // Client2 has already selected this image. Host commands do not migrate
         // or materialize a CLI; installation entry points reject embedding.
         return selected.verify().map(|_| ());
+    }
+    if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
+        return validate_installed(&manifest).map(|_| ());
     }
     verify_install_host()?;
     shared::migrate_legacy()?;

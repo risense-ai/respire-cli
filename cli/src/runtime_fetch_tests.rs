@@ -630,6 +630,10 @@ fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> 
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("fresh/missing/bin"));
     require_automatic_migration_safe()?;
     anyhow::ensure!(!root.exists() && !dir.path().join("fresh").exists());
+    let selected = install_lifecycle_fixture()?;
+    std::env::set_var("RSRS_BIN_DIR", &blocked);
+    require_automatic_migration_safe()?;
+    anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(selected));
     Ok(())
 }
 
