@@ -138,8 +138,6 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             *yes,
         )),
 
-        Some(Command::UpdateCheck { force, clear }) => Some(run_update_check(*force, *clear)),
-
         Some(Command::KeysExport { out }) => Some(run_keys_export(out.as_deref())),
 
         Some(Command::Config {
@@ -1252,6 +1250,7 @@ fn main_body() -> i32 {
                                 | Command::Capabilities
                                 | Command::Runtime { .. }
                                 | Command::Doctor { .. }
+                                | Command::UpdateCheck { .. }
                         )
                     ) =>
                 {
@@ -1519,6 +1518,11 @@ fn run_classify_config(
 }
 
 fn run(args: Cli) -> Result<()> {
+    if let Some(Command::UpdateCheck { force, clear }) = args.command.as_ref() {
+        set_json_mode(args.json || respire::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        return run_update_check(*force, *clear);
+    }
     // The binary's main wires the host hooks before dispatch; test builds and
     // in-process capture callers reach run() without main(), so wire them
     // idempotently here too (the first installation always wins).

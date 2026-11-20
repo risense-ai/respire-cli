@@ -12,14 +12,7 @@ pub fn control_roots() -> Result<(PathBuf, PathBuf)> {
 
 /// Keep validated roots and the selected profile tied to one client.json read.
 pub(crate) fn read_control_config() -> Result<(PathBuf, PathBuf, Option<serde_json::Value>)> {
-    if let Some(raw) = crate::env::var_os("RSRS_DATA_DIR") {
-        anyhow::ensure!(raw.to_str().is_some_and(|value| !value.trim().is_empty()),
-            "RSRS_DATA_DIR must be a nonempty UTF-8 path");
-        // Also validate an internally forwarded override that root selection ignores.
-        let value = raw.to_str().context("RSRS_DATA_DIR is not UTF-8")?;
-        absolute_control_path(crate::paths::expand_tilde(value.trim()))?;
-    }
-    let root = absolute_control_path(crate::paths::main_data_dir())?;
+    let root = control_installation_root()?;
     let config_path = absolute_control_path(crate::paths::client_config_path())?;
     let config = read_client_config(&config_path)?;
     // Validate even a configured path that legacy whole-installation isolation ignores.
@@ -29,6 +22,18 @@ pub(crate) fn read_control_config() -> Result<(PathBuf, PathBuf, Option<serde_js
     }
     let profile = absolute_control_path(crate::paths::data_dir_from_config(config.as_ref()))?;
     Ok((root, profile, config))
+}
+
+/// Resolve the installation root without reading or selecting a library.
+pub fn control_installation_root() -> Result<PathBuf> {
+    if let Some(raw) = crate::env::var_os("RSRS_DATA_DIR") {
+        anyhow::ensure!(raw.to_str().is_some_and(|value| !value.trim().is_empty()),
+            "RSRS_DATA_DIR must be a nonempty UTF-8 path");
+        // Also validate an internally forwarded override that root selection ignores.
+        let value = raw.to_str().context("RSRS_DATA_DIR is not UTF-8")?;
+        absolute_control_path(crate::paths::expand_tilde(value.trim()))?;
+    }
+    absolute_control_path(crate::paths::main_data_dir())
 }
 
 fn absolute_control_path(path: PathBuf) -> Result<PathBuf> {
