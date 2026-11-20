@@ -1840,7 +1840,7 @@ function Invoke-RecoveryMaterialAcceptance {
             Press-OfflineButton ([regex]::Unescape('^\u542f\u52a8 Runtime$'))
             try {
                 # Client2 checks the current endpoint for up to 3 seconds before its 90-second launch.
-                $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u505c\u6b62 Runtime$')) 95 -ObserveStartStopSelector
+                $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u505c\u6b62 Runtime$')) 95
             } catch {
                 $report.recovery.start_failure = Get-RecoveryStartFailure $clientLog $logOffset
                 throw
