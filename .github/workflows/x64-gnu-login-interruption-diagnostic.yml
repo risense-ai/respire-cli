@@ -16,6 +16,8 @@ jobs:
       CLI_TARGET: x86_64-unknown-linux-gnu
       CLI_SHA: 79083eb3fea58d476af5501c0ca73c4931924ec2
       CLI_VERSION: 2.0.0
+      CLI_PRODUCER_RUN_ID: '44893978988'
+      CLI_PRODUCER_ATTEMPT: '1'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -41,7 +43,10 @@ jobs:
           github-token: ${{ github.token }}
           path: candidate-proof
       - name: Verify the unchanged candidate CLI
-        run: node npm/scripts/extract-artifact.mjs validated-cli cli
+        run: |
+          set -euo pipefail
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          node npm/scripts/extract-artifact.mjs validated-cli cli
       - name: Reuse the candidate's exact public Runtime inventory
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,9 +66,6 @@ jobs:
           assert.equal(candidate.source.version, process.env.CLI_VERSION);
           assert.equal(candidate.source.run_id, 44893978988);
           assert.equal(candidate.source.run_attempt, 1);
-          const cliMetadata = JSON.parse(readFileSync(`validated-cli/cli-build-${process.env.CLI_TARGET}.json`));
-          assert.equal(String(cliMetadata.producer.run_id), '44893978988');
-          assert.equal(cliMetadata.producer.run_attempt, 1);
           const runtime = candidate.runtime;
           assert.equal(runtime.version, '2.0.0-dev.28');
           assert.equal(runtime.producer.run_id, 44679730133);
