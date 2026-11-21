@@ -9,6 +9,10 @@ on:
         description: Replay the isolated Linux x64 GNU old-library matrix against candidate 44899529957
         type: boolean
         default: false
+      arm64_musl_history_replay:
+        description: Replay the frozen dev.26 ARM64 musl historical library failures
+        type: boolean
+        default: false
       arm64_gnu_only:
         description: Run the base and supplemental suites on the exact Linux ARM64 GNU candidate
         type: boolean
@@ -82,14 +86,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ inputs.x64_gnu_history_replay || inputs.arm64_gnu_only || inputs.windows_arm64_history_replay || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
+    if: ${{ inputs.x64_gnu_history_replay || inputs.arm64_musl_history_replay || inputs.arm64_gnu_only || inputs.windows_arm64_history_replay || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
     name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.x64_gnu_history_replay && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]' || inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(inputs.x64_gnu_history_replay && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]' || inputs.arm64_musl_history_replay && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"}]' || inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -130,9 +134,11 @@ jobs:
           BUSINESS_ONLY: ${{ inputs.business_only }}
           ARM64_GNU_ONLY: ${{ inputs.arm64_gnu_only }}
           WINDOWS_ARM64_HISTORY_REPLAY: ${{ inputs.windows_arm64_history_replay }}
+          ARM64_MUSL_HISTORY_REPLAY: ${{ inputs.arm64_musl_history_replay }}
           X64_GNU_HISTORY_REPLAY: ${{ inputs.x64_gnu_history_replay }}
           EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
         run: |
+          node -e 'if(process.env.ARM64_MUSL_HISTORY_REPLAY==="true"&&(process.env.DATABASE_SYNC_ONLY!=="true"||["API_ONLY","LOCAL_API_ONLY","BUSINESS_ONLY","ARM64_GNU_ONLY","WINDOWS_ARM64_HISTORY_REPLAY","X64_GNU_HISTORY_REPLAY"].some(key=>process.env[key]==="true")||process.env.CLI_RUN_ID!=="44936644212"||process.env.CLI_SHA!=="e6cbc8de30c2bd04f36b022146fb23253da90c20"||process.env.HISTORY_SOURCES!=="v1.0.8,v1.0.9")) throw new Error("ARM64 musl history replay requires the exact dev.26 candidate and the two unreported sources")'
           node -e 'if(process.env.X64_GNU_HISTORY_REPLAY==="true"&&(process.env.DATABASE_SYNC_ONLY!=="true"||["API_ONLY","LOCAL_API_ONLY","BUSINESS_ONLY","ARM64_GNU_ONLY","WINDOWS_ARM64_HISTORY_REPLAY"].some(key=>process.env[key]==="true"))) throw new Error("x64 GNU history replay requires only database sync")'
           node -e 'if(process.env.ARM64_GNU_ONLY==="true"&&["API_ONLY","LOCAL_API_ONLY","DATABASE_SYNC_ONLY","BUSINESS_ONLY"].some(key=>process.env[key]==="true")) throw new Error("ARM64 GNU accepts only the base and supplemental diagnostic scope")'
           node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.DATABASE_SYNC_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
@@ -144,6 +150,9 @@ jobs:
       - name: Require a native Linux ARM64 runner
         if: inputs.arm64_gnu_only
         run: bash scripts/require-native-linux-arm64.sh aarch64-unknown-linux-gnu
+      - name: Require a native Linux ARM64 musl runner
+        if: inputs.arm64_musl_history_replay
+        run: bash scripts/require-native-linux-arm64.sh aarch64-unknown-linux-musl
       - name: Verify the original release build
         if: inputs.cli_run_id != ''
         shell: bash
