@@ -12,6 +12,69 @@ concurrency:
   group: cli-ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 jobs:
+  original-arm64-login-replay:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'codex/cli-arm64-login-replay-20261121'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
+    env:
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      CLI_TARGET: aarch64-unknown-linux-gnu
+      RSRS_RUNTIME_TRIPLE: aarch64-unknown-linux-gnu
+      CLI_VERSION: 2.0.0-dev.25
+      CLI_SHA: a83e5eec036d566211f34fed22fdf6da112cb6b7
+      CLI_PRODUCER_RUN_ID: '44848100241'
+      CLI_PRODUCER_ATTEMPT: '1'
+      CLI_BINARY_SHA256: 042cf7dce4a3ffb7c9cb049aa977224638d3e86ddcfe6b881f1b85acd93b9af6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the original candidate bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/require-native-linux-arm64.sh "$CLI_TARGET"
+          zip="$RUNNER_TEMP/cli-original.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/14684331616/zip" > "$zip"
+          printf '%s  %s\n' abe4a0a99ef98a66768c0ca2806e0f0a48d6d6573acf86ae66a233ddb337b083 "$zip" | sha256sum --check
+          unzip -q "$zip" -d validated-cli
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          node npm/scripts/extract-artifact.mjs validated-cli cli
+          printf '%s  %s\n' "$CLI_BINARY_SHA256" cli/rsrs | sha256sum --check
+      - name: Verify frozen Runtime and prepare a public model
+        run: |
+          set -euo pipefail
+          RSRS_DATA_DIR="$RUNNER_TEMP/runtime-original" node scripts/ci-install-pinned-runtime.mjs cli/rsrs
+          runtime="$(realpath "$RUNNER_TEMP/runtime-original/bin/runtime/2.0.0-dev.28/rsrs-runtime")"
+          printf '%s  %s\n' 7f0f5be1ac04af29c7ffd224e58529632d30be7beec30f59d04a273663b24084 "$runtime" | sha256sum --check
+          RSRS_DATA_DIR="$RUNNER_TEMP/model-preparation" RSRS_M3_DIR="$RUNNER_TEMP/model-preparation/models" cli/rsrs --direct model install-m3 --json
+      - name: Replay the original native login continuation test
+        run: |
+          set -euo pipefail
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
+          python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py \
+            --native-credentials --binary "$(realpath cli/rsrs)" --binary-sha256 "$CLI_BINARY_SHA256" \
+            --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" \
+            --model-dir "$RUNNER_TEMP/model-preparation/models"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arm64-original-login-replay
+          path: ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+          if-no-files-found: warn
   workspace-tests:
     outputs:
       rust_cache_key: ${{ steps.rust-key.outputs.key }}
