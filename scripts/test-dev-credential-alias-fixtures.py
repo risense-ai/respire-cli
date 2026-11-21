@@ -958,7 +958,14 @@ class SnapshotTests(unittest.TestCase):
         private = (USER + ' ' + PASSWORD + ' ' + SUPER).encode()
         libc_assertion = (b'gnome-keyring-daemon: /private/' + private
                           + b'/egg-secure-memory.c:560: sec_free: Assertion `' + private + b"' failed.\n")
+        negotiation_abort = (b"gkd_secret_service_get_pkcs11_session: assertion 'client' failed\n"
+                             b"aes_negotiate: assertion 'session' failed\n"
+                             b"g_variant_new: expected GVariant of type 'v' " + private)
         for stderr, code, expected in (
+                (negotiation_abort, -6, 'secret_service_session_negotiation'),
+                (negotiation_abort, -5, 'secret_service_session_negotiation'),
+                (negotiation_abort, 0, 'unknown'),
+                (negotiation_abort.splitlines()[0], -6, 'unknown'),
                 (b'Bail out! Gkm:ERROR:/private/' + private + b'.c:42:function: assertion failed: (' + private + b')', -6, 'glib_assertion'),
                 (libc_assertion, -6, 'libc_assertion'),
                 (libc_assertion, -5, 'unknown'),

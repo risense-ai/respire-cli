@@ -58,6 +58,10 @@ def provider_abort_type(stderr, exit_code):
     # Linux SIGTRAP/SIGABRT; raw text, paths and assertion values stay private.
     if exit_code not in (-5, -6):
         return "unknown"
+    if (b"gkd_secret_service_get_pkcs11_session: assertion 'client' failed" in stderr
+            and b"aes_negotiate: assertion 'session' failed" in stderr
+            and b"g_variant_new: expected GVariant of type 'v'" in stderr):
+        return "secret_service_session_negotiation"
     if re.search(rb"(?m)^(?:Bail out! )?(?:[A-Za-z0-9_-]+:)?ERROR:[^\r\n]+: assertion failed", stderr):
         return "glib_assertion"
     if exit_code == -6 and PROVIDER_LIBC_ASSERTION.search(stderr):
