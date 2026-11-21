@@ -188,6 +188,9 @@ jobs:
           test "$RUNTIME_SOURCE" = "$(gh api repos/risense-ai/respire-runtime/commits/v2.0.0-dev.28 --jq .sha)"
           archive="$RUNNER_TEMP/rsrs-runtime-aarch64-unknown-linux-musl.tar.gz"
           gh release download v2.0.0-dev.28 -R risense-ai/respire-runtime -p "$(basename "$archive")" -O "$archive"
+          metadata="$RUNNER_TEMP/runtime-build-aarch64-unknown-linux-musl.json"
+          gh release download v2.0.0-dev.28 -R risense-ai/respire-runtime -p "$(basename "$metadata")" -O "$metadata"
+          printf '%s  %s\n' 4852c47a54430c03aa90244f5b4dad8a748215260efeb60b56e17ce9b5c2c1b4 "$metadata" | sha256sum --check
           printf '%s  %s\n' d4f56d16a286ea34d4eb9dec6a4f36e1918dd5eaa09e80e8e4308bbf8b86c946 "$archive" | sha256sum --check
       - name: Replay the ARM64 current-user service lifecycle
         if: matrix.os == 'ubuntu-24.04-arm'
