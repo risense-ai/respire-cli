@@ -89,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.x64_gnu_history_replay && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]' || inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(inputs.x64_gnu_history_replay && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]' || inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || inputs.database_sync_only && '[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || (inputs.local_api_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
