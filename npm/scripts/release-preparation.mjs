@@ -15,6 +15,7 @@ import {recoveryWorkflow,muslPreparationWorkflow,recoveryContext,validateRecover
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const CLI_G1_WORKFLOW='.github/workflows/g1-cli-source-evidence.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
+const STABLE_VERSION=/^\d+\.\d+\.\d+$/;
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const positive=value=>/^[1-9]\d*$/.test(String(value))&&Number.isSafeInteger(Number(value));
@@ -294,7 +295,7 @@ export function assertPreparationOrigin(link,source){
 export function validateStableCliExecution(receipt,manifest,run,jobs,readTarget){
   const {source,packs,assets}=receipt;
   const producer=source.producer || source;
-  requireValue(/^\d+\.\d+\.\d+$/.test(source.version)&&frontendLayout(manifest)&&manifest.targets.length===8,
+  requireValue(STABLE_VERSION.test(source.version)&&frontendLayout(manifest)&&manifest.targets.length===8,
     'Stable CLI execution requires an eight-target frontend preparation');
   requireValue(positive(run?.id)&&positive(run.run_attempt)&&run.repository?.full_name===REPO&&
     run.head_repository?.full_name===REPO&&run.path===CLI_G1_WORKFLOW&&run.event==='workflow_dispatch'&&
@@ -326,11 +327,15 @@ export function validateStableCliExecution(receipt,manifest,run,jobs,readTarget)
   return {run_id:String(run.id),run_attempt:Number(run.run_attempt),candidate_sha256:candidate};
 }
 
-export function readStableCliExecution(result,runId){
+export function readStableCliExecution(result,runId,{before}={}){
   requireValue(positive(runId),'Invalid CLI G1 run ID');
   const route=`repos/${REPO}/actions/runs/${runId}`;
   const run=api(route);
   requireValue(String(run.id)===String(runId)&&positive(run.run_attempt),'CLI G1 attempt identity differs');
+  if(before){
+    const completed=parseTimestamp(run.updated_at),trigger=parseTimestamp(before);
+    requireValue(completed!==null&&trigger!==null&&completed<=trigger,'CLI G1 must complete before the publication trigger');
+  }
   const jobs=pages(`${route}/attempts/${run.run_attempt}/jobs?per_page=100`).flatMap(page=>page.jobs);
   const artifacts=pages(`${route}/artifacts?per_page=100`).flatMap(page=>page.artifacts);
   return validateStableCliExecution(result.receipt,result.context.manifest,run,jobs,target=>{
@@ -341,9 +346,11 @@ export function readStableCliExecution(result,runId){
   });
 }
 export function currentPublicationOwner(sha,version){
+  const g1Run=process.env.CLI_G1_RUN||'';
+  const versionAuthorized=g1Run ? positive(g1Run)&&STABLE_VERSION.test(version||'') : /^\d+\.\d+\.\d+-dev\.[1-9]\d*$/.test(version||'');
   requireValue(process.env.GITHUB_REPOSITORY===REPO&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch'&&
     process.env.GITHUB_REF==='refs/heads/main'&&positive(process.env.GITHUB_RUN_ID)&&positive(process.env.GITHUB_RUN_ATTEMPT)&&
-    SHA.test(sha||'')&&SHA.test(process.env.GITHUB_SHA||'')&&/^\d+\.\d+\.\d+-dev\.[1-9]\d*$/.test(version||''),
+    SHA.test(sha||'')&&SHA.test(process.env.GITHUB_SHA||'')&&versionAuthorized,
     'Prepared publication requires a trusted main dispatch');
   const owner={repository:REPO,workflow:WORKFLOW,run_id:String(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),
     sha,version,workflow_head_sha:process.env.GITHUB_SHA};
@@ -365,10 +372,13 @@ export function inspectPreparation(runId,sha,version){
   const {owner,run}=currentPublicationOwner(sha,result.receipt.source.version);
   validatePreparationLink(result.link,owner);
   requirePreparationBeforeTrigger(result,run);
+  const stableProof=STABLE_VERSION.test(owner.version)
+    ? readStableCliExecution(result,process.env.CLI_G1_RUN,{before:run.created_at}) : undefined;
   writeFileSync('prepared-consumer.json',JSON.stringify({schema:1,kind:'prepared-consumer',state:'reading',owner,
-    origin:result.link,created_at:new Date().toISOString()},null,2)+'\n');
+    origin:result.link,stable_cli_execution:stableProof,created_at:new Date().toISOString()},null,2)+'\n');
   // Only public artifact IDs and the exact version are workflow outputs.
   setOutput({prepared_run:result.receipt.source.run_id,prepared_version:result.receipt.source.version,
+    stable_cli_execution_verified:Boolean(stableProof),
     prepared_attempt:result.receipt.source.run_attempt,prepared_artifact_id:result.link.artifact.id,
     prepared_binary_run:(result.receipt.source.producer || result.receipt.source).run_id,
     prepared_artifact_digest:result.link.artifact.digest,prepared_receipt_sha256:result.link.receipt_sha256,
