@@ -1,16 +1,15 @@
 # Release validation
 
-## Coordinated DEV upgrade scope
+## Independent release validation
 
-Validate the new protocol-compatible CLI, Runtime and Client2 together. Each
-component keeps its own version and dependency locks; matching component
-versions, source commits or Core SDK versions is not a protocol requirement.
-Source and artifact digests identify the tested products and remain mandatory
-for evidence and release integrity.
+Each component has its own release channel, version and dependency locks.
+Exercise compatible combinations through wire protocol v1, the methods used
+by each host, and the required capabilities. Record exact source and artifact
+digests for reproducible acceptance and release integrity.
 
-Historical releases prepare the databases used by upgrade tests. After updating
-the components, the new CLI obtains the supported new Runtime and the new stack
-must preserve existing data, integrity and read/write behavior. Keep latest
+Historical releases prepare the databases used by upgrade tests. Upgrade one
+component at a time and verify data integrity and read/write behavior with
+the remaining components unchanged. Keep latest
 applicable stable and historical stable migration coverage. Both critical and
 full profiles also retain DEV checkpoints that changed persistent formats;
 ordinary DEV revisions do not add redundant upgrade combinations. The policy
@@ -18,12 +17,11 @@ in `scripts/published_upgrade_policy.py` retains formal stable releases and the
 registered database-changing DEV checkpoints `v1.0.11-dev.1` and
 `v1.0.17-dev.6`.
 
-Old CLI or Client2 operating against the new Runtime, and new clients operating
-against the old Runtime, are not acceptance targets. Preserve database recovery,
-locked restart, host-key delivery, login/sync and remember/recall assertions for
-the new stack. Source-only CI is not product or upgrade acceptance. Publish
-Runtime before updating the CLI's download default and supported minimum, then
-publish the hosts and verify actual public assets and database upgrades.
+Test old-host online interoperability separately from database migration.
+Preserve database recovery, locked restart, host-key delivery, login and sync,
+recall, remember and the ability to query the original write receipt. Run the
+checks with each host installed alone. Verify actual public assets and database
+upgrades after publishing each component.
 
 The following release mechanics include historical release inventories. Their
 platform counts and version examples are not a current publication receipt.
@@ -48,8 +46,10 @@ All eight CLI SDK pins bind the same reviewed SDK version and its per-target dig
 `sdk/core-sdk.lock.json`.
 
 Current frontend releases use eight CLI targets: Linux x64/ARM64 GNU and musl,
-macOS Intel/ARM64, and Windows x64/ARM64. Runtime stays pinned to
-`2.0.0-dev.27` for the current CLI release train. Stable publication remains
+macOS Intel/ARM64, and Windows x64/ARM64.
+[`runtime-test-fixture.json`](../.github/runtime-test-fixture.json) selects the
+Runtime used in release regression. The installed CLI selects Runtime from the
+requested Runtime channel or an explicit version. Stable publication remains
 disabled until separate complete G1 evidence is implemented and authorized.
 
 `critical` runs build and package checks only and cannot publish. `full` is the
