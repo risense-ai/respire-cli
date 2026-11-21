@@ -5,6 +5,10 @@ name: Dev server sweep
 on:
   workflow_dispatch:
     inputs:
+      x64_gnu_history_replay:
+        description: Replay the isolated Linux x64 GNU old-library matrix against candidate 44899529957
+        type: boolean
+        default: false
       arm64_gnu_only:
         description: Run the base and supplemental suites on the exact Linux ARM64 GNU candidate
         type: boolean
@@ -78,14 +82,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ inputs.arm64_gnu_only || inputs.windows_arm64_history_replay || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
+    if: ${{ inputs.x64_gnu_history_replay || inputs.arm64_gnu_only || inputs.windows_arm64_history_replay || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
     name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(inputs.x64_gnu_history_replay && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]' || inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -125,8 +129,11 @@ jobs:
           HISTORY_SOURCES: ${{ inputs.history_sources }}
           BUSINESS_ONLY: ${{ inputs.business_only }}
           ARM64_GNU_ONLY: ${{ inputs.arm64_gnu_only }}
+          WINDOWS_ARM64_HISTORY_REPLAY: ${{ inputs.windows_arm64_history_replay }}
+          X64_GNU_HISTORY_REPLAY: ${{ inputs.x64_gnu_history_replay }}
           EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
         run: |
+          node -e 'if(process.env.X64_GNU_HISTORY_REPLAY==="true"&&(process.env.DATABASE_SYNC_ONLY!=="true"||["API_ONLY","LOCAL_API_ONLY","BUSINESS_ONLY","ARM64_GNU_ONLY","WINDOWS_ARM64_HISTORY_REPLAY"].some(key=>process.env[key]==="true"))) throw new Error("x64 GNU history replay requires only database sync")'
           node -e 'if(process.env.ARM64_GNU_ONLY==="true"&&["API_ONLY","LOCAL_API_ONLY","DATABASE_SYNC_ONLY","BUSINESS_ONLY"].some(key=>process.env[key]==="true")) throw new Error("ARM64 GNU accepts only the base and supplemental diagnostic scope")'
           node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.DATABASE_SYNC_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
@@ -240,9 +247,32 @@ jobs:
           if(process.env.BUSINESS_ONLY==='true') evidence.expected_runtime_source_sha=process.env.EXPECTED_RUNTIME_SHA;
           fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'standalone-diagnostic-identity.json'),JSON.stringify(evidence,null,2)+'\n');
           NODE
+      - name: Verify the exact GNU history replay inputs
+        id: gnu_history_replay
+        if: inputs.x64_gnu_history_replay
+        shell: bash
+        env:
+          DATABASE_SYNC_ONLY: ${{ inputs.database_sync_only }}
+          HISTORY_SOURCES: ${{ inputs.history_sources }}
+        run: |
+          set -euo pipefail
+          test "$DATABASE_SYNC_ONLY" = true
+          test "$HISTORY_SOURCES" = v1.0.11,v1.0.11-dev.1,v1.0.12,v1.0.15,v1.0.16,v1.0.17-dev.6,v1.0.18,v1.0.19,v1.0.20,v1.0.7,v1.0.8,v1.0.9
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const proof = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'standalone-diagnostic-identity.json')));
+          assert.equal(proof.producer.run_id.toString(), '44899529957');
+          assert.equal(Number(proof.producer.run_attempt), 1);
+          assert.equal(proof.target, 'x86_64-unknown-linux-gnu');
+          assert.equal(proof.cli.binary_sha256, 'd157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447');
+          assert.equal(proof.runtime.binary_sha256, '95852e50e8534a0ad46a457c6f6883f21be171737ef73e933dff12e137ee7c52');
+          assert.equal(proof.runtime.release_metadata.archive_sha256, 'a6ed1c49fdd35169680bc9cc9875652b2e2e2af1d6e8aff2639ebdc5f5deab74');
+          NODE
       - name: Prepare persistent native credentials for diagnostic fixtures
         id: native_credentials
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standalone_runtime.outcome == 'success' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standalone_runtime.outcome == 'success' && (!inputs.x64_gnu_history_replay || steps.gnu_history_replay.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -476,7 +506,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.arm64_gnu_only && !inputs.windows_arm64_history_replay && !inputs.database_sync_only && !inputs.business_only }}
+    if: ${{ !inputs.x64_gnu_history_replay && !inputs.arm64_gnu_only && !inputs.windows_arm64_history_replay && !inputs.database_sync_only && !inputs.business_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:

@@ -21,8 +21,9 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const callHistory="      history_sources:\n        type: string\n        default: ''\n";
   const dispatchWindowsHistory="      windows_arm64_history_replay:\n        description: Replay the isolated Windows ARM64 v1.0.19 case against candidate 44886625312\n        type: boolean\n        default: false\n";
   const dispatchArmGnu="      arm64_gnu_only:\n        description: Run the base and supplemental suites on the exact Linux ARM64 GNU candidate\n        type: boolean\n        default: false\n";
+  const dispatchX64GnuHistory="      x64_gnu_history_replay:\n        description: Replay the isolated Linux x64 GNU old-library matrix against candidate 44899529957\n        type: boolean\n        default: false\n";
   const header=workflow.split('jobs:\n')[0];
-  const additionalInputs=[dispatchInput,callInput,dispatchRuntime,callRuntime,dispatchHistory,callHistory,dispatchArmGnu,dispatchWindowsHistory];
+  const additionalInputs=[dispatchInput,callInput,dispatchRuntime,callRuntime,dispatchHistory,callHistory,dispatchArmGnu,dispatchWindowsHistory,dispatchX64GnuHistory];
   for(const input of additionalInputs)assert(header.includes(input));
   assert.equal(hash(additionalInputs.reduce((original,input)=>original.replace(input,''),header)),'e22044c490d5efe81a4fdddd47d146b565302d1cecd112ee09aeb6115e65037b');
   const historyGuard=workflow.split('\n').find(line=>line.includes("throw new Error(\"Historical sources require database_sync_only\")")).trim().slice("node -e '".length,-1);
@@ -31,7 +32,7 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   assert.equal(hash(step('Verify the original release build')),'c07d866f172e6c28e49889fc0f3d8d5fa1ad6bf9ecb26724e4db35d2e2bbabfe');
   assert.equal(hash(step('Verify and extract the original binary')),'2cf493f2afd7eae32aa0f49ec56815a50dffafb00d64015d38b0b8a2c10ecc8b');
   const api=workflow.split('\n  api-smoke:\n')[1];
-  const apiGuard='if: ${{ !inputs.arm64_gnu_only && !inputs.windows_arm64_history_replay && !inputs.database_sync_only && !inputs.business_only }}';
+  const apiGuard='if: ${{ !inputs.x64_gnu_history_replay && !inputs.arm64_gnu_only && !inputs.windows_arm64_history_replay && !inputs.database_sync_only && !inputs.business_only }}';
   assert(api.includes(apiGuard));
   assert.equal(hash(api.replace(apiGuard,'if: ${{ !inputs.database_sync_only }}')),'f5f71f1f9d8e808add8ee4143b67b8b6c070099887bc4a2216cb9c7dec96402b');
   assert.match(workflow,/required=\[\.\.\.m.targets.map\(t=>`Release \(\$\{t.triple\}\)`\),'npm-dry-run'\]/);
@@ -56,6 +57,10 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const target=inputs=>runInNewContext(expression(matrix),{inputs,fromJSON:JSON.parse})[0].target;
   assert.equal(target(windowsHistory),'aarch64-pc-windows-msvc');
   assert.equal(target(armGnu),'aarch64-unknown-linux-gnu');
+  const x64GnuHistory={...normal,x64_gnu_history_replay:true,database_sync_only:true};
+  assert.equal(target(x64GnuHistory),'x86_64-unknown-linux-gnu');
+  assert.equal(evaluate(job('sweep'),x64GnuHistory),true);
+  assert.equal(evaluate(job('api-smoke'),x64GnuHistory),false);
   assert.match(workflow,/inputs\.arm64_gnu_only && '\[\{"os":"ubuntu-24\.04-arm","target":"aarch64-unknown-linux-gnu"\}\]'/);
   assert.match(step('Require a native Linux ARM64 runner'),/require-native-linux-arm64\.sh aarch64-unknown-linux-gnu/);
   assert.equal(evaluate(job('sweep'),business),true);assert.equal(evaluate(job('api-smoke'),business),false);
@@ -66,6 +71,12 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   assert.match(workflow,/inputs\.business_only\) && '\[\{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"\}\]'/);
   const serverChecks=[...step('Require the approved development server').matchAll(/node -e '([^']+)'/g)].map(m=>m[1]);
   const guards=serverChecks.filter(body=>body.includes('Choose one diagnostic scope'));
+  const x64Guard=serverChecks.find(body=>body.includes('x64 GNU history replay requires'));
+  const runX64Replay=(env)=>runInNewContext(x64Guard,{process:{env:{X64_GNU_HISTORY_REPLAY:'true',DATABASE_SYNC_ONLY:'true',...env}}});
+  assert.doesNotThrow(()=>runX64Replay({}));
+  assert.throws(()=>runX64Replay({DATABASE_SYNC_ONLY:'false'}),/requires only database sync/);
+  for (const scope of ['API_ONLY','LOCAL_API_ONLY','BUSINESS_ONLY','ARM64_GNU_ONLY','WINDOWS_ARM64_HISTORY_REPLAY'])
+    assert.throws(()=>runX64Replay({[scope]:'true'}),/requires only database sync/);
   assert.equal(guards.length,3);
   for(let mask=0;mask<16;mask++){
     const env=Object.fromEntries(['API_ONLY','LOCAL_API_ONLY','DATABASE_SYNC_ONLY','BUSINESS_ONLY'].map((name,i)=>[name,String(Boolean(mask&(1<<i)))]));
