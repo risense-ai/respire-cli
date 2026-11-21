@@ -14,6 +14,10 @@ on:
         description: SHA-256 of the original candidate.json bytes
         required: true
         type: string
+      cli_package_run_id:
+        description: Successful same-source Release run that built the frozen npm packages
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +28,9 @@ jobs:
     name: Coverage (core)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      npm_package_id: ${{ steps.packages.outputs.id }}
+      npm_package_attempt: ${{ steps.packages.outputs.attempt }}
     env:
       REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
@@ -72,6 +79,56 @@ jobs:
           assert.equal(String(artifact.workflow_run?.id), env.REQUIRED_CANDIDATE_RUN_ID);
           assert.equal(artifact.workflow_run?.head_sha, env.GITHUB_SHA);
           NODE
+      - name: Verify candidate npm package producer
+        id: packages
+        if: inputs.cli_package_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_RUN_ID: ${{ inputs.cli_package_run_id }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync} from 'node:fs';
+          const env = process.env;
+          const runId = env.PACKAGE_RUN_ID;
+          assert.match(runId, /^[1-9][0-9]*$/);
+          const base = `repos/${env.GITHUB_REPOSITORY}/actions`;
+          async function api(path) {
+            const response = await fetch(`${env.GITHUB_API_URL}/${base}/${path}`, {
+              headers: {authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json'}, redirect: 'error',
+            });
+            assert.ok(response.ok, 'Cannot verify the npm package producer');
+            return response.json();
+          }
+          const run = await api(`runs/${runId}`);
+          assert.equal(String(run.id), runId);
+          assert.equal(run.path, '.github/workflows/release.yml');
+          assert.equal(run.event, 'workflow_dispatch');
+          assert.equal(run.head_repository?.full_name, env.GITHUB_REPOSITORY);
+          assert.equal(run.head_branch, 'main');
+          assert.equal(run.head_sha, env.GITHUB_SHA);
+          assert.equal(run.status, 'completed');
+          assert.equal(run.conclusion, 'success');
+          const [jobs, artifacts] = await Promise.all([
+            api(`runs/${runId}/attempts/${run.run_attempt}/jobs?per_page=100`),
+            api(`runs/${runId}/artifacts?name=npm-release-packages`),
+          ]);
+          assert.equal(jobs.jobs.length, jobs.total_count, 'Incomplete producer job inventory');
+          const producers = jobs.jobs.filter(job => job.name === 'validate / npm-dry-run');
+          assert.equal(producers.length, 1);
+          const [producer] = producers;
+          assert.equal(producer.conclusion, 'success');
+          assert.equal(artifacts.total_count, 1);
+          const [artifact] = artifacts.artifacts;
+          assert.equal(artifact.name, 'npm-release-packages');
+          assert.equal(artifact.expired, false);
+          assert.equal(String(artifact.workflow_run?.id), runId);
+          assert.equal(artifact.workflow_run?.head_sha, env.GITHUB_SHA);
+          assert.match(artifact.digest, /^sha256:[a-f0-9]{64}$/);
+          assert.ok(Date.parse(artifact.created_at) >= Date.parse(producer.started_at) &&
+            Date.parse(artifact.created_at) <= Date.parse(producer.completed_at), 'npm artifact outside its producer job');
+          appendFileSync(env.GITHUB_OUTPUT, `id=${artifact.id}\nattempt=${run.run_attempt}\n`);
+          NODE
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -102,7 +159,7 @@ jobs:
           path: ${{ runner.temp }}/required-tests-raw-cli-core
           retention-days: 1
           if-no-files-found: error
-      - name: Produce only the two candidate-bound CLI source reports
+      - name: Produce the two candidate-bound CLI source reports
         env:
           REQUIRED_RAW_ARTIFACT_ID: ${{ steps.source-raw.outputs.artifact-id }}
         run: node scripts/produce-required-tests.mjs produce
@@ -112,3 +169,124 @@ jobs:
           path: ${{ runner.temp }}/required-tests-report-cli
           retention-days: 1
           if-no-files-found: error
+
+  native-packages:
+    name: Native npm package (${{ matrix.target }})
+    needs: coverage-tests
+    if: inputs.cli_package_run_id != ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-gnu}
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-musl}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl}
+          - {os: macos-15-intel, target: x86_64-apple-darwin}
+          - {os: macos-15, target: aarch64-apple-darwin}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc}
+          - {os: windows-11-arm, target: aarch64-pc-windows-msvc}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g1-source
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.cli_package_run_id }}
+          artifact-ids: ${{ needs.coverage-tests.outputs.npm_package_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/g1-npm-packs
+      - name: Install and execute the frozen package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          PACKAGE_RUN_ID: ${{ inputs.cli_package_run_id }}
+          PACKAGE_RUN_ATTEMPT: ${{ needs.coverage-tests.outputs.npm_package_attempt }}
+        run: >-
+          node scripts/verify-candidate-npm.mjs "$TARGET"
+          "$RUNNER_TEMP/g1-source/candidate.json" "$CANDIDATE_SHA256"
+          "$RUNNER_TEMP/g1-npm-packs" "$RUNNER_TEMP/g1-install"
+      - uses: actions/upload-artifact@v4
+        id: raw
+        with:
+          name: required-tests-raw-cli-npm-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g1-install/native-package-install.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Bind the execution report to the uploaded evidence
+        shell: bash
+        env:
+          RAW_ID: ${{ steps.raw.outputs.artifact-id }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync, writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const env = process.env;
+          const input = JSON.parse(readFileSync(join(env.RUNNER_TEMP, 'g1-install', 'native-package-install.json')));
+          assert.equal(input.scope, 'candidate-npm-native-install');
+          assert.equal(input.status, 'passed');
+          assert.equal(input.source_sha, env.GITHUB_SHA);
+          assert.equal(input.target, env.TARGET);
+          assert.match(env.RAW_ID, /^[1-9][0-9]*$/);
+          const report = {schema:2, test_id:'cli.release-assets-eight-target-matrix',
+            target:input.target, coverage:'real-artifact', status:input.status,
+            repository:env.GITHUB_REPOSITORY, source_sha:input.source_sha,
+            run_id:env.GITHUB_RUN_ID, run_attempt:env.GITHUB_RUN_ATTEMPT,
+            job_name:`Native npm package (${input.target})`, artifact_id:Number(env.RAW_ID),
+            artifact_name:`required-tests-raw-cli-npm-${input.target}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`,
+            candidate_sha256:input.candidate_sha256, actual_native_sdk:null,
+            cases:input.cases.map(name => ({name, status:'passed'}))};
+          writeFileSync(join(env.RUNNER_TEMP, 'native-npm-report.json'), JSON.stringify(report, null, 2)+'\n', {flag:'wx'});
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g1-cli-npm-report-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-npm-report.json
+          retention-days: 1
+          if-no-files-found: error
+
+  verify-cli-evidence:
+    name: Verify CLI execution evidence
+    needs: [coverage-tests, native-packages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g1-cli
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: g1-cli-npm-report-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/g1-native
+      - name: Verify the CLI registry against this attempt's source and native reports
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for directory in "$RUNNER_TEMP"/g1-native/g1-cli-npm-report-*; do
+            filename="$(basename "$directory")"
+            cp "$directory/native-npm-report.json" "$RUNNER_TEMP/g1-cli/reports/$filename.json"
+          done
+          node scripts/verify-required-tests.mjs --ci \
+            --candidate="$RUNNER_TEMP/g1-cli/candidate.json" --reports="$RUNNER_TEMP/g1-cli/reports"

@@ -75,10 +75,12 @@ No frozen candidate means no passing execution report.
 
 ## Scope and current producer state
 
-The two implemented CLI entries remain source tests. They do not satisfy
-published-asset or eight-target native acceptance. Runtime 8, Client2 4, and
-CLI 1 missing entries remain missing. No status, target, case, or reason is
-changed by this format migration.
+The CLI registry has two source tests and a native package matrix. Each
+matrix job installs the frozen candidate tarballs offline on its target OS
+and architecture. The job hashes the installed executable, runs it through
+the launcher, and checks a fresh Runtime inventory. The CLI evidence check
+requires all eight native reports and both source reports from one attempt.
+Full release regression and cross-product G1 remain separate checks.
 
 Raw source logs use a separate `evidence_class: source-raw` context with
 `gate: not-evaluated`; their schema 1 is not an execution-report schema.
@@ -102,8 +104,12 @@ The opt-in `g1-cli-source-evidence.yml` workflow produces the two CLI source
 reports on trusted main. Its dispatch inputs are `candidate_run_id`,
 `candidate_artifact_id` and `candidate_sha256`. The workflow keeps the
 `coverage-tests` producer identity and runs the Runtime installer fixture
-module. It contributes source evidence only. Real candidate asset execution
-and the stable publication gate remain separate.
+module. Supply `cli_package_run_id` to also run the native matrix. The source
+job verifies the successful main Release run, exact source, producing npm job
+and live artifact before the matrix downloads the selected archives. Leave
+the optional input empty to collect source reports alone. The native matrix
+requires `components.cli.launcher_archive_sha256` in the frozen candidate,
+along with the existing per-platform archive and executable digests.
 
 The core job passes the inputs as `REQUIRED_CANDIDATE_RUN_ID`,
 `REQUIRED_CANDIDATE_ARTIFACT_ID`, and `REQUIRED_CANDIDATE_SHA256`. Before
