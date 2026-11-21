@@ -106,7 +106,7 @@ pub enum RuntimeCommand {
         /// Exact Runtime release or the version of a local archive.
         #[arg(long, conflicts_with = "channel")]
         version: Option<String>,
-        /// Release channel (defaults to this CLI's release channel).
+        /// Release channel (defaults to the selected Runtime's channel, or dev on first install).
         #[arg(long, value_enum, conflicts_with = "file")]
         channel: Option<RuntimeChannel>,
         /// Override the download mirror origin (http/https, no path or credentials).
@@ -119,7 +119,7 @@ pub enum RuntimeCommand {
     Clean,
     /// Fetch and install the latest Runtime from the selected channel.
     Update {
-        /// Release channel (defaults to this CLI's release channel).
+        /// Release channel (defaults to the selected Runtime's channel, or dev on first install).
         #[arg(long, value_enum)]
         channel: Option<RuntimeChannel>,
     },

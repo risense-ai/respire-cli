@@ -298,6 +298,37 @@ fn install_placement_renames_the_full_triple_binary() -> Result<()> {
 }
 
 #[test]
+fn runtime_download_channel_follows_the_selected_runtime() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+    anyhow::ensure!(selected_runtime_channel_name()? == "dev");
+
+    let path = manifest_path();
+    fs::create_dir_all(path.parent().context("fixture manifest directory missing")?)?;
+    for (version, channel) in [
+        ("2.0.0-dev.28", "dev"),
+        ("2.0.0", "stable"),
+        ("2.0.0+build-with-hyphen", "stable"),
+    ] {
+        fs::write(
+            &path,
+            serde_json::to_vec(&ManagedManifest {
+                version: version.into(),
+                sha256: "0".repeat(64),
+                release: None,
+            })?,
+        )?;
+        anyhow::ensure!(selected_runtime_channel_name()? == channel);
+    }
+
+    fs::write(path, b"invalid manifest")?;
+    anyhow::ensure!(selected_runtime_channel_name().is_err());
+    Ok(())
+}
+
+#[test]
 fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     let triple = match release_triple() {
         Ok(triple) => triple,
