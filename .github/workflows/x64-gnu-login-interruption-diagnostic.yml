@@ -1,0 +1,131 @@
+name: Frozen Linux x64 GNU login interruption diagnostic
+
+on:
+  push:
+    branches: [codex/cli-x64-gnu-login-replay-20261121]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  interruption:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CLI_TARGET: x86_64-unknown-linux-gnu
+      CLI_SHA: 79083eb3fea58d476af5501c0ca73c4931924ec2
+      CLI_VERSION: 2.0.0
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '14703142635'
+          merge-multiple: true
+          run-id: 44893978988
+          github-token: ${{ github.token }}
+          path: validated-cli
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '14703511844'
+          merge-multiple: true
+          run-id: 44893978988
+          github-token: ${{ github.token }}
+          path: candidate-proof
+      - name: Verify the unchanged candidate CLI
+        run: node npm/scripts/extract-artifact.mjs validated-cli cli
+      - name: Reuse the candidate's exact public Runtime inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync, mkdirSync, appendFileSync, writeFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {createHash} from 'node:crypto';
+          import {inspectPublishedRelease, downloadPublishedAsset, publishedAssetNames} from './npm/scripts/extract-artifact.mjs';
+          const receipt = JSON.parse(readFileSync('candidate-proof/candidate-assets-receipt.json'));
+          assert.equal(receipt.target, process.env.CLI_TARGET);
+          assert.equal(receipt.assets_verified, true);
+          assert.equal(receipt.payloads_verified, true);
+          const candidate = receipt.candidate;
+          assert.equal(candidate.source.sha, process.env.CLI_SHA);
+          assert.equal(candidate.source.version, process.env.CLI_VERSION);
+          assert.equal(candidate.source.run_id, 44893978988);
+          assert.equal(candidate.source.run_attempt, 1);
+          const cliMetadata = JSON.parse(readFileSync(`validated-cli/cli-build-${process.env.CLI_TARGET}.json`));
+          assert.equal(String(cliMetadata.producer.run_id), '44893978988');
+          assert.equal(cliMetadata.producer.run_attempt, 1);
+          const runtime = candidate.runtime;
+          assert.equal(runtime.version, '2.0.0-dev.28');
+          assert.equal(runtime.producer.run_id, 44679730133);
+          assert.equal(runtime.producer.run_attempt, 1);
+          assert.equal(runtime.source_sha, '3e10e56a2c73e5ba54ce8c57b61c72aaf4b6bdb5');
+          assert.equal(receipt.payload_identity.cli_binary_sha256, 'd157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447');
+          await inspectPublishedRelease(runtime, {token: process.env.GH_TOKEN});
+          const folder = resolve('runtime-public'); mkdirSync(folder);
+          const [metaName, binaryName, archiveName] = publishedAssetNames('runtime', process.env.CLI_TARGET);
+          const asset = name => {const rows = runtime.assets.filter(a => a.name === name); assert.equal(rows.length, 1); return rows[0];};
+          assert.equal(asset(binaryName).sha256, '95852e50e8534a0ad46a457c6f6883f21be171737ef73e933dff12e137ee7c52');
+          assert.equal(asset(archiveName).sha256, 'a6ed1c49fdd35169680bc9cc9875652b2e2e2af1d6e8aff2639ebdc5f5deab74');
+          for (const name of [metaName, archiveName]) await downloadPublishedAsset(runtime, asset(name), folder, {token: process.env.GH_TOKEN});
+          const values = {
+            RSRS_ARTIFACT_SOURCE: 'published-assets', RSRS_RUNTIME_TRIPLE: process.env.CLI_TARGET,
+            RSRS_PUBLISHED_RUNTIME_VERSION: runtime.version,
+            RSRS_PUBLISHED_RUNTIME_SHA256: asset(binaryName).sha256,
+            RSRS_PUBLISHED_RUNTIME_ARCHIVE: resolve(folder, archiveName),
+            RSRS_PUBLISHED_RUNTIME_METADATA: resolve(folder, metaName),
+            RSRS_PUBLISHED_RUNTIME_METADATA_SHA256: asset(metaName).sha256,
+            RSRS_PUBLISHED_BUNDLE_SHA256: asset(archiveName).sha256,
+            RSRS_PUBLISHED_ASSETS_SHA256: createHash('sha256').update(JSON.stringify(candidate)).digest('hex'),
+          };
+          for (const [key, value] of Object.entries(values)) {
+            assert.ok(!/[\r\n]/.test(value)); appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
+          }
+          writeFileSync(resolve(process.env.RUNNER_TEMP,'frozen-input.json'), JSON.stringify({
+            diagnostic_only:true, source:candidate.source, target:receipt.target,
+            cli_binary_sha256:receipt.payload_identity.cli_binary_sha256,
+            runtime_version:runtime.version, runtime_binary_sha256:asset(binaryName).sha256,
+            runtime_archive_sha256:asset(archiveName).sha256,
+          }, null, 2)+'\n', {flag:'wx'});
+          NODE
+      - name: Prepare only native fixture dependencies
+        run: |
+          set -euo pipefail
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
+          python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
+          echo "key=$(python3 scripts/native-model-cache.py key)" >> "$GITHUB_OUTPUT"
+        id: models
+      - uses: actions/cache/restore@v4
+        with:
+          path: .native-model-cache
+          key: ${{ steps.models.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Verify and restore only pinned public model files
+        run: python3 scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/models/bge-m3" --legacy-dir "$RUNNER_TEMP/unused-legacy-model"
+      - name: Run existing contracts and the isolated loopback interruption fixture
+        run: |
+          set -euo pipefail
+          python3 scripts/test-login-interruption-contract.py
+          binary="$(realpath cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          test "$checksum" = d157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/models/bge-m3"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-x64-gnu-login-interruption-diagnostic
+          path: |
+            ${{ runner.temp }}/frozen-input.json
+            ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+          if-no-files-found: error
