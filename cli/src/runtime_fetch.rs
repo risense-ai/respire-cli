@@ -2027,8 +2027,15 @@ pub struct InstalledRuntime {
 /// List installed runtime version directories, newest first. Without a
 /// manifest the newest installed version counts as current.
 pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
+    let entries = match fs::read_dir(runtime_dir()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && read_manifest()?.is_none() => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error).context("failed to list the runtime directory"),
+    };
     let mut installed = Vec::new();
-    for entry in fs::read_dir(runtime_dir()).context("failed to list the runtime directory")? {
+    for entry in entries {
         let entry = entry.context("failed to list the runtime directory")?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };

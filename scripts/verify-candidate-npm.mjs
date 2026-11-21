@@ -47,7 +47,6 @@ const home = join(fixture, 'home');
 const temporary = join(fixture, 'tmp');
 mkdirSync(home);
 mkdirSync(temporary);
-mkdirSync(join(profile, 'bin', 'runtime'), {recursive:true});
 writeFileSync(join(fixture, 'package.json'), '{"private":true}\n', {flag:'wx'});
 for (const [name, pack] of [['launcher.tgz', launcherPack], ['platform.tgz', platformPack]]) {
   const bytes = readFileSync(pack.tarballPath);
