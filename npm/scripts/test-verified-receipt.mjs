@@ -34,6 +34,9 @@ test('receipt JSON is decoded only after independently matching the actual ZIP b
   assert.deepEqual(read(archive([['release-prepared.json',JSON.stringify(large)]])),large);
   assert.deepEqual(read(archive([['prepared-import.json',JSON.stringify(large)]]),undefined,'prepared-import.json'),large);
   assert.throws(()=>read(archive([['prepared-consumer.json',JSON.stringify(large)]]),undefined,'prepared-consumer.json'),{code:'ENOBUFS'});
+  const native=archive([['native-package-install.json','{"scope":"candidate-npm-native-install"}']]);
+  assert.deepEqual(read(native,undefined,'native-package-install.json'),{scope:'candidate-npm-native-install'});
+  assert.throws(()=>read(native),/ZIP inventory/);
 });
 test('foreign run/SHA, expired, oversized, missing digest and unsafe IDs fail before any download',()=>{
   const bytes=archive([['release-prepared.json','{}']]);

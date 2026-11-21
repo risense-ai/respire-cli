@@ -13,6 +13,7 @@ import {completeCandidate} from './candidate-artifact.mjs';
 import {recoveryWorkflow,muslPreparationWorkflow,recoveryContext,validateRecoveryEvidence} from './release-recovery3930.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
+const CLI_G1_WORKFLOW='.github/workflows/g1-cli-source-evidence.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -289,6 +290,56 @@ export function assertPreparationOrigin(link,source){
   requireValue(same(result.link,link),'Prepared origin attempt/artifact/receipt changed');
   return result;
 }
+
+export function validateStableCliExecution(receipt,manifest,run,jobs,readTarget){
+  const {source,packs,assets}=receipt;
+  const producer=source.producer || source;
+  requireValue(/^\d+\.\d+\.\d+$/.test(source.version)&&frontendLayout(manifest)&&manifest.targets.length===8,
+    'Stable CLI execution requires an eight-target frontend preparation');
+  requireValue(positive(run?.id)&&positive(run.run_attempt)&&run.repository?.full_name===REPO&&
+    run.head_repository?.full_name===REPO&&run.path===CLI_G1_WORKFLOW&&run.event==='workflow_dispatch'&&
+    run.head_branch==='main'&&run.head_sha===source.sha&&run.status==='completed'&&run.conclusion==='success',
+    'CLI G1 run must be a successful exact-source main dispatch');
+  const names=['Coverage (core)','Verify CLI execution evidence',...manifest.targets.map(t=>`Native npm package (${t.triple})`)];
+  for(const name of names){
+    const matching=jobs.filter(job=>job.name===name);
+    requireValue(matching.length===1&&matching[0].status==='completed'&&matching[0].conclusion==='success',
+      `Missing successful CLI G1 job: ${name}`);
+  }
+  const byName=new Map(packs.map(pack=>[pack.name,pack.sha256]));
+  const byFile=new Map(assets.map(asset=>[asset.file,asset.sha256]));
+  let candidate;
+  for(const {triple,pkg} of manifest.targets){
+    const evidence=readTarget(triple);
+    const binary=byFile.get(releaseAssetNames(manifest,triple)[0]);
+    const platform=byName.get(pkg),launcher=byName.get(manifest.npmScope);
+    requireValue(evidence?.schema===1&&evidence.scope==='candidate-npm-native-install'&&evidence.status==='passed'&&
+      evidence.target===triple&&evidence.source_sha===source.sha&&evidence.version===source.version&&
+      evidence.producer?.repository===REPO&&evidence.producer.sha===producer.sha&&
+      String(evidence.producer.run_id)===String(producer.run_id)&&Number(evidence.producer.run_attempt)===Number(producer.run_attempt)&&
+      HASH.test(evidence.candidate_sha256||'')&&(!candidate||evidence.candidate_sha256===candidate)&&
+      [binary,platform,launcher].every(value=>HASH.test(value||''))&&evidence.installed_binary_sha256===binary&&
+      evidence.platform_archive_sha256===platform&&evidence.launcher_archive_sha256===launcher,
+      `CLI G1 installed bytes differ from the preparation for ${triple}`);
+    candidate=evidence.candidate_sha256;
+  }
+  return {run_id:String(run.id),run_attempt:Number(run.run_attempt),candidate_sha256:candidate};
+}
+
+export function readStableCliExecution(result,runId){
+  requireValue(positive(runId),'Invalid CLI G1 run ID');
+  const route=`repos/${REPO}/actions/runs/${runId}`;
+  const run=api(route);
+  requireValue(String(run.id)===String(runId)&&positive(run.run_attempt),'CLI G1 attempt identity differs');
+  const jobs=pages(`${route}/attempts/${run.run_attempt}/jobs?per_page=100`).flatMap(page=>page.jobs);
+  const artifacts=pages(`${route}/artifacts?per_page=100`).flatMap(page=>page.artifacts);
+  return validateStableCliExecution(result.receipt,result.context.manifest,run,jobs,target=>{
+    const artifactName=`required-tests-raw-cli-npm-${target}-${run.id}-${run.run_attempt}`;
+    const matches=artifacts.filter(artifact=>artifact.name===artifactName);
+    requireValue(matches.length===1,`CLI G1 native receipt is missing or duplicated for ${target}`);
+    return readVerifiedReceipt(matches[0],'native-package-install.json',{runId,headSha:run.head_sha});
+  });
+}
 export function currentPublicationOwner(sha,version){
   requireValue(process.env.GITHUB_REPOSITORY===REPO&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch'&&
     process.env.GITHUB_REF==='refs/heads/main'&&positive(process.env.GITHUB_RUN_ID)&&positive(process.env.GITHUB_RUN_ATTEMPT)&&
@@ -350,9 +401,13 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
     }else if(action==='inspect'){
       requireValue(process.argv.length===3,'Unexpected preparation lookup arguments');
       inspectPreparation(process.env.PREPARED_RUN,process.env.CLI_SHA,process.env.CLI_VERSION||'');
+    }else if(action==='verify-stable-cli-execution'){
+      requireValue(process.argv.length===3,'Unexpected CLI G1 verification arguments');
+      const prepared=readPreparedRun(process.env.PREPARED_RUN,process.env.CLI_SHA,process.env.CLI_VERSION||'');
+      console.log(JSON.stringify(readStableCliExecution(prepared,process.env.CLI_G1_RUN)));
     }else if(action==='assert-assets'){
       requireValue(process.argv.length===4,'Expected assert-assets <assets>');
       assertPreparedAssets(process.env.PREPARED_RUN,process.env.CLI_SHA,process.env.CLI_VERSION,process.argv[3],preparationPinFromEnv());
-    }else throw Error('Expected attest, inspect or assert-assets');
+    }else throw Error('Expected attest, inspect, verify-stable-cli-execution or assert-assets');
   }catch(error){console.error(error.message);process.exitCode=1;}
 }
