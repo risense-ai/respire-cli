@@ -105,16 +105,22 @@ jobs:
           bash scripts/ci-apt-get.sh update
           bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
-          echo "key=$(python3 scripts/native-model-cache.py key)" >> "$GITHUB_OUTPUT"
-        id: models
-      - uses: actions/cache/restore@v4
-        with:
-          path: .native-model-cache
-          key: ${{ steps.models.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Verify and restore only pinned public model files
-        run: python3 scripts/native-model-cache.py restore --model-dir "$RUNNER_TEMP/models/bge-m3" --legacy-dir "$RUNNER_TEMP/unused-legacy-model"
+      - name: Install the verified fixture model into an isolated profile
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/login-model-setup
+          RSRS_M3_DIR: ${{ runner.temp }}/login-model-setup/models/bge-m3
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          binary="$(realpath cli/rsrs)"
+          RSRS_RUNTIME_BIN="$(python3 scripts/native_fixture_process.py --install-published "$binary")"
+          export RSRS_RUNTIME_BIN
+          "$binary" --direct model install-m3 --json > "$RUNNER_TEMP/login-model-setup.json"
+          "$binary" --runtime-internal --stop --json
+          printf '%s  %s\n' 7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff \
+            "$RSRS_M3_DIR/onnx/model_quantized.cpu-v1.ort" | sha256sum --check --strict
       - name: Run existing contracts and the isolated loopback interruption fixture
         run: |
           set -euo pipefail
@@ -122,7 +128,7 @@ jobs:
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           test "$checksum" = d157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447
-          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/models/bge-m3"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/login-model-setup/models/bge-m3"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
