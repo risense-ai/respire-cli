@@ -17,15 +17,17 @@ pub(crate) fn run(remote: bool, check_update: bool, fix: bool) -> Result<()> {
 
     crate::prepare_command_runtime()?;
     crate::autostart::check_managed_request()?;
-    let mut host = host_rows(check_update);
     let mut result = runtime_doctor(remote)?;
+    let mut repair_row = None;
     if fix {
         let repair = repair(&result)?;
         if !matches!(repair.status, Status::Skip) {
             result = runtime_doctor(remote)?;
         }
-        host.push(repair);
+        repair_row = Some(repair);
     }
+    let mut host = host_rows(check_update, opened_profile(&result));
+    host.extend(repair_row);
     if diagnostics_paused(&result) {
         result.command = "doctor".to_owned();
         result.items.push(Item::new(
@@ -114,10 +116,26 @@ fn diagnostics_paused(result: &ResultEnvelope) -> bool {
     result.summary["mode"] == "off" && result.summary["skipped"] == true
 }
 
-fn host_rows(check_update: bool) -> Vec<Item> {
+fn opened_profile(result: &ResultEnvelope) -> Option<&std::path::Path> {
+    if !result
+        .items
+        .iter()
+        .any(|row| row.name == "store" && matches!(row.status, Status::Ok))
+    {
+        return None;
+    }
+    result
+        .items
+        .iter()
+        .find(|row| row.name == "data dir" && matches!(row.status, Status::Ok))
+        .map(|row| std::path::Path::new(&row.value))
+        .filter(|path| path.is_absolute())
+}
+
+fn host_rows(check_update: bool, opened: Option<&std::path::Path>) -> Vec<Item> {
     let mut rows = Vec::new();
     progress::phase("Checking host configuration", "Checking host configuration");
-    match crate::profile_discovery::pending_legacy_profiles() {
+    match crate::profile_discovery::pending_legacy_profiles(opened) {
         Ok(profiles) if !profiles.is_empty() => rows.push(Item::new(
             "migration",
             Status::Warn,
@@ -466,23 +484,23 @@ mod tests {
                     .find(|item| item.name == name)
                     .context("missing host row")
             };
-            assert!(!host_rows(false).iter().any(|item| item.name == "session"));
+            assert!(!host_rows(false, None).iter().any(|item| item.name == "session"));
             assert!(matches!(
-                row(host_rows(false), "inject")?.status,
+                row(host_rows(false, None), "inject")?.status,
                 Status::Fail
             ));
-            assert!(row(host_rows(false), "CLI version")?
+            assert!(row(host_rows(false, None), "CLI version")?
                 .value
                 .contains("disabled"));
             let home = root.join("home");
             respire::inject::inject_one("generic")?;
             assert!(matches!(
-                row(host_rows(false), "inject")?.status,
+                row(host_rows(false, None), "inject")?.status,
                 Status::Ok
             ));
             std::fs::create_dir(home.join(".codex"))?;
             assert!(matches!(
-                row(host_rows(false), "inject")?.status,
+                row(host_rows(false, None), "inject")?.status,
                 Status::Warn
             ));
             let binary = crate::mcp::stable_bin_path();
@@ -502,29 +520,36 @@ mod tests {
                 std::fs::remove_file(&binary)?;
             }
             std::fs::create_dir_all(&binary)?;
-            assert!(row(host_rows(false), "mcp bin")?
+            assert!(row(host_rows(false, None), "mcp bin")?
                 .value
                 .contains("not a file"));
             std::fs::remove_dir(&binary)?;
             std::fs::write(&binary, b"not executed")?;
             assert!(matches!(
-                row(host_rows(false), "mcp bin")?.status,
+                row(host_rows(false, None), "mcp bin")?.status,
                 Status::Ok
             ));
             let legacy = home.join(".respire");
             std::fs::create_dir(&legacy)?;
             std::fs::write(legacy.join("session.json"), b"{}")?;
             assert!(matches!(
-                row(host_rows(false), "migration")?.status,
+                row(host_rows(false, None), "migration")?.status,
                 Status::Warn
             ));
+            let mut runtime = diagnostic(Status::Ok);
+            runtime.items.push(Item::new("data dir", Status::Ok, legacy.display().to_string()));
+            assert!(opened_profile(&runtime).is_none());
+            runtime.items.push(Item::new("store", Status::Ok, "1 entries"));
+            assert!(!host_rows(false, opened_profile(&runtime))
+                .iter()
+                .any(|item| item.name == "migration"));
             std::fs::write(legacy.join("session.json"), b"{")?;
             assert!(matches!(
-                row(host_rows(false), "migration")?.status,
+                row(host_rows(false, None), "migration")?.status,
                 Status::Fail
             ));
             std::env::set_var("RSRS_UPDATE_CHECK", "1");
-            assert!(row(host_rows(false), "CLI version")?
+            assert!(row(host_rows(false, None), "CLI version")?
                 .value
                 .contains("not requested"));
             for (body, expected) in [
@@ -546,7 +571,7 @@ mod tests {
                     request.respond(tiny_http::Response::from_string(body.to_string()))?;
                     Ok(())
                 });
-                let version = row(host_rows(true), "CLI version")?;
+                let version = row(host_rows(true, None), "CLI version")?;
                 actor
                     .join()
                     .map_err(|_| anyhow::anyhow!("registry fixture panicked"))??;

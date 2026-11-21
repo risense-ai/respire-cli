@@ -269,14 +269,19 @@ pub(crate) fn list_legacy_profiles() -> Result<Value> {
     Ok(json!({"profiles":rows}))
 }
 
-pub(crate) fn pending_legacy_profiles() -> Result<Vec<Value>> {
+pub(crate) fn pending_legacy_profiles(opened: Option<&Path>) -> Result<Vec<Value>> {
     let report = list_legacy_profiles()?;
     let rows = report["profiles"]
         .as_array()
         .context("migration discovery did not return profiles")?;
     Ok(rows
         .iter()
-        .filter(|row| row["migrated_to"].is_null())
+        .filter(|row| {
+            row["migrated_to"].is_null()
+                && !opened.zip(row["source"].as_str()).is_some_and(|(opened, source)| {
+                    crate::mcp::same_path(opened, Path::new(source))
+                })
+        })
         .cloned()
         .collect())
 }
@@ -337,7 +342,9 @@ mod tests {
             .context("legacy database source missing")?;
         assert_eq!(Path::new(imported["migrated_to"].as_str().context("migration destination missing")?).canonicalize()?,
             destination.canonicalize()?);
-        assert_eq!(pending_legacy_profiles()?.len(), 1);
+        assert_eq!(pending_legacy_profiles(None)?.len(), 1);
+        assert!(pending_legacy_profiles(Some(&account))?.is_empty());
+        assert_eq!(pending_legacy_profiles(Some(&destination))?.len(), 1);
         fs::write(legacy.join(SOURCE_RECEIPT), serde_json::to_vec(&json!({
             "source_identity":source_id,"complete":true,"destination":account
         }))?)?;
