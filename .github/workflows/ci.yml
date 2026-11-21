@@ -12,6 +12,63 @@ concurrency:
   group: cli-ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 jobs:
+  public-windows-host-baselines:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'codex/windows-host-baseline-20261121'
+    name: Windows lifecycle (CLI ${{ matrix.cli }}, Runtime ${{ matrix.runtime }})
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cli: 2.0.0-dev.24
+            runtime: 2.0.0-dev.27
+            cli_sha: a335cd075b6f409d8f9cfa8e36bc438addb971df839bf29b07b0c88a9a761953
+            archive_sha: b99b0e8284c9649b86797611ffbf050d4cb2299341322af5b511652547dd50c4
+            metadata_sha: bb2daf7d9084349c54c55bbb0eb0359b6c352a656ab9ac4b149269eb7dda0621
+          - cli: 2.0.0-dev.23
+            runtime: 2.0.0-dev.28
+            cli_sha: 62d86093f059235eef82c272884a60431bfb2ce2fab349b62d44f087982ec8a9
+            archive_sha: e91de7be8bc94e1f38f3601b69f0fb13612a89f11ee38934779813c1913d1dff
+            metadata_sha: 742345f0b0b702ca2503ff9e4b7eaef22e6d959c77fdf663cccb88df2533d341
+    env:
+      CLI_VERSION: ${{ matrix.cli }}
+      RUNTIME_VERSION: ${{ matrix.runtime }}
+      CLI_SHA256: ${{ matrix.cli_sha }}
+      RUNTIME_ARCHIVE_SHA256: ${{ matrix.archive_sha }}
+      RUNTIME_METADATA_SHA256: ${{ matrix.metadata_sha }}
+      RSRS_RUNTIME_TRIPLE: x86_64-pc-windows-msvc
+      RSRS_ENGINE: cpu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify public CLI, Runtime archive and release metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/verified-host-baseline"
+          mkdir "$dir"
+          archive="rsrs-runtime-$RSRS_RUNTIME_TRIPLE.tar.gz"
+          metadata="runtime-build-$RSRS_RUNTIME_TRIPLE.json"
+          gh release download "v$CLI_VERSION" -R risense-ai/respire-cli -p "rsrs-$RSRS_RUNTIME_TRIPLE.exe" -O "$dir/rsrs.exe"
+          gh release download "v$RUNTIME_VERSION" -R risense-ai/respire-runtime --dir "$dir" -p "$archive" -p "$metadata"
+          printf '%s  %s\n' "$CLI_SHA256" "$dir/rsrs.exe" \
+            "$RUNTIME_ARCHIVE_SHA256" "$dir/$archive" "$RUNTIME_METADATA_SHA256" "$dir/$metadata" | sha256sum --check
+          python -m pip install --only-binary=:all: cryptography==46.0.3
+      - name: Exercise independent CLI and current-user OS registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
+          dir="$RUNNER_TEMP/verified-host-baseline"
+          python scripts/test-runtime-autostart.py --binary "$dir/rsrs.exe" --register \
+            --runtime-archive "$dir/rsrs-runtime-$RSRS_RUNTIME_TRIPLE.tar.gz" --runtime-version "$RUNTIME_VERSION"
   workspace-tests:
     outputs:
       rust_cache_key: ${{ steps.rust-key.outputs.key }}
