@@ -166,6 +166,14 @@ fn host_rows(check_update: bool) -> Vec<Item> {
             Status::Fail,
             format!("{} is not a file", binary.display()),
         ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Item::new(
+            "mcp bin",
+            Status::Skip,
+            format!(
+                "{} is missing. Use the installed CLI for MCP stdio.",
+                binary.display()
+            ),
+        ),
         Err(error) => Item::new(
             "mcp bin",
             Status::Fail,
@@ -472,6 +480,11 @@ mod tests {
                 Status::Warn
             ));
             let binary = crate::mcp::stable_bin_path();
+            assert!(matches!(
+                row(host_rows(false), "mcp bin")?.status,
+                Status::Skip
+            ));
+            assert!(!binary.exists());
             std::fs::create_dir_all(&binary)?;
             assert!(row(host_rows(false), "mcp bin")?
                 .value
