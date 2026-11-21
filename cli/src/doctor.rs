@@ -166,14 +166,20 @@ fn host_rows(check_update: bool) -> Vec<Item> {
             Status::Fail,
             format!("{} is not a file", binary.display()),
         ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Item::new(
-            "mcp bin",
-            Status::Skip,
-            format!(
-                "{} is missing. Use the installed CLI for MCP stdio.",
-                binary.display()
-            ),
-        ),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(&binary)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Item::new(
+                "mcp bin",
+                Status::Skip,
+                format!(
+                    "{} is missing. Use the installed CLI for MCP stdio.",
+                    binary.display()
+                ),
+            )
+        }
         Err(error) => Item::new(
             "mcp bin",
             Status::Fail,
@@ -485,6 +491,16 @@ mod tests {
                 Status::Skip
             ));
             assert!(!binary.exists());
+            #[cfg(unix)]
+            {
+                std::fs::create_dir_all(binary.parent().context("fixture binary parent")?)?;
+                std::os::unix::fs::symlink(root.join("missing-cli"), &binary)?;
+                assert!(matches!(
+                    row(host_rows(false), "mcp bin")?.status,
+                    Status::Fail
+                ));
+                std::fs::remove_file(&binary)?;
+            }
             std::fs::create_dir_all(&binary)?;
             assert!(row(host_rows(false), "mcp bin")?
                 .value
