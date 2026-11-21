@@ -46,11 +46,27 @@ jobs:
           for (const id of [env.REQUIRED_CANDIDATE_RUN_ID, env.REQUIRED_CANDIDATE_ARTIFACT_ID])
             assert.match(id, /^[1-9][0-9]*$/);
           assert.match(env.REQUIRED_CANDIDATE_SHA256, /^[a-f0-9]{64}$/);
-          const response = await fetch(`${env.GITHUB_API_URL}/repos/${env.GITHUB_REPOSITORY}/actions/artifacts/${env.REQUIRED_CANDIDATE_ARTIFACT_ID}`, {
-            headers: {authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json'}, redirect: 'error',
-          });
-          assert.ok(response.ok, 'Cannot verify candidate input artifact');
-          const artifact = await response.json();
+          const api = async path => {
+            const response = await fetch(`${env.GITHUB_API_URL}/repos/${env.GITHUB_REPOSITORY}/actions/${path}`, {
+              headers: {authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json'}, redirect: 'error',
+            });
+            assert.ok(response.ok, 'Cannot verify candidate input provenance');
+            return response.json();
+          };
+          const [run,artifact] = await Promise.all([
+            api(`runs/${env.REQUIRED_CANDIDATE_RUN_ID}`),
+            api(`artifacts/${env.REQUIRED_CANDIDATE_ARTIFACT_ID}`),
+          ]);
+          assert.equal(String(run.id), env.REQUIRED_CANDIDATE_RUN_ID);
+          assert.equal(run.repository?.full_name, env.GITHUB_REPOSITORY);
+          assert.equal(run.head_repository?.full_name, env.GITHUB_REPOSITORY);
+          assert.equal(run.head_branch, 'main');
+          assert.equal(run.head_sha, env.GITHUB_SHA);
+          assert.equal(run.event, 'workflow_dispatch');
+          assert.equal(run.path, '.github/workflows/g1-cli-freeze-input.yml');
+          assert.equal(run.status, 'completed');
+          assert.equal(run.conclusion, 'success');
+          assert.equal(artifact.name, `g1-candidate-input-${run.id}-${run.run_attempt}`);
           assert.equal(String(artifact.id), env.REQUIRED_CANDIDATE_ARTIFACT_ID);
           assert.equal(artifact.expired, false);
           assert.equal(String(artifact.workflow_run?.id), env.REQUIRED_CANDIDATE_RUN_ID);
