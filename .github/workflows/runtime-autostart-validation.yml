@@ -127,8 +127,10 @@ jobs:
           const env = {...process.env, RSRS_DATA_DIR: root};
           // Keep the test environment intact; only the official installer may download.
           delete env.RSRS_CORE_TEST_MODE;
+          delete env.RSRS_RUNTIME_TRIPLE;
+          const runtimeTarget = process.env.SDK_TARGET.replace(/-unknown-linux-gnu$/, '-unknown-linux-musl');
           const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
-          const result = await installPinnedRuntime(cli, {env}, process.env.SDK_TARGET);
+          const result = await installPinnedRuntime(cli, {env}, runtimeTarget);
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('.github/runtime-test-fixture.json', 'utf8'));
@@ -140,7 +142,7 @@ jobs:
           const metadata = JSON.parse(selected.release.metadata_json);
           assert.equal(metadata.schema_version, 2);
           assert.equal(metadata.runtime_version, pin.required);
-          assert.equal(metadata.triple ?? metadata.target_triple, process.env.SDK_TARGET);
+          assert.equal(metadata.triple ?? metadata.target_triple, runtimeTarget);
           assert.equal(metadata.source_commit, process.env.EXPECTED_RUNTIME_SOURCE_SHA);
           assert.equal(metadata.binary_sha256, selected.sha256);
           const runtime = join(root, 'bin', 'runtime', pin.required, `rsrs-runtime${process.env.EXE_SUFFIX}`);

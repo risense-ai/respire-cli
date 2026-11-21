@@ -578,9 +578,10 @@ for(const {matrix} of programs) if(matrix) {
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 for(const {target,program} of programs)for(const fault of ['', 'input', 'source', 'proof', 'image', 'core', 'target', 'version', 'installer']){
  const version='3.4.0-dev.1',suffix=target.includes('windows')?'.exe':'';
+ const runtimeTarget=target.replace(/-unknown-linux-gnu$/, '-unknown-linux-musl');
  const runtime=`/fixture/bin/runtime/${version}/rsrs-runtime${suffix}`;
  const core=Buffer.from('synthetic core inventory'),image=Buffer.from('synthetic Runtime; never executed');
- const metadata={schema_version:2,runtime_version:version,target_triple:target,source_commit:(fault==='source'?'b':'a').repeat(40),
+ const metadata={schema_version:2,runtime_version:version,target_triple:runtimeTarget,source_commit:(fault==='source'?'b':'a').repeat(40),
   binary_sha256:hash(image),files:[{path:'core-runtime.json',sha256:hash(core)}]};
  if(fault==='target')metadata.target_triple='wrong-target';
  const encoded=JSON.stringify(metadata);
@@ -591,7 +592,7 @@ for(const {target,program} of programs)for(const fault of ['', 'input', 'source'
  const sandbox={assert,createHash,join:posix.join,resolve:()=>'/cli',spawnSync:()=>assert.fail('No product execution in self-check'),
   mkdtempSync:()=>'/fixture',realpathSync:value=>value,statSync:()=>({isFile:()=>true}),
   readFileSync:file=>{assert(files.has(file),`Unexpected file ${file}`);return files.get(file);},appendFileSync:(file,value)=>writes.push(value),
-  installPinnedRuntime:async()=>({status:fault==='installer'?1:0}),
+  installPinnedRuntime:async(_cli,_env,expected)=>{assert.equal(expected,runtimeTarget);return {status:fault==='installer'?1:0};},
   process:{env:{GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:'true',EXPECTED_RUNTIME_SOURCE_SHA:fault==='input'?'':'a'.repeat(40),
    SDK_TARGET:target,EXE_SUFFIX:suffix,RUNNER_TEMP:'/temp',GITHUB_ENV:'/output'}}};
  const run=()=>runInNewContext('(async()=>{'+program+'})()',sandbox);
