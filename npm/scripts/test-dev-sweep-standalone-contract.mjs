@@ -19,17 +19,20 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const callRuntime="      runtime_sha:\n        required: false\n        type: string\n";
   const dispatchHistory="      history_sources:\n        description: Diagnostic historical DB tags separated by commas (latest resolves the latest formal); requires database_sync_only\n        type: string\n        default: ''\n";
   const callHistory="      history_sources:\n        type: string\n        default: ''\n";
+  const dispatchWindowsHistory="      windows_arm64_history_replay:\n        description: Replay the isolated Windows ARM64 v1.0.19 case against candidate 44886625312\n        type: boolean\n        default: false\n";
   const header=workflow.split('jobs:\n')[0];
-  for(const input of [dispatchInput,callInput,dispatchRuntime,callRuntime,dispatchHistory,callHistory])assert(header.includes(input));
-  assert.equal(hash(header.replace(dispatchInput,'').replace(callInput,'').replace(dispatchRuntime,'').replace(callRuntime,'').replace(dispatchHistory,'').replace(callHistory,'')),'e22044c490d5efe81a4fdddd47d146b565302d1cecd112ee09aeb6115e65037b');
+  const additions=[dispatchInput,callInput,dispatchRuntime,callRuntime,dispatchHistory,callHistory,dispatchWindowsHistory];
+  for(const input of additions)assert(header.includes(input));
+  assert.equal(hash(additions.reduce((original,input)=>original.replace(input,''),header)),'e22044c490d5efe81a4fdddd47d146b565302d1cecd112ee09aeb6115e65037b');
   const historyGuard=workflow.split('\n').find(line=>line.includes("throw new Error(\"Historical sources require database_sync_only\")")).trim().slice("node -e '".length,-1);
   assert.throws(()=>runInNewContext(historyGuard,{process:{env:{HISTORY_SOURCES:'latest',DATABASE_SYNC_ONLY:'false'}}}),/Historical sources require/);
   assert.doesNotThrow(()=>runInNewContext(historyGuard,{process:{env:{HISTORY_SOURCES:'latest',DATABASE_SYNC_ONLY:'true'}}}));
   assert.equal(hash(step('Verify the original release build')),'c07d866f172e6c28e49889fc0f3d8d5fa1ad6bf9ecb26724e4db35d2e2bbabfe');
   assert.equal(hash(step('Verify and extract the original binary')),'2cf493f2afd7eae32aa0f49ec56815a50dffafb00d64015d38b0b8a2c10ecc8b');
   const api=workflow.split('\n  api-smoke:\n')[1];
-  assert(api.includes('if: ${{ !inputs.database_sync_only && !inputs.business_only }}'));
-  assert.equal(hash(api.replace('if: ${{ !inputs.database_sync_only && !inputs.business_only }}','if: ${{ !inputs.database_sync_only }}')),'f5f71f1f9d8e808add8ee4143b67b8b6c070099887bc4a2216cb9c7dec96402b');
+  const apiGuard='if: ${{ !inputs.windows_arm64_history_replay && !inputs.database_sync_only && !inputs.business_only }}';
+  assert(api.includes(apiGuard));
+  assert.equal(hash(api.replace(apiGuard,'if: ${{ !inputs.database_sync_only }}')),'f5f71f1f9d8e808add8ee4143b67b8b6c070099887bc4a2216cb9c7dec96402b');
   assert.match(workflow,/required=\[\.\.\.m.targets.map\(t=>`Release \(\$\{t.triple\}\)`\),'npm-dry-run'\]/);
   assert.match(workflow,/run.head_sha!==sha/);
   assert.match(workflow,/j.conclusion==='success'/);
@@ -82,6 +85,24 @@ test('diagnostic wiring preserves dispatch, permissions, source producer checks 
   const completion=sweep.split("Assert-Smoke 'business-cross-device-recall'")[1].split("Invoke-Om -Name 'show-b'")[0];
   assert(completion.indexOf('Invoke-CloudCleanup')<completion.indexOf("$script:BusinessStatus = 'passed'"));
   assert.match(completion,/CloudCleanup\.passed/);assert.match(completion,/remaining_users/);assert.match(completion,/Status -eq 'skip'/);
+});
+
+test('exact Windows history replay verifies the original bytes before the fixture and skips API smoke',()=>{
+  const guard=step('Require the isolated Windows ARM64 history replay inputs');
+  assert.match(guard,/github-hosted/);
+  assert.match(guard,/OSArchitecture -ne 'Arm64'/);
+  assert.match(guard,/HISTORY_SOURCES -ne 'v1\.0\.19'/);
+  const pins=step('Verify the exact Windows history replay binaries');
+  assert.match(pins,/producer\.run_attempt -ne 1/);
+  for(const pin of ['cli.binary_sha256','runtime.binary_sha256','runtime.release_metadata.archive_sha256'])
+    assert(pins.includes(`${pin} -ne '`));
+  const condition=step('Verify migrated legacy ciphertext on an independent current device').split('\n')[0].match(/\$\{\{ (.*) \}\}/)[1];
+  const outcome=(outcome,replay)=>runInNewContext(condition,{cancelled:()=>false,
+    inputs:{database_sync_only:true,windows_arm64_history_replay:replay},runner:{os:'Windows'},
+    steps:{supplement_python:{outcome:'success'},standalone_runtime:{outcome:'success'},history_replay_bytes:{outcome}}});
+  assert.equal(outcome('success',true),true);
+  assert.equal(outcome('failure',true),false);
+  assert.equal(outcome('skipped',false),true);
 });
 test('standalone identity precedes credentials and every dependent fixture is fail-closed',()=>{
   for(const text of ['ARTIFACT_SOURCE: build','VALIDATION_PROFILE: full','RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}']) assert(workflow.includes(text));
