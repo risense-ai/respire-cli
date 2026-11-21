@@ -788,11 +788,40 @@ fn release_triple_override_is_validated() -> Result<()> {
         anyhow::ensure!(
             release_triple()? == format!("{}-unknown-linux-{abi}", std::env::consts::ARCH)
         );
+        anyhow::ensure!(
+            release_triple_for(true)? == format!("{}-unknown-linux-musl", std::env::consts::ARCH)
+        );
     }
-    std::env::set_var("RSRS_RUNTIME_TRIPLE", "aarch64-unknown-linux-musl");
-    anyhow::ensure!(release_triple()? == "aarch64-unknown-linux-musl");
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", "aarch64-unknown-linux-gnu");
+    anyhow::ensure!(release_triple()? == "aarch64-unknown-linux-gnu");
+    anyhow::ensure!(release_triple_for(true)? == "aarch64-unknown-linux-gnu");
     std::env::set_var("RSRS_RUNTIME_TRIPLE", "not-a-triple");
     anyhow::ensure!(release_triple().is_err());
+    Ok(())
+}
+
+#[test]
+fn managed_linux_selection_verifies_the_installed_abi() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_RUNTIME_TRIPLE"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", "x86_64-unknown-linux-musl");
+    let binary = install_lifecycle_fixture()?;
+
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", "x86_64-unknown-linux-gnu");
+    anyhow::ensure!(managed_runtime_path()?.as_ref() == Some(&binary));
+    let selected = fs::read(manifest_path())?;
+
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", "aarch64-unknown-linux-gnu");
+    let error = managed_runtime_path()
+        .err()
+        .context("a foreign architecture was accepted")?;
+    anyhow::ensure!(format!("{error:#}").contains("differs from local platform"));
+
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", "x86_64-unknown-linux-gnu");
+    fs::write(&binary, b"tampered Runtime")?;
+    anyhow::ensure!(managed_runtime_path().is_err());
+    anyhow::ensure!(fs::read(manifest_path())? == selected);
     Ok(())
 }
 

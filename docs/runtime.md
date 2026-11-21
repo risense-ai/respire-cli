@@ -25,6 +25,15 @@ exact `--version` to select a different source release. Start it with
 to model files. For a deliberate Runtime source override, use the Runtime
 command's `--mirror` option with an approved origin.
 
+On Linux, fresh online installs select the published musl Runtime for the
+local architecture. Offline installs keep the CLI's compiled ABI as the
+default. Set `RSRS_RUNTIME_TRIPLE` to install a specific published target.
+Both CLI builds can verify an existing shared selection using the installed
+Runtime release's own target, digest, and inventory. The managed directory
+is keyed by version. Installing a different build of an occupied version fails before
+switching `runtime.json`. Use separate `RSRS_DATA_DIR` roots when both ABI
+builds of the same Runtime version need to coexist.
+
 Update an npm-installed CLI with npm, and check the executable your shell or
 agent actually calls. On Windows, `Get-Command rsrs -All` shows the matching
 entries in resolution order. Client2 uses the shared CLI in the data-root

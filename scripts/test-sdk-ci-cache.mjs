@@ -91,11 +91,11 @@ test('real model probe does not inherit the unit-test Core mode',()=>{
  const global=text.split('    env:')[1].split('    steps:')[0];assert(!global.includes('RSRS_CORE_TEST_MODE'));assert(text.includes('model install-m3'));assert(text.includes('model probe'));
  const program=text.split('CLI_FIXTURE_BINARY="$exe" node --input-type=module <<\'NODE\'\n')[1].split('          NODE')[0].replace(/^[ \t]*import .+;[ \t]*$/gm,'');
  assert.doesNotMatch(program,/readFileSync\('sdk\/core-sdk.lock.json'|core.sdk_version, sdk.sdk_version/);
- const target='x86_64-unknown-linux-gnu',runtime='/data/bin/runtime/2.0.0-dev.18/rsrs-runtime';
+ const target='x86_64-unknown-linux-gnu',runtimeTarget='x86_64-unknown-linux-musl',runtime='/data/bin/runtime/2.0.0-dev.18/rsrs-runtime';
  const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
  const check=(change=()=>{})=>{
-  const core={schema_version:1,target,sdk_version:'2.0.0-dev.3'};
-  const metadata={schema_version:2,source_commit:'a'.repeat(40),triple:target,runtime_version:'2.0.0-dev.18',binary_sha256:hash('Runtime bytes'),files:[]};
+  const core={schema_version:1,target:runtimeTarget,sdk_version:'2.0.0-dev.3'};
+  const metadata={schema_version:2,source_commit:'a'.repeat(40),triple:runtimeTarget,runtime_version:'2.0.0-dev.18',binary_sha256:hash('Runtime bytes'),files:[]};
   const selected={version:metadata.runtime_version,sha256:metadata.binary_sha256,release:{}};
   const files=new Map([[runtime,Buffer.from('Runtime bytes')]]);
   const seal=()=>{
@@ -109,8 +109,8 @@ test('real model probe does not inherit the unit-test Core mode',()=>{
   runInNewContext(program,{assert,createHash,join:posix.join,dirname:posix.dirname,
    readFileSync:name=>{assert(files.has(name),`Unexpected input ${name}`);return files.get(name);},
    realpathSync:name=>name,statSync:()=>({isFile:()=>true}),appendFileSync:(file,value)=>output.push(value),
-   spawnSync:(command,args)=>{assert.equal(command,'bash');assert.equal(args[0],'scripts/probe-native-arm64-alpine.sh');return {status:0};},
-   process:{platform:'linux',env:{RSRS_DATA_DIR:'/data',SDK_TARGET:target,RSRS_RUNTIME_TRIPLE:target,CLI_FIXTURE_BINARY:'/cli',GITHUB_ENV:'/env',RUNNER_TEMP:'/temp',RSRS_M3_DIR:'/model'}}});
+   spawnSync:(command,args)=>{assert.equal(command,'bash');assert.equal(args[0],'scripts/probe-native-arm64-alpine.sh');assert.equal(args[1],target);return {status:0};},
+   process:{platform:'linux',env:{RSRS_DATA_DIR:'/data',SDK_TARGET:target,CLI_FIXTURE_BINARY:'/cli',GITHUB_ENV:'/env',RUNNER_TEMP:'/temp',RSRS_M3_DIR:'/model'}}});
   assert.deepEqual(output,[`RSRS_RUNTIME_BIN=${runtime}\n`]);
  };
  check();

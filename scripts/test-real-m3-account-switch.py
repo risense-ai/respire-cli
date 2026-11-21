@@ -286,17 +286,19 @@ for binary in BINARIES:
         if runtime_config.runtime_binary and result.returncode==0 and command in ('model','remember','recall','show','doctor','status'):
             observe_runtime()
         return envelope
-    def run_client2(action):
+    def run_client2(action, *arguments):
         desktop_env = {key: value for key, value in env.items() if key != 'RSRS_RUNTIME_BIN'}
         system_root = pathlib.Path(os.environ['SystemRoot'])
         system_path = (system_root / 'System32', system_root)
         desktop_env.update(PATH=os.pathsep.join(map(str, system_path)), RSRS_BIN_DIR=str(main / 'bin'))
         cli_paths = [p / 'rsrs.exe' for p in (main / 'bin', args.client2_binary.parent, *system_path)]
         assert not any(os.path.lexists(p) for p in cli_paths), 'Client2 must start without an installed CLI'
-        result = captured_run([str(args.client2_binary),'--headless',action],env=desktop_env,timeout=960)
+        result = captured_run([str(args.client2_binary),'--headless',action,*arguments],env=desktop_env,timeout=960)
         assert result.returncode==0, f'Client2 {action} failed with exit {result.returncode}'
-        assert json.loads(result.stdout).get('ok') is True, f'Client2 {action} did not confirm success'
+        response = json.loads(result.stdout)
+        assert response.get('ok') is True, f'Client2 {action} did not confirm success'
         assert not any(os.path.lexists(p) for p in cli_paths), 'Client2 unexpectedly installed a CLI'
+        return response.get('result')
     def wait_index_ready(timeout=180):
         deadline = time.monotonic() + timeout
         while True:
@@ -580,8 +582,10 @@ for binary in BINARIES:
                 obsolete_receipt = main/'runtime.json'
                 with obsolete_receipt.open('xb') as stream:
                     stream.write(b'obsolete Runtime selection')
-                run_client2('install-runtime')
+                run_client2('install-runtime', args.runtime_version)
                 assert obsolete_receipt.read_bytes()==b'obsolete Runtime selection', 'desktop changed the obsolete receipt'
+                selected = run_client2('bootstrap-status')['installed_runtime']
+                assert selected == {'version': args.runtime_version, 'sha256': args.runtime_sha256}, 'desktop did not select the exact Runtime fixture'
                 installed = main/'bin/runtime'/args.runtime_version/'rsrs-runtime.exe'
                 assert hashlib.sha256(installed.read_bytes()).hexdigest()==args.runtime_sha256, 'desktop installed different Runtime bytes'
                 env['RSRS_RUNTIME_BIN'] = str(installed)

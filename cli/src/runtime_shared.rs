@@ -47,7 +47,7 @@ fn release_manifest(version: &str) -> Result<ManagedManifest> {
 /// Copy only the authenticated inventory; legacy directories can contain the
 /// archive's full-triple image as well as the identical managed image.
 fn copy_release(source: &Path, stage: &Path, manifest: &ManagedManifest) -> Result<()> {
-    let metadata = manifest.bound_metadata(&release_triple()?)?;
+    let metadata = manifest.bound_local_metadata()?;
     for entry in &metadata.files {
         let name = if entry.path == metadata.binary_file {
             RUNTIME_BINARY
@@ -76,7 +76,7 @@ fn copy_release(source: &Path, stage: &Path, manifest: &ManagedManifest) -> Resu
         fs::copy(&input, &output)?;
     }
     metadata.verify_files(stage)?;
-    verify_stage(stage, RUNTIME_BINARY, &release_triple()?, &manifest.sha256)?;
+    verify_stage(stage, RUNTIME_BINARY, metadata.target_triple()?, &manifest.sha256)?;
     Ok(())
 }
 

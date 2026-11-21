@@ -207,9 +207,13 @@ pub fn valid_version(version: &str) -> bool {
 }
 
 /// Release asset triple for the running platform. The darwin-amd64 asset keeps
-/// its obfuscated triple name (see [`TRIPLES`]); Linux follows the compiled
-/// ABI, with an explicit asset override available through `RSRS_RUNTIME_TRIPLE`.
+/// its obfuscated triple name (see [`TRIPLES`]); existing offline installs use
+/// the compiled ABI unless an explicit asset target is supplied.
 pub fn release_triple() -> Result<String> {
+    release_triple_for(false)
+}
+
+fn release_triple_for(online: bool) -> Result<String> {
     if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_TRIPLE") {
         let trimmed = raw.trim();
         anyhow::ensure!(
@@ -223,8 +227,8 @@ pub fn release_triple() -> Result<String> {
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("macos", "x86_64") => DARWIN_AMD64_RELEASE_TRIPLE,
-        ("linux", "x86_64") if cfg!(target_env = "musl") => "x86_64-unknown-linux-musl",
-        ("linux", "aarch64") if cfg!(target_env = "musl") => "aarch64-unknown-linux-musl",
+        ("linux", "x86_64") if online || cfg!(target_env = "musl") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") if online || cfg!(target_env = "musl") => "aarch64-unknown-linux-musl",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         _ => bail!("no published rsrs-runtime asset for this platform"),
@@ -319,11 +323,14 @@ impl ManagedManifest {
                 metadata_json: std::str::from_utf8(bytes)?.to_owned(),
             }),
         };
-        manifest.bound_metadata(metadata.target_triple()?)?;
+        anyhow::ensure!(
+            manifest.bound_metadata()?.target_triple()? == metadata.target_triple()?,
+            "Runtime release metadata target differs from the supplied release"
+        );
         Ok(manifest)
     }
 
-    fn bound_metadata(&self, triple: &str) -> Result<BuildMetadata> {
+    fn bound_metadata(&self) -> Result<BuildMetadata> {
         let proof = self.release.as_ref().context(
             "repair required: managed Runtime has no complete release proof; \
              reinstall with trusted schema-2 metadata and the complete archive",
@@ -340,7 +347,7 @@ impl ManagedManifest {
             metadata.schema_version == 2,
             "repair required: legacy release metadata does not prove the complete resource set"
         );
-        metadata.validate(&self.version, triple)?;
+        metadata.validate(&self.version, metadata.target_triple()?)?;
         anyhow::ensure!(
             metadata
                 .files
@@ -351,6 +358,25 @@ impl ManagedManifest {
         anyhow::ensure!(
             metadata.binary_sha256()?.eq_ignore_ascii_case(&self.sha256),
             "managed Runtime selection disagrees with its release proof"
+        );
+        Ok(metadata)
+    }
+
+    fn bound_local_metadata(&self) -> Result<BuildMetadata> {
+        let metadata = self.bound_metadata()?;
+        let selected = metadata.target_triple()?;
+        let preferred = release_triple()?;
+        // A shared Linux selection can have either libc ABI for its architecture.
+        let compatible = matches!(
+            (preferred.as_str(), selected),
+            ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl")
+                | ("x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu")
+                | ("aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl")
+                | ("aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu")
+        );
+        anyhow::ensure!(
+            selected == preferred || compatible,
+            "managed Runtime release target {selected} differs from local platform {preferred}"
         );
         Ok(metadata)
     }
@@ -425,12 +451,12 @@ fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
         return Ok(runtime.path().to_path_buf());
     }
     (|| {
-        let triple = release_triple()?;
-        let metadata = manifest.bound_metadata(&triple)?;
+        let metadata = manifest.bound_local_metadata()?;
+        let triple = metadata.target_triple()?;
         let directory = version_dir(&manifest.version);
         // Authenticate core-runtime.json before trusting its resource declarations.
         metadata.verify_files(&directory)?;
-        verify_stage(&directory, RUNTIME_BINARY, &triple, &manifest.sha256)
+        verify_stage(&directory, RUNTIME_BINARY, triple, &manifest.sha256)
     })()
     .context(ManagedRuntimeRepairRequired)
 }
@@ -457,10 +483,14 @@ pub(crate) fn verified_migrated_image(image: &str) -> Result<Option<PathBuf>> {
         && info.len() <= MAX_MANAGED_MANIFEST_BYTES, "invalid migrated Runtime receipt");
     let manifest: ManagedManifest = serde_json::from_slice(&fs::read(receipt)?)?;
     anyhow::ensure!(manifest.version == version, "migrated Runtime receipt version mismatch");
-    let triple = release_triple()?;
-    let metadata = manifest.bound_metadata(&triple)?;
+    let metadata = manifest.bound_local_metadata()?;
     metadata.verify_files(&directory)?;
-    Ok(Some(verify_stage(&directory, RUNTIME_BINARY, &triple, &manifest.sha256)?))
+    Ok(Some(verify_stage(
+        &directory,
+        RUNTIME_BINARY,
+        metadata.target_triple()?,
+        &manifest.sha256,
+    )?))
 }
 
 /// The managed binary the running CLI should currently use, if any. Used by
@@ -477,7 +507,7 @@ pub fn managed_runtime_path() -> Result<Option<PathBuf>> {
 pub(crate) fn require_offline_keygen_handoff() -> Result<(PathBuf, String)> {
     let manifest = read_manifest()?.context("offline_keygen_handoff_unsupported: installed Runtime required")?;
     let binary = validate_installed(&manifest)?.canonicalize()?;
-    let metadata = manifest.bound_metadata(&release_triple()?)
+    let metadata = manifest.bound_local_metadata()
         .context("offline_keygen_handoff_unsupported: authenticated capability metadata required")?;
     require_handoff_capability(&metadata.capabilities)?;
     Ok((binary, manifest.sha256))
@@ -1826,7 +1856,7 @@ fn download_runtime_release(
             return Ok(binary);
         }
     }
-    let triple = release_triple()?;
+    let triple = release_triple_for(true)?;
     // Hermetic tests fail explicitly instead of downloading or synthesizing a shim.
     anyhow::ensure!(
         !respire_client_host::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
