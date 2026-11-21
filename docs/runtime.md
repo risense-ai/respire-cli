@@ -26,8 +26,10 @@ to model files. For a deliberate Runtime source override, use the Runtime
 command's `--mirror` option with an approved origin.
 
 On Linux, a musl CLI selects the published musl Runtime for its architecture,
-and a GNU CLI selects the GNU Runtime. The managed directory is keyed by
-version. Installing a different build of an occupied version fails before
+and a GNU CLI selects the GNU Runtime for a fresh install. Both can verify an
+existing shared selection for the same architecture using the installed
+Runtime release's own target, digest, and inventory. The managed directory
+is keyed by version. Installing a different build of an occupied version fails before
 switching `runtime.json`. Use separate `RSRS_DATA_DIR` roots when both ABI
 builds of the same Runtime version need to coexist.
 
