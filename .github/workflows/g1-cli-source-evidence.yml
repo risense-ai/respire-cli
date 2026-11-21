@@ -15,7 +15,7 @@ on:
         required: true
         type: string
       cli_package_run_id:
-        description: Successful same-source Release run that built the frozen npm packages
+        description: Same-source Release run with a successful npm package build
         default: ''
         type: string
 
@@ -107,8 +107,6 @@ jobs:
           assert.equal(run.head_repository?.full_name, env.GITHUB_REPOSITORY);
           assert.equal(run.head_branch, 'main');
           assert.equal(run.head_sha, env.GITHUB_SHA);
-          assert.equal(run.status, 'completed');
-          assert.equal(run.conclusion, 'success');
           const [jobs, artifacts] = await Promise.all([
             api(`runs/${runId}/attempts/${run.run_attempt}/jobs?per_page=100`),
             api(`runs/${runId}/artifacts?name=npm-release-packages`),
@@ -117,6 +115,10 @@ jobs:
           const producers = jobs.jobs.filter(job => job.name === 'validate / npm-dry-run');
           assert.equal(producers.length, 1);
           const [producer] = producers;
+          assert.equal(String(producer.run_id), runId);
+          assert.equal(producer.run_attempt, run.run_attempt);
+          assert.equal(producer.head_sha, env.GITHUB_SHA);
+          assert.equal(producer.status, 'completed');
           assert.equal(producer.conclusion, 'success');
           assert.equal(artifacts.total_count, 1);
           const [artifact] = artifacts.artifacts;

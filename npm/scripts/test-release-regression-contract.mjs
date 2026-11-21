@@ -354,10 +354,24 @@ test('only explicit inactive full matrices are ignored by critical and never ent
 test('critical cannot publish; full candidate preparation precedes promotion and public acceptance',()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const release=text('release.yml'),part=name=>release.split('\n  '+name+':\n')[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
-  const guard=release.split('\n').find(line=>line.includes("if(['latest','stable'].includes(channel))"));
+  const guard=release.split('\n').find(line=>line.includes('Stable publication requires complete CLI G1 evidence'));
   assert(guard);
-  for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
+  const evidence={CLI_G1_RUN:'250',STABLE_CLI_EXECUTION_VERIFIED:'true'};
+  const validStable={channel:'latest',ref:'b'.repeat(40),version:'2.0.0',process:{env:evidence}};
+  runInNewContext(guard,validStable);
+  for(const change of [{ref:'v2.0.0'},{version:'2.0.0-dev.1'},
+    {process:{env:{...evidence,STABLE_CLI_EXECUTION_VERIFIED:'false'}}},{process:{env:{...evidence,CLI_G1_RUN:''}}}]){
+    assert.throws(()=>runInNewContext(guard,{...validStable,...change}),/complete CLI G1/);
+  }
   runInNewContext(guard,{channel:'dev'});
+  const stablePromotionGuard=release.split('\n').find(line=>line.includes('Stable promotion requires a trusted main dispatch'));
+  const publish={CLI_G1_RUN:'250',PREPARED_RUN:'249',REQUEST_PUBLISH:'true',
+    GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',RELEASE_REF:'b'.repeat(40)};
+  runInNewContext(stablePromotionGuard,{e:publish});
+  for(const change of [{CLI_G1_RUN:'invalid'},{PREPARED_RUN:''},{REQUEST_PUBLISH:'false'},
+    {GITHUB_EVENT_NAME:'push'},{GITHUB_REF:'refs/heads/work'},{RELEASE_REF:'main'}]){
+    assert.throws(()=>runInNewContext(stablePromotionGuard,{e:{...publish,...change}}),/trusted main dispatch/);
+  }
   const stableCandidateGuard=release.split('\n').find(line=>line.includes('Stable candidate requires exact main SHA'));
   assert.ok(stableCandidateGuard);
   const source='b'.repeat(40);

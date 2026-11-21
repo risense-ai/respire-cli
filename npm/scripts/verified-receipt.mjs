@@ -8,7 +8,7 @@ import {join} from 'node:path';
 const REPO='risense-ai/respire-cli',MAX_ZIP=128*1024,MAX_CONSUMER_JSON=1024*1024,MAX_FULL_JSON=2*1024*1024;
 const positive=v=>/^[1-9]\d*$/.test(String(v))&&Number.isSafeInteger(Number(v));
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
-const files=['release-prepared.json','prepared-import.json','prepared-consumer.json'];
+const files=['release-prepared.json','prepared-import.json','prepared-consumer.json','native-package-install.json'];
 export function readVerifiedReceipt(metadata,file,{repository=REPO,runId,headSha,transport}={}){
   requireValue(repository===REPO&&files.includes(file)&&positive(runId)&&/^[a-f0-9]{40}$/.test(headSha||'')&&
     positive(metadata?.id)&&metadata.expired===false&&String(metadata.workflow_run?.id)===String(runId)&&
