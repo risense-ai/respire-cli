@@ -194,6 +194,7 @@ fn entry_names_reject_traversal_and_separators() {
 
 #[test]
 fn extraction_whitelist_matches_client2_semantics() -> Result<()> {
+    let _env = env_scope(&[])?;
     let triple = match release_triple() {
         Ok(triple) => triple,
         Err(_) => return Ok(()),
@@ -248,6 +249,7 @@ fn tar_fixture_truncated() -> Vec<u8> {
 
 #[test]
 fn stage_verification_enforces_manifest_and_binary_hash() -> Result<()> {
+    let _env = env_scope(&[])?;
     let triple = match release_triple() {
         Ok(triple) => triple,
         Err(_) => return Ok(()),
@@ -330,11 +332,11 @@ fn runtime_download_channel_follows_the_selected_runtime() -> Result<()> {
 
 #[test]
 fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RUNTIME_BIN", "RSRS_CORE_TEST_MODE"])?;
     let triple = match release_triple() {
         Ok(triple) => triple,
         Err(_) => return Ok(()),
     };
-    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RUNTIME_BIN", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
@@ -891,6 +893,7 @@ fn mirror_override_builds_fallback_origins() -> Result<()> {
 
 #[test]
 fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
+    let _env = env_scope(&[])?;
     let triple = match release_triple() {
         Ok(triple) => triple,
         Err(_) => return Ok(()),
