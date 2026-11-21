@@ -77,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(github.ref_name == 'codex/cli-x64-gnu-history-replay-20261121' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -212,9 +212,32 @@ jobs:
           if(process.env.BUSINESS_ONLY==='true') evidence.expected_runtime_source_sha=process.env.EXPECTED_RUNTIME_SHA;
           fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'standalone-diagnostic-identity.json'),JSON.stringify(evidence,null,2)+'\n');
           NODE
+      - name: Verify the exact GNU history replay inputs
+        id: gnu_history_replay
+        if: github.ref_name == 'codex/cli-x64-gnu-history-replay-20261121'
+        shell: bash
+        env:
+          DATABASE_SYNC_ONLY: ${{ inputs.database_sync_only }}
+          HISTORY_SOURCES: ${{ inputs.history_sources }}
+        run: |
+          set -euo pipefail
+          test "$DATABASE_SYNC_ONLY" = true
+          test "$HISTORY_SOURCES" = v1.0.20
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const proof = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'standalone-diagnostic-identity.json')));
+          assert.equal(proof.producer.run_id.toString(), '44899529957');
+          assert.equal(Number(proof.producer.run_attempt), 1);
+          assert.equal(proof.target, 'x86_64-unknown-linux-gnu');
+          assert.equal(proof.cli.binary_sha256, 'd157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447');
+          assert.equal(proof.runtime.binary_sha256, '95852e50e8534a0ad46a457c6f6883f21be171737ef73e933dff12e137ee7c52');
+          assert.equal(proof.runtime.release_metadata.archive_sha256, 'a6ed1c49fdd35169680bc9cc9875652b2e2e2af1d6e8aff2639ebdc5f5deab74');
+          NODE
       - name: Prepare persistent native credentials for diagnostic fixtures
         id: native_credentials
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standalone_runtime.outcome == 'success' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standalone_runtime.outcome == 'success' && (github.ref_name != 'codex/cli-x64-gnu-history-replay-20261121' || steps.gnu_history_replay.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
