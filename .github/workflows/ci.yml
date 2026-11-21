@@ -12,6 +12,79 @@ concurrency:
   group: cli-ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 jobs:
+  public-client2-dev23-recovery-replay:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'codex/client2-dev23-recovery-gui-replay-20261121'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CLI_TARGET: x86_64-pc-windows-msvc
+      CLI_VERSION: 2.0.0-dev.25
+      CLI_SHA: 51ac46442d58639f97a06679bad23b5d3ace0cc7
+      CLI_PRODUCER_RUN_ID: '44860343956'
+      CLI_PRODUCER_ATTEMPT: '1'
+      RSRS_RUNTIME_TRIPLE: x86_64-pc-windows-msvc
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify frozen CLI binary and official Runtime archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir verified-cli verified-runtime
+          gh api repos/risense-ai/respire-cli/actions/artifacts/14689269245/zip > cli-candidate.zip
+          printf '%s  %s\n' ff8744710380e045ae05073b77469e2e811f9587f3954d2fa1464b1f67373f57 cli-candidate.zip | sha256sum --check
+          python -m zipfile -e cli-candidate.zip verified-cli
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          node npm/scripts/extract-artifact.mjs verified-cli cli
+          printf '%s  %s\n' fb169495380a2af9059b57b659e7a27793b0644590a1afa791e285c4b4aaa3c5 cli/rsrs.exe | sha256sum --check
+          gh release download v2.0.0-dev.28 -R risense-ai/respire-runtime --dir verified-runtime \
+            -p "rsrs-runtime-$CLI_TARGET.tar.gz" -p "runtime-build-$CLI_TARGET.json"
+          printf '%s  %s\n' e91de7be8bc94e1f38f3601b69f0fb13612a89f11ee38934779813c1913d1dff "verified-runtime/rsrs-runtime-$CLI_TARGET.tar.gz" \
+            742345f0b0b702ca2503ff9e4b7eaef22e6d959c77fdf663cccb88df2533d341 "verified-runtime/runtime-build-$CLI_TARGET.json" | sha256sum --check
+      - name: Prepare verified Runtime and inference models
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RSRS_DATA_DIR="$RUNNER_TEMP/windows-runtime-source"
+          node scripts/ci-install-pinned-runtime.mjs cli/rsrs.exe
+          printf '%s  %s\n' 6b18fd68618f1459b99c4ed8848b3e2144f95e69982572c606e013f91a653a14 \
+            "$RSRS_DATA_DIR/bin/runtime/2.0.0-dev.28/rsrs-runtime.exe" | sha256sum --check
+          export RSRS_M3_DIR="$RSRS_DATA_DIR/models/bge-m3"
+          cli/rsrs.exe --direct model install-m3 --json
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' \
+            --output "$RSRS_M3_DIR/onnx/model_quantized.onnx"
+      - name: Run the isolated public dev.23 GUI diagnostic
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/probe-client2-gui.ps1 `
+            -Client2Release v2.0.0-dev.23 -Client2Commit 401679b87f08b09ddf8764b4a07fa2a9e77b467a `
+            -FixtureCli "$PWD/cli/rsrs.exe" `
+            -RuntimeArchive "$PWD/verified-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" -RuntimeVersion 2.0.0-dev.28 `
+            -OutputDirectory "$env:RUNNER_TEMP/dev23-gui" -OfflineAcceptance `
+            -OfflineModelDirectory "$env:RUNNER_TEMP/windows-runtime-source/models/bge-m3"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-client2-dev23-recovery-replay
+          path: |
+            ${{ runner.temp }}/dev23-gui/report.json
+            ${{ runner.temp }}/dev23-gui/native-gui.json
+          retention-days: 1
+          if-no-files-found: warn
   workspace-tests:
     outputs:
       rust_cache_key: ${{ steps.rust-key.outputs.key }}
