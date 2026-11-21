@@ -660,26 +660,36 @@ for binary in BINARIES:
             previous_workers=list(worker_identities)
             daemon=getattr(keys,'daemon',None)
             exit_before=daemon.poll() if daemon is not None else None
+            provider_checkpoints={}
+            stage='account_use'
             try:
                 run('account','use',account)
+                if daemon is not None: provider_checkpoints['account_use']=daemon.poll()
+                stage='runtime_handoff'
+                if args.expect_supervised_worker and previous_workers:
+                    confirm_workers_exited(previous_workers)
+                if old_runtime is not None:
+                    assert old_runtime.wait(timeout=20)==0,'old runtime did not exit gracefully'
+                stage='model_engine'
+                assert run('model','engine')['summary']['engine']=='cpu'
+                if daemon is not None: provider_checkpoints['model_engine']=daemon.poll()
+                if not database_upgrade:
+                    assert (main/'inference.json').read_bytes()==global_engine
+                    assert not (alternate/'inference.json').exists()
+                # A real model change may rebuild derived indexes once; never source data.
+                stage='index_ready'
+                rows = wait_index_ready()
+                if daemon is not None: provider_checkpoints['index_ready']=daemon.poll()
+                stage='credential_custody'
+                if args.seed_binary:
+                    custody_receipts[str(profile)]={'account':account, **verify_fixture_custody(
+                        profile,keys,custody_slots[str(profile)],expected_urks[str(profile)],binary,env)}
             except Exception:
                 if daemon is not None:
                     provider_account_switch={'fixture_account':account,
-                        'exit_before':exit_before,'exit_after':daemon.poll()}
+                        'exit_before':exit_before,'exit_after':daemon.poll(),
+                        'failed_stage':stage,'exit_after_checkpoint':provider_checkpoints}
                 raise
-            if args.expect_supervised_worker and previous_workers:
-                confirm_workers_exited(previous_workers)
-            if old_runtime is not None:
-                assert old_runtime.wait(timeout=20)==0,'old runtime did not exit gracefully'
-            assert run('model','engine')['summary']['engine']=='cpu'
-            if not database_upgrade:
-                assert (main/'inference.json').read_bytes()==global_engine
-                assert not (alternate/'inference.json').exists()
-            # A real model change may rebuild derived indexes once; never source data.
-            rows = wait_index_ready()
-            if args.seed_binary:
-                custody_receipts[str(profile)]={'account':account, **verify_fixture_custody(
-                    profile,keys,custody_slots[str(profile)],expected_urks[str(profile)],binary,env)}
             if args.seed_binary and str(profile) not in visited:
                 current=snapshot(profile)
                 baseline=original[str(profile)]
