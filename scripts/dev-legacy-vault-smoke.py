@@ -183,6 +183,7 @@ class Smoke:
             "running": daemon is not None and code is None, "exit_code": code,
             "stderr_empty": stderr_empty, "stage": self.report["stage"] if self.report["stage"] in (
                 "historical_same_key_recovery", "historical_existing_keys_register", "historical_source_push",
+                "historical_peer_login", "historical_peer_pull", "historical_peer_read",
                 "historical_reverse_peer_push", "historical_reverse_source_pull", "historical_reverse_source_read")
                 else "historical_other",
             "sample_started_ns": started, "sample_completed_ns": time.monotonic_ns()}
@@ -267,10 +268,11 @@ class Smoke:
         # The preceding pull stops Runtime before returning; a pre-show health
         # snapshot cannot identify an owner that show may subsequently start.
         self.report["runtime_failure_evidence"] = {
-            "stage": stage if stage in ("historical_reverse_peer_push",
+            "stage": stage if stage in ("historical_peer_login", "historical_peer_pull", "historical_peer_read",
+                "historical_reverse_peer_push",
                 "historical_reverse_source_pull", "historical_reverse_source_read") else "other",
             "binding": "unbound", "reason": "show_request_owner_not_captured"
-                if stage == "historical_reverse_source_read" else "no_verified_original_owner",
+                if stage in ("historical_peer_read", "historical_reverse_source_read") else "no_verified_original_owner",
             "request_bound": False, "owner_sampled": False,
             "identity_verified": False, "process_handle_available": False,
             "liveness": "unknown", "exit_code_available": False,
@@ -707,6 +709,8 @@ class Smoke:
         self.report["stage"] = "historical_source_push"
         self.save()
         require(self.cli(env, "sync").get("status") == "ok", "historical_source_sync_not_completed")
+        self.report["stage"] = "historical_peer_login"
+        self.save()
         peer = self.env("historical-independent-device")
         self.current_login(peer, user, password, code)
         peer_session = self.session(peer)
@@ -714,7 +718,11 @@ class Smoke:
         require(AESGCM(v4_kek(code, peer_session["kdf_salt"], peer_session["wrapped_urk"])).decrypt(
             bytes.fromhex(peer_session["urk_nonce"]), encrypted_bytes(peer_session["wrapped_urk"]), None) == expected_urk,
             "historical_independent_device_changed_urk")
+        self.report["stage"] = "historical_peer_pull"
+        self.save()
         require(self.cli(peer, "sync").get("status") == "ok", "historical_independent_pull_not_completed")
+        self.report["stage"] = "historical_peer_read"
+        self.save()
         for memory_id, plaintext, _, deleted in expected.values():
             if not deleted:
                 self.read_entry(peer, memory_id, json.loads(plaintext)["content"])
