@@ -1,0 +1,98 @@
+name: CLI G1 source evidence
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Run that stored the reviewed frozen candidate JSON
+        required: true
+        type: string
+      candidate_artifact_id:
+        description: Artifact containing only candidate.json
+        required: true
+        type: string
+      candidate_sha256:
+        description: SHA-256 of the original candidate.json bytes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  coverage-tests:
+    name: Coverage (core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+      REQUIRED_CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Verify the reviewed candidate artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const env = process.env;
+          assert.equal(env.GITHUB_REF, 'refs/heads/main');
+          for (const id of [env.REQUIRED_CANDIDATE_RUN_ID, env.REQUIRED_CANDIDATE_ARTIFACT_ID])
+            assert.match(id, /^[1-9][0-9]*$/);
+          assert.match(env.REQUIRED_CANDIDATE_SHA256, /^[a-f0-9]{64}$/);
+          const response = await fetch(`${env.GITHUB_API_URL}/repos/${env.GITHUB_REPOSITORY}/actions/artifacts/${env.REQUIRED_CANDIDATE_ARTIFACT_ID}`, {
+            headers: {authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json'}, redirect: 'error',
+          });
+          assert.ok(response.ok, 'Cannot verify candidate input artifact');
+          const artifact = await response.json();
+          assert.equal(String(artifact.id), env.REQUIRED_CANDIDATE_ARTIFACT_ID);
+          assert.equal(artifact.expired, false);
+          assert.equal(String(artifact.workflow_run?.id), env.REQUIRED_CANDIDATE_RUN_ID);
+          assert.equal(artifact.workflow_run?.head_sha, env.GITHUB_SHA);
+          NODE
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+          artifact-ids: ${{ inputs.candidate_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/required-tests-candidate-input
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Verify candidate bytes before running source tests
+        run: node scripts/produce-required-tests.mjs prepare
+      - name: Run and capture the existing Runtime installer fixture tests
+        run: |
+          node --input-type=module <<'NODE'
+          import {captureCoverage} from './scripts/produce-required-tests.mjs';
+          const args = ['llvm-cov', '--locked', '-p', 'respire', '--no-report',
+            '--lib', '--bins', '--examples', '--', 'runtime_fetch::runtime_fetch_tests::'];
+          process.exitCode = captureCoverage(args);
+          NODE
+      - uses: actions/upload-artifact@v4
+        id: source-raw
+        with:
+          name: required-tests-raw-cli-core-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/required-tests-raw-cli-core
+          retention-days: 1
+          if-no-files-found: error
+      - name: Produce only the two candidate-bound CLI source reports
+        env:
+          REQUIRED_RAW_ARTIFACT_ID: ${{ steps.source-raw.outputs.artifact-id }}
+        run: node scripts/produce-required-tests.mjs produce
+      - uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/required-tests-report-cli
+          retention-days: 1
+          if-no-files-found: error

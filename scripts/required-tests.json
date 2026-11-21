@@ -36,10 +36,10 @@
         }
       ],
       "evidence": {
-        "workflow": ".github/workflows/ci.yml",
+        "workflow": ".github/workflows/g1-cli-source-evidence.yml",
         "job": "coverage-tests",
         "job_name": "Coverage (core)",
-        "command_fragment": "if (group === 'core') args.push('--lib', '--bins', '--examples');"
+        "command_fragment": "process.exitCode = captureCoverage(args);"
       },
       "execution_note": "Source tests are implemented; no final-candidate execution report is claimed. Synthetic installer fixtures do not satisfy real release-asset acceptance.",
       "required_cases": [
@@ -71,10 +71,10 @@
         }
       ],
       "evidence": {
-        "workflow": ".github/workflows/ci.yml",
+        "workflow": ".github/workflows/g1-cli-source-evidence.yml",
         "job": "coverage-tests",
         "job_name": "Coverage (core)",
-        "command_fragment": "if (group === 'core') args.push('--lib', '--bins', '--examples');"
+        "command_fragment": "process.exitCode = captureCoverage(args);"
       },
       "execution_note": "Source tests are implemented; no final-candidate execution report is claimed. Synthetic installer fixtures do not satisfy real release-asset acceptance.",
       "required_cases": [

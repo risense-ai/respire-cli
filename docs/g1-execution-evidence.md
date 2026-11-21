@@ -1,13 +1,9 @@
 # G1 execution evidence v2
 
-Ordinary source CI does not request a frozen candidate and therefore skips only
-the candidate-specific `required-tests` job. Its workspace tests, three coverage
-groups, 90% coverage threshold and independent contracts must still pass. If any
-candidate input is supplied, report verification is mandatory; partial inputs,
-missing reports, failed verification or a skipped verifier fail the aggregate.
-Candidate inputs cannot be combined with research, published-native, artifact or
-version-upgrade focused modes. The strict verifier and its required registry
-entries remain mandatory; no missing-report exception is permitted.
+Ordinary source CI runs the workspace tests and independent contracts. The
+manual G1 source workflow binds its evidence to a frozen candidate. Incomplete
+inputs fail before source execution. The strict verifier still requires every
+registered entry and complete candidate-bound reports.
 A successful source CI run is not G1 acceptance. CLI 1.0.21-dev.5 defers Intel
 macOS and releases seven platforms. Historical candidates used eight targets;
 current release acceptance uses seven, with Intel macOS deferred. This scope
@@ -96,51 +92,32 @@ Neither mode certifies G1.
 
 ### Workflow input and artifact contract
 
-The parent-owned `ci.yml` wiring uses three `workflow_dispatch` inputs:
-`required_candidate_run_id`, `required_candidate_artifact_id`, and
-`required_candidate_sha256`. The core coverage job passes them as
-`REQUIRED_CANDIDATE_RUN_ID`, `REQUIRED_CANDIDATE_ARTIFACT_ID`, and
-`REQUIRED_CANDIDATE_SHA256`. Before downloading, the workflow requires either
-all three inputs or none, validates positive integer ID strings and a lowercase
-64-hex digest, and restricts candidate inputs to the manual event. Its GitHub API
-check requires the artifact to belong to the current repository, have the exact
-artifact ID, remain unexpired, and have `workflow_run.id` equal to the supplied
-run ID and `workflow_run.head_sha` equal to the current source SHA.
+The opt-in `g1-cli-source-evidence.yml` workflow produces the two CLI source
+reports on trusted main. Its dispatch inputs are `candidate_run_id`,
+`candidate_artifact_id` and `candidate_sha256`. The workflow keeps the
+`coverage-tests` producer identity and runs the Runtime installer fixture
+module. It contributes source evidence only. Real candidate asset execution
+and the stable publication gate remain separate.
 
-For an ordinary run, the Node process calling `captureCoverage` must have all
-three `REQUIRED_CANDIDATE_*` variables absent. GitHub job-level expressions may
-create empty environment variables even when no inputs were supplied. After the
-workflow has verified the all-absent input case, the caller must delete those
-three variables from its own `process.env` before capture. An empty variable is
-still a candidate-mode trigger; the producer deliberately does not downgrade it
-to ordinary raw. The workflow caller now removes them only when all three are
-empty. Four pure wrapper checks cover empty, absent, complete and partial inputs;
-partial inputs are never silently downgraded to ordinary raw.
+The core job passes the inputs as `REQUIRED_CANDIDATE_RUN_ID`,
+`REQUIRED_CANDIDATE_ARTIFACT_ID`, and `REQUIRED_CANDIDATE_SHA256`. Before
+downloading it verifies the positive IDs, SHA-256 format, trusted main ref and
+the GitHub artifact's run, source SHA and expiration state.
 
-`actions/download-artifact` selects that exact artifact ID and run ID into
+`actions/download-artifact` selects the exact artifact ID and run ID into
 `$RUNNER_TEMP/required-tests-candidate-input`. The directory must contain only
-two ordinary files: `candidate.json` and `sdk.tar.gz`. The candidate digest is
-the SHA-256 of the exact candidate bytes, including whitespace. The compressed
-SDK archive must be supplied by that artifact; an extracted cache directory or
-a candidate/lock digest cannot replace the archive bytes.
+an ordinary `candidate.json` file. The digest covers the original JSON bytes,
+including whitespace. These frontend installer tests use no native Core SDK.
 
-After SDK fetching has set `RSRS_CORE_SDK_DIR` to the current build directory,
-the workflow runs `node scripts/produce-required-tests.mjs prepare`. It then
-captures coverage, uploads the raw directory with step ID `required-raw`, and
-runs `node scripts/produce-required-tests.mjs produce` with
-`REQUIRED_RAW_ARTIFACT_ID` set to `steps.required-raw.outputs.artifact-id`.
-This ID must be a positive integer string that can be represented exactly as a
-JSON number; it is never inferred from a name or supplied as a placeholder.
-The final report upload is named
-`required-tests-report-${run_id}-${run_attempt}` and contains the exact candidate
-bytes plus `reports/cli.release-metadata-dual-digest.json` and
-`reports/cli.release-metadata-legacy-mapping.json`.
+The workflow calls `prepare` before executing the tests, uploads raw evidence
+and passes the resulting actual artifact ID to `produce`. The report upload
+contains the original candidate and the two structured CLI source reports.
 
 ### Producer binding and refusal behavior
 
 `prepare` requires the current Linux X64 `coverage-tests` context and both input
-IDs. It calls `verifyCandidate`, `auditSdkDirectory`, and `verifySdk` against
-the checked-out SDK lock. It saves the exact candidate bytes and a schema 2
+IDs. It verifies the candidate identity and the frontend's null native SDK
+binding, then saves the exact candidate bytes and a schema 2
 `preflight.json` beneath `$RUNNER_TEMP/required-tests-raw-cli-core`. The preflight
 binds repository, source SHA, run ID, attempt, job, target, both candidate input
 IDs, candidate hash, resolved SDK path, SDK real path, computed SDK identity, and
@@ -161,8 +138,9 @@ IDs with `evidence_class: candidate-source` and `gate: not-evaluated`.
 `produce` repeats current input/SDK verification and compares the retained bytes,
 original preflight hash and execution bindings. `buildReports` requires the
 exact current context, exact three-field native SDK shape, recognized schemas
-and evidence mode, the core `cargo llvm-cov --locked -p respire --no-report
---lib --bins --examples` prefix, and only unique `--test <name>` pairs afterward.
+and evidence mode, and the core `cargo llvm-cov --locked -p respire --no-report
+--lib --bins --examples` prefix. The command can select unique integration test
+targets or the fixed installer fixture module.
 It verifies both log hashes, successful exit with no signal/error, complete
 suite counts, and exactly one passed result for each required source case.
 Empty output, failed output and contradictory counts fail. Timestamps must be
