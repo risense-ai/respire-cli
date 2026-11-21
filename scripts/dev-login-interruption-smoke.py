@@ -594,8 +594,16 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
     def rpc(method, params, expected_exit):
         transport_id = "host-login-" + uuid.uuid4().hex
         request = {"v": 1, "id": transport_id, "method": method, "params": params}
-        result = subprocess.run([str(binary), "--json", "--host-rpc-stdio"],
-            input=json.dumps(request).encode(), env=command_env, capture_output=True, timeout=180)
+        sample_provider = (method == "auth.login.continue" and observation["stage"] == "continue_original"
+                           and keys is not None)
+        if sample_provider:
+            provider = observation["original_login_provider"] = {"exit_before_rpc": keys.daemon.poll()}
+        try:
+            result = subprocess.run([str(binary), "--json", "--host-rpc-stdio"],
+                input=json.dumps(request).encode(), env=command_env, capture_output=True, timeout=180)
+        finally:
+            if sample_provider:
+                provider["exit_after_rpc"] = keys.daemon.poll()
         reply = json.loads(result.stdout)
         envelope = reply.get("envelope") or {}
         status, outcome = envelope.get("status"), (envelope.get("summary") or {}).get("outcome")

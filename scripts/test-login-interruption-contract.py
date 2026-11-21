@@ -738,7 +738,7 @@ class ReportContract(unittest.TestCase):
                 (text + '; private-account-material', category)
                 for category, text in categories if category.startswith(('key_', 'config_', 'runtime_'))):
             with self.subTest(category=category):
-                observation = {}
+                observation = {'stage': 'continue_original'}
 
                 def reject(args, **kwargs):
                     request = json.loads(kwargs['input'])
@@ -746,12 +746,14 @@ class ReportContract(unittest.TestCase):
                              'envelope': {'status': 'fail', 'summary': {}, 'errors': [error]}}
                     return subprocess.CompletedProcess(args, 1, json.dumps(reply).encode(), b'private-stderr')
 
+                daemon = SimpleNamespace(poll=Mock(side_effect=[None, -5]))
                 scope = dict(globals(), observation=observation, binary=Path('fixture-cli'), command_env={},
-                             subprocess=SimpleNamespace(run=reject))
+                             keys=SimpleNamespace(daemon=daemon), subprocess=SimpleNamespace(run=reject))
                 exec(compile(ast.Module(body=[rpc], type_ignores=[]), '<actual-host-rpc>', 'exec'), scope)
                 with self.assertRaisesRegex(RuntimeError, 'login_continuation_transport_mismatch'):
-                    scope['rpc']('auth.reset', {}, 2)
+                    scope['rpc']('auth.login.continue', {}, 0)
                 diagnostic = observation['last_rpc']['diagnostic']
+                self.assertEqual(observation['original_login_provider'], {'exit_before_rpc': None, 'exit_after_rpc': -5})
                 self.assertEqual(diagnostic['category'], category)
                 self.assertEqual(observation['last_rpc']['exit'], 1)
                 self.assertNotIn('private-', json.dumps(observation))
