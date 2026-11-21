@@ -754,8 +754,12 @@ def account_fixture_handler(state, reached, release, v2=None):
                 state["password_posts"] += 1
                 self.reply({"updated": True})
             elif self.path == "/push/batch":
-                require(self.headers.get("Authorization") == "Bearer synthetic-token", "transfer_push_not_authorized")
                 stage = state["transfer_stage"]
+                if self.headers.get("Authorization") != "Bearer synthetic-token":
+                    state["transfer_http"].append({"stage": stage, "method": "POST",
+                        "route": "/push/batch", "status": 401})
+                    self.send_error(401)
+                    return
                 rejected = stage == "initial_login"
                 state["transfer_http"].append({"stage": stage, "method": "POST",
                     "route": "/push/batch", "status": 503 if rejected else 200})
@@ -766,6 +770,9 @@ def account_fixture_handler(state, reached, release, v2=None):
                     state["sync_blobs"][item["id"]] = dict(item, user="synthetic")
                 self.reply({"replaced": [True] * len(data["items"])})
             else:
+                if "transfer_http" in state and self.path in ("/push", "/v2/push/batch"):
+                    state["transfer_http"].append({"stage": state["transfer_stage"], "method": "POST",
+                        "route": self.path, "status": 404})
                 self.send_error(404)
 
         def do_GET(self):
@@ -787,6 +794,9 @@ def account_fixture_handler(state, reached, release, v2=None):
                 self.reply({"salt": state["auth_salt"]})
                 return
             if self.path != "/api/self/vault":
+                if "transfer_http" in state and self.path == "/sync/capabilities":
+                    state["transfer_http"].append({"stage": state["transfer_stage"], "method": "GET",
+                        "route": self.path, "status": 404})
                 self.send_error(404)
                 return
             if self.headers.get("Authorization") != "Bearer " + state.get("token", "synthetic-token"):
@@ -1330,6 +1340,19 @@ def main():
             report["transfer_initial_response"] = {"exit_code": first_result.returncode,
                 "diagnostic": safe_cli_diagnostic(first_result.stdout, first_result.stderr),
                 "sync_pulls": state["sync_pulls"], "synced_records": len(state["sync_blobs"])}
+            if report["transfer_initial_response"]["diagnostic"]["stdout_json"]:
+                summary = json.loads(first_result.stdout).get("summary") or {}
+                sync = summary.get("sync") or {}
+                imported = summary.get("import") or {}
+                report["transfer_initial_response"]["sync"] = {
+                    "status": sync.get("status") if sync.get("status") in ("ok", "pending", "failed") else None,
+                    "reason": sync.get("reason") if sync.get("reason") in (
+                        "target_sync_failed_before_copying", "post_import_sync_failed") else None,
+                }
+                report["transfer_initial_response"]["import"] = {
+                    name: imported[name] for name in ("imported", "duplicates", "skipped")
+                    if type(imported.get(name)) is int
+                }
             require(any(event == {"stage": "initial_login", "method": "POST",
                         "route": "/push/batch", "status": 503} for event in state["transfer_http"]),
                     "server_transfer_fault_not_observed")
