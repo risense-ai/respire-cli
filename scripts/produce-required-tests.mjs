@@ -147,6 +147,9 @@ function validateCommand(command) {
   const prefix = ['cargo', 'llvm-cov', '--locked', '-p', 'respire', '--no-report', '--lib', '--bins', '--examples'];
   requireValue(Array.isArray(command) && prefix.every((arg, i) => command[i] === arg) &&
     (command.length - prefix.length) % 2 === 0, 'Unexpected source command');
+  // The opt-in source job may run the existing installer fixture module only.
+  if (command.length === prefix.length + 2 && command[prefix.length] === '--' &&
+      command[prefix.length + 1] === 'runtime_fetch::runtime_fetch_tests::') return;
   const tests = new Set();
   for (let i = prefix.length; i < command.length; i += 2) {
     requireValue(command[i] === '--test' && typeof command[i + 1] === 'string' &&
