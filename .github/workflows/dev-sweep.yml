@@ -9,6 +9,10 @@ on:
         description: Run the base and supplemental suites on the exact Linux ARM64 GNU candidate
         type: boolean
         default: false
+      windows_arm64_history_replay:
+        description: Replay the isolated Windows ARM64 v1.0.19 case against candidate 44886625312
+        type: boolean
+        default: false
       database_sync_only:
         description: Only test legacy ciphertext migration, real sync and independent current-device decryption
         type: boolean
@@ -74,14 +78,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ inputs.arm64_gnu_only || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
+    if: ${{ inputs.arm64_gnu_only || inputs.windows_arm64_history_replay || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
     name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(inputs.windows_arm64_history_replay && '[{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -89,6 +93,21 @@ jobs:
       VALIDATION_PROFILE: full
       RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
     steps:
+      - name: Require the isolated Windows ARM64 history replay inputs
+        if: inputs.windows_arm64_history_replay
+        shell: pwsh
+        env:
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          CLI_SHA: ${{ inputs.cli_sha }}
+          HISTORY_SOURCES: ${{ inputs.history_sources }}
+          DATABASE_SYNC_ONLY: ${{ inputs.database_sync_only }}
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'History replay requires native GitHub-hosted Windows ARM64'
+          }
+          if ($env:DATABASE_SYNC_ONLY -ne 'true' -or $env:HISTORY_SOURCES -ne 'v1.0.19' -or $env:CLI_RUN_ID -ne '44886625312' -or $env:CLI_SHA -ne '79083eb3fea58d476af5501c0ca73c4931924ec2') {
+            throw 'History replay requires the frozen candidate and exactly the v1.0.19 diagnostic subset'
+          }
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -230,6 +249,18 @@ jobs:
           bash scripts/ci-apt-get.sh update
           bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
+      - name: Verify the exact Windows history replay binaries
+        id: history_replay_bytes
+        if: inputs.windows_arm64_history_replay
+        shell: pwsh
+        run: |
+          $proof = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'standalone-diagnostic-identity.json') | ConvertFrom-Json
+          if ($proof.producer.run_attempt -ne 1 -or $proof.cli.binary_sha256 -ne 'c79eee5e00bbfbfe8fd0eecf128bc819dadd888e5d0628f9e5ce49b7e4355fae' -or $proof.runtime.binary_sha256 -ne 'ff2cfbbe1e575809c4632684072ef6a2836cf76c233d72fac64db95555ece630') {
+            throw 'History replay executable digests differ from the failed native job'
+          }
+          if ($proof.runtime.release_metadata.archive_sha256 -ne '3db85ea29c8072a80c3797a0e768dd539a12e7f8f70f91b5f49215dc6c65ea68') {
+            throw 'History replay Runtime archive differs from the failed native job'
+          }
       - name: Install PowerShell
         if: ${{ !inputs.local_api_only && !inputs.database_sync_only && runner.os != 'Windows' }}
         shell: bash
@@ -345,7 +376,7 @@ jobs:
           python scripts/dev-smoke-gate.py --migration-only --cli-report (Join-Path $env:RUNNER_TEMP 'om-sweep/coverage.json') --profile-migration (Join-Path $migrationRoot 'migration-coverage.json') --report (Join-Path $env:RUNNER_TEMP 'dev-supplements/migration-platform-gate.json') --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA
           if ($migrationExit -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Native migration or artifact gate failed.' }
       - name: Verify migrated legacy ciphertext on an independent current device
-        if: ${{ !cancelled() && inputs.database_sync_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && inputs.database_sync_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') && (!inputs.windows_arm64_history_replay || steps.history_replay_bytes.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -355,13 +386,25 @@ jobs:
           RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
-          python3 -m pip install --only-binary=:all: cryptography==46.0.3
-          binary="$(realpath validated-cli/rsrs)"
+          py=python3
+          binary=validated-cli/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then
+            python -m venv "$RUNNER_TEMP/history-python"
+            py="$RUNNER_TEMP/history-python/Scripts/python.exe"
+            binary="$binary.exe"
+            "$py" -m pip install --only-binary=:all: pip==26.2.2 setuptools==84.2.1 wheel==0.48.0
+            "$py" scripts/native-psutil-wheel-cache.py build --directory "$RUNNER_TEMP/history-psutil"
+            "$py" scripts/native-psutil-wheel-cache.py install --directory "$RUNNER_TEMP/history-psutil"
+          fi
+          "$py" -m pip install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath "$binary")"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           mkdir -p "$RUNNER_TEMP/dev-supplements"
           if [ -n "$HISTORY_SOURCES" ]; then
-            python3 -m pip install --only-binary=:all: psutil==7.1.0
-            python3 - "$binary" <<'PY'
+            if [ "$RUNNER_OS" != Windows ]; then
+              "$py" -m pip install --only-binary=:all: psutil==7.1.0
+            fi
+            "$py" - "$binary" <<'PY'
           import importlib.util, os, pathlib, sys
           from types import SimpleNamespace
           sys.path.insert(0, 'scripts')
@@ -384,7 +427,8 @@ jobs:
             sources=()
             IFS=',' read -ra tags <<< "$HISTORY_SOURCES"
             for tag in "${tags[@]}"; do sources+=(--source "$tag"); done
-            python3 scripts/test-published-upgrades.py --binary "$binary" --target "$RSRS_RUNTIME_TRIPLE" \
+            "$py" scripts/native-model-cache.py verify --model-dir "$model" --legacy-dir "$RUNNER_TEMP/native-legacy-model"
+            "$py" scripts/test-published-upgrades.py --binary "$binary" --target "$RSRS_RUNTIME_TRIPLE" \
               --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
               --model-dir "$model" --legacy-model-dir "$RUNNER_TEMP/native-legacy-model" \
               --output-dir "$RUNNER_TEMP/dev-supplements/historical-database" "${sources[@]}"
@@ -432,7 +476,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.arm64_gnu_only && !inputs.database_sync_only && !inputs.business_only }}
+    if: ${{ !inputs.arm64_gnu_only && !inputs.windows_arm64_history_replay && !inputs.database_sync_only && !inputs.business_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
