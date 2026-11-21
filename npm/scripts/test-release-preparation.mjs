@@ -11,7 +11,8 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {publishedFullFixture} from './full-report-fixture.mjs';
 import {publishedAssetNames,inspectPublishedRelease,validateRecoveredRuntime} from './extract-artifact.mjs';
 import {assertReleaseAssets} from './release-publication.mjs';
-import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun} from './release-preparation.mjs';
+import {createPreparation,validatePreparation,preparedAssets,preparedPacks,validatePreparationRun,validateStableCliExecution} from './release-preparation.mjs';
+import {releaseAssetNames} from './verify-binary.mjs';
 import {completeCandidate} from './candidate-artifact.mjs';
 import {fenceBody} from './publication-fence.mjs';
 import {bindMuslReportOrigins,muslOldHashes,validateMuslReportProof,inspectMuslComposition,muslPreparationWorkflow,muslDiagnostic} from './release-recovery3930.mjs';
@@ -25,6 +26,37 @@ const source={repository:'risense-ai/respire-cli',workflow:'.github/workflows/re
 const identity={hashes:{'Cargo.lock':hash,'rust-toolchain.toml':hash},sdk:targets.map(([target])=>({target,version:'1.0.2-dev.12',manifest_sha256:hash,archive_sha256:hash}))};
 const time=minute=>`2026-10-27T00:${String(minute).padStart(2,'0')}:00Z`;
 const job=name=>({name,status:'completed',conclusion:'success',started_at:time(0),completed_at:time(3)});
+
+test('Stable CLI evidence requires every executed package to match the exact preparation',()=>{
+  const m=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url),'utf8'));
+  const stableSource={...source,version:'2.0.0'};
+  const producer={repository:stableSource.repository,sha,run_id:source.run_id,run_attempt:source.run_attempt};
+  const packs=[...m.targets.map(t=>t.pkg),m.npmScope].map((name,i)=>({name,sha256:String(i).repeat(64)}));
+  const assets=m.targets.map(t=>({file:releaseAssetNames(m,t.triple)[0],sha256:'c'.repeat(64)}));
+  const prepared={source:stableSource,packs,assets};
+  const run={...job('g1'),id:822,run_attempt:1,path:'.github/workflows/g1-cli-source-evidence.yml',
+    repository:{full_name:source.repository},head_repository:{full_name:source.repository},
+    head_branch:'main',head_sha:sha,event:'workflow_dispatch'};
+  const jobs=[job('Coverage (core)'),job('Verify CLI execution evidence'),
+    ...m.targets.map(t=>job(`Native npm package (${t.triple})`))];
+  const receipts=new Map(m.targets.map(({triple},i)=>[triple,{schema:1,scope:'candidate-npm-native-install',status:'passed',
+    target:triple,source_sha:sha,version:stableSource.version,producer,candidate_sha256:hash,
+    installed_binary_sha256:assets[i].sha256,platform_archive_sha256:packs[i].sha256,launcher_archive_sha256:packs.at(-1).sha256}]));
+  const verify=(candidate=run,executed=jobs,readTarget=target=>receipts.get(target))=>
+    validateStableCliExecution(prepared,m,candidate,executed,readTarget);
+  assert.deepEqual(verify(),{run_id:'822',run_attempt:1,candidate_sha256:hash});
+  assert.throws(()=>verify({...run,head_sha:'e'.repeat(40)}),/exact-source/);
+  assert.throws(()=>verify({...run,path:source.workflow}),/exact-source/);
+  assert.throws(()=>verify(run,jobs.slice(0,-1)),/Missing successful CLI G1 job/);
+  assert.throws(()=>verify(run,[...jobs,jobs[0]]),/Missing successful CLI G1 job/);
+  const last=m.targets.at(-1).triple;
+  for(const change of [{producer:{...producer,run_attempt:2}},{candidate_sha256:'d'.repeat(64)},
+    {installed_binary_sha256:'a'.repeat(64)},{platform_archive_sha256:packs[0].sha256},{launcher_archive_sha256:packs[0].sha256}]){
+    assert.throws(()=>verify(run,jobs,target=>target===last?{...receipts.get(target),...change}:receipts.get(target)),
+      /installed bytes differ/);
+  }
+});
+
 function fixture(){
   const jobs=[...targets.map(([t])=>job(`validate / Release (${t})`)),job('validate / npm-dry-run'),
     ...targets.map(([t])=>job(`native-regression / Native (${t})`)),

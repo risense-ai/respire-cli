@@ -961,8 +961,14 @@ def main():
             initial_session, config_bytes = session.read_bytes(), config.read_bytes()
             recovery_path = root / ".login-recovery.json"
             require(not recovery_path.exists(), "failed_login_requires_clean_journal")
-            rejected = json.loads(cli("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
-                "--pass=synthetic-password", "--super=wrong", success=False).stdout)
+            if keys is not None:
+                report["rejected_login_provider"] = {"exit_before_login": keys.daemon.poll()}
+            try:
+                rejected = json.loads(cli("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
+                    "--pass=synthetic-password", "--super=wrong", success=False).stdout)
+            finally:
+                if keys is not None:
+                    report["rejected_login_provider"]["exit_after_login"] = keys.daemon.poll()
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
                     "failed_login_original_profile_not_restored")
             # Resolve only this failed login's original operation; do not replay authentication.
