@@ -276,6 +276,7 @@ for binary in BINARIES:
     components_started=False
     network_smoke=None
     network_evidence=None
+    provider_account_switch=None
     def run(*args, allow_failure=False, timeout=120, cancel=None):
         result = captured_run([str(binary),'--json',*args],env=env,timeout=timeout,cancel=cancel)
         if result.returncode and not allow_failure: raise RuntimeError(result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
@@ -653,7 +654,15 @@ for binary in BINARIES:
         generation_changes={}
         for account, profile in [('main',main),('alternate',alternate),('main',main)]:
             previous_workers=list(worker_identities)
-            run('account','use',account)
+            daemon=getattr(keys,'daemon',None)
+            exit_before=daemon.poll() if daemon is not None else None
+            try:
+                run('account','use',account)
+            except Exception:
+                if daemon is not None:
+                    provider_account_switch={'fixture_account':account,
+                        'exit_before':exit_before,'exit_after':daemon.poll()}
+                raise
             if args.expect_supervised_worker and previous_workers:
                 confirm_workers_exited(previous_workers)
             if old_runtime is not None:
@@ -1124,6 +1133,7 @@ for binary in BINARIES:
             **seed_identity,**runtime_report(args,True)})
     except Exception as error:
         reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000],
+            **({'provider_account_switch':provider_account_switch} if provider_account_switch is not None else {}),
             **({'runtime_stop_failure':stop_failure} if stop_failure is not None else {})})
         (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
         raise
