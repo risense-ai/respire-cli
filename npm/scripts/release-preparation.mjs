@@ -23,8 +23,9 @@ const preparationHead=source=>source.producer?source.workflow_head_sha:source.sh
 
 export function validatePreparationSource(source){
   requireValue(source?.repository===REPO&&[WORKFLOW,recoveryWorkflow,muslPreparationWorkflow].includes(source.workflow)&&positive(source.run_id)&&positive(source.run_attempt)&&
-    SHA.test(source.sha||'')&&/^\d+\.\d+\.\d+-dev\.[1-9]\d*$/.test(source.version||''), 'Invalid exact-source DEV preparation');
+    SHA.test(source.sha||'')&&/^\d+\.\d+\.\d+(?:-dev\.[1-9]\d*)?$/.test(source.version||''), 'Invalid exact-source preparation');
   if([recoveryWorkflow,muslPreparationWorkflow].includes(source.workflow)){
+    requireValue(/-dev\.[1-9]\d*$/.test(source.version),'Recovery preparation requires a DEV version');
     if(source.workflow===muslPreparationWorkflow)requireValue(source.fixture_commit==='710e6b13ff588c02157d8d677e59e8f21c16beae'&&
       positive(source.diagnostic?.run_id)&&positive(source.diagnostic?.run_attempt)&&SHA.test(source.diagnostic?.sha||'')&&
       String(source.diagnostic.run_id)!==String(source.run_id),'Invalid bounded musl diagnostic identity');

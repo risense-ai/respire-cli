@@ -358,6 +358,18 @@ test('critical cannot publish; full candidate preparation precedes promotion and
   assert(guard);
   for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
   runInNewContext(guard,{channel:'dev'});
+  const stableCandidateGuard=release.split('\n').find(line=>line.includes('Stable candidate requires exact main SHA'));
+  assert.ok(stableCandidateGuard);
+  const source='b'.repeat(40);
+  const candidate={STABLE_CANDIDATE_VERSION:'2.0.0',REQUEST_PUBLISH:'false',ARTIFACT_SOURCE:'build',
+    VALIDATION_PROFILE:'full',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/main',
+    RELEASE_REF:source,GITHUB_SHA:source};
+  runInNewContext(stableCandidateGuard,{e:candidate});
+  for(const override of [
+    {REQUEST_PUBLISH:'true'},{ARTIFACT_SOURCE:'published-assets'},{VALIDATION_PROFILE:'critical'},
+    {DEV_VERSION:'2.0.0-dev.1'},{PREPARED_RUN:'123'},{GITHUB_EVENT_NAME:'push'},
+    {GITHUB_REF:'refs/heads/feature'},{RELEASE_REF:'main'},{STABLE_CANDIDATE_VERSION:'2.0.0-dev.1'},
+  ]) assert.throws(()=>runInNewContext(stableCandidateGuard,{e:{...candidate,...override}}),/Stable candidate requires/);
   assert.match(release,/validation_profile:[\s\S]*?default: full/);
   assert.match(release,/Require full candidates before publication/);
   const client2Guard=release.split('\n').find(line=>line.includes('Client2 diagnostics require'));

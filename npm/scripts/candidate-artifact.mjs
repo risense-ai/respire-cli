@@ -16,7 +16,8 @@ export function validateCandidate(candidate, env=process.env) {
   assert.equal(candidate.kind,'unpublished-cli-candidate');
   assert.equal(candidate.source.repository,'risense-ai/respire-cli');
   assert.match(candidate.source.sha,/^[a-f0-9]{40}$/);
-  assert.match(candidate.source.version,/^\d+\.\d+\.\d+-dev\.[1-9]\d*$/);
+  assert.match(candidate.source.version,/^\d+\.\d+\.\d+(?:-dev\.[1-9]\d*)?$/);
+  if(env.CLI_PRODUCER_RUN_ID)assert.match(candidate.source.version,/-dev\.[1-9]\d*$/);
   for(const key of ['run_id','run_attempt'])assert.ok(Number.isSafeInteger(candidate.source[key])&&candidate.source[key]>0);
   assert.equal(candidate.source.sha,env.CLI_SHA);
   assert.equal(candidate.source.version,env.CLI_VERSION);
