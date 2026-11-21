@@ -16,6 +16,11 @@ files to `main`, then push `vX.Y.Z`. DEV tags publish `dev`; stable tags publish
 `latest`.
 Ordinary `main` pushes run source CI and warm dependency caches without
 allocating a release. Manual dispatch remains available for preparation/recovery.
+To validate an unpublished stable candidate, dispatch Release on `main` with
+`ref` set to the exact current main SHA, `stable_candidate_version` set to
+`X.Y.Z`, `validation_profile=full`, and `publish=false`. The workflow stamps
+that version into the candidate packages and runs the full release matrix.
+Stable publication requires a separate release path and authorization.
 
 Release preparation runs source CI, native builds, package/hash and architecture
 checks, real inference, all applicable historical upgrades, cloud/API checks

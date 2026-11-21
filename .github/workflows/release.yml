@@ -27,6 +27,10 @@ on:
         description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
         default: ''
         type: string
+      stable_candidate_version:
+        description: Exact X.Y.Z version for an unpublished full candidate from the current main SHA
+        default: ''
+        type: string
       prepared_run:
         description: Completed full candidate Release run to promote with identical bytes
         default: ''
@@ -97,9 +101,11 @@ jobs:
           CLIENT2_RELEASE: ${{ inputs.client2_release }}
           CLIENT2_COMMIT: ${{ inputs.client2_commit }}
           CLIENT2_SEALED_RUN: ${{ inputs.client2_sealed_run }}
+          STABLE_CANDIDATE_VERSION: ${{ inputs.stable_candidate_version }}
         run: |
           node - <<'NODE'
           const e=process.env;
+          if(e.STABLE_CANDIDATE_VERSION&&(!/^\d+\.\d+\.\d+$/.test(e.STABLE_CANDIDATE_VERSION)||e.REQUEST_PUBLISH!=='false'||e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||e.DEV_VERSION||e.PREPARED_RUN||e.GITHUB_EVENT_NAME!=='workflow_dispatch'||e.GITHUB_REF!=='refs/heads/main'||e.RELEASE_REF!==e.GITHUB_SHA))throw Error('Stable candidate requires exact main SHA, an explicit X.Y.Z version, full build, and publish=false without other version inputs');
           if(e.REQUEST_PUBLISH==='true'&&(e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||!e.PREPARED_RUN))throw Error('Publish requires full and a completed prepared_run; first run full with publish=false');
           if(e.PREPARED_RUN&&(e.REQUEST_PUBLISH!=='true'||!/^[1-9]\d*$/.test(e.PREPARED_RUN)||e.DEV_VERSION))throw Error('prepared_run requires publication and forbids version overrides');
           if(e.ARTIFACT_SOURCE==='build'&&(e.VALIDATION_PROFILE==='full'||e.REQUIRE_FULL==='true')&&(e.GITHUB_EVENT_NAME!=='workflow_dispatch'||e.GITHUB_REF!=='refs/heads/main'))throw Error('Full candidates require a trusted main dispatch');
@@ -271,6 +277,7 @@ jobs:
           RELEASE_REF: ${{ inputs.ref || github.ref }}
           RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
           RELEASE_DEV_VERSION: ${{ steps.prepared.outputs.prepared_version || inputs.dev_version }}
+          STABLE_CANDIDATE_VERSION: ${{ inputs.stable_candidate_version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node - <<'NODE'
@@ -281,7 +288,11 @@ jobs:
           const ref=process.env.RELEASE_REF.replace(/^refs\/tags\//,'');
           const tagEvent=process.env.RELEASE_REF.startsWith('refs/tags/')||/^v\d+\./.test(ref);
           let channel,version;
-          if(tagEvent){
+          if(process.env.STABLE_CANDIDATE_VERSION){
+            channel='candidate';
+            version=process.env.STABLE_CANDIDATE_VERSION;
+            if(process.env.RELEASE_PUBLISH!=='false'||cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()!==process.env.GITHUB_SHA)throw Error('Stable candidate requires unpublished exact main source');
+          }else if(tagEvent){
             if(process.env.RELEASE_DEV_VERSION) throw new Error('A release tag cannot be combined with an exact DEV override');
             if(!/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(ref)) throw new Error('Release tags must use vX.Y.Z or vX.Y.Z-dev.N');
             version=ref.slice(1);channel=version.includes('-dev.')?'dev':'latest';
