@@ -2,7 +2,7 @@
 """Real Linux CLI SIGINT recovery; only synthetic accounts and loopback HTTP."""
 from native_fixture_process import install_published_runtime
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import importlib.util
 import json
@@ -1353,6 +1353,19 @@ def main():
                     name: imported[name] for name in ("imported", "duplicates", "skipped")
                     if type(imported.get(name)) is int
                 }
+                if isinstance(summary.get("dir"), str):
+                    database = (Path(summary["dir"]) / "rsrs.db").resolve()
+                    if database.is_relative_to(args.root.resolve()) and database.is_file():
+                        try:
+                            with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+                                report["transfer_initial_response"]["target_database"] = {
+                                    "live_rows": db.execute("SELECT COUNT(*) FROM memories WHERE deleted=0").fetchone()[0],
+                                    "outbox_rows": db.execute("SELECT COUNT(*) FROM sync_outbox").fetchone()[0],
+                                }
+                        except sqlite3.Error as error:
+                            report["transfer_initial_response"]["target_database"] = {
+                                "status": "read_failed", "sqlite_code": getattr(error, "sqlite_errorcode", None),
+                            }
             require(any(event == {"stage": "initial_login", "method": "POST",
                         "route": "/push/batch", "status": 503} for event in state["transfer_http"]),
                     "server_transfer_fault_not_observed")

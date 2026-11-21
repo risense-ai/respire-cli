@@ -20,30 +20,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - version: 2.0.0-dev.28
-            target: aarch64-unknown-linux-musl
-            binary_sha: f5e8d8481336ee4e9b13a66b0863260f6e57b44f8af9e9dda82d26e94fca571a
-            archive_sha: d4f56d16a286ea34d4eb9dec6a4f36e1918dd5eaa09e80e8e4308bbf8b86c946
-          - version: 2.0.0-dev.29
-            target: aarch64-unknown-linux-gnu
-            binary_sha: 70d4998fbf688a3b18f2b26649c1b6da1f6ee8a9ea6aa8c52519742bb26f13b6
-            archive_sha: 91efac33ac73d3ddb3d191ede1959701655e33b96f952a245e9f2c750cc6b457
+          - target: aarch64-unknown-linux-gnu
+            cli_artifact: '14688385946'
+            cli_zip_sha: ff78bf06053210d3063e14ae21be22f0cfa082faf09576cc10b923854e57f88a
+          - target: aarch64-unknown-linux-musl
+            cli_artifact: '14687584376'
+            cli_zip_sha: 547416c45f20ad506a92a88bec490acda724374f0f37fb3d1478c4178d510d07
     permissions:
       actions: read
       contents: read
     env:
       ARTIFACT_SOURCE: build
       VALIDATION_PROFILE: full
-      CLI_TARGET: aarch64-unknown-linux-gnu
-      RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-      REPLAY_RUNTIME_VERSION: ${{ matrix.version }}
-      REPLAY_RUNTIME_SHA256: ${{ matrix.binary_sha }}
-      REPLAY_RUNTIME_ARCHIVE_SHA256: ${{ matrix.archive_sha }}
+      CLI_TARGET: ${{ matrix.target }}
+      RSRS_RUNTIME_TRIPLE: aarch64-unknown-linux-musl
+      REPLAY_RUNTIME_VERSION: 2.0.0-dev.28
+      REPLAY_RUNTIME_SHA256: f5e8d8481336ee4e9b13a66b0863260f6e57b44f8af9e9dda82d26e94fca571a
+      REPLAY_RUNTIME_ARCHIVE_SHA256: d4f56d16a286ea34d4eb9dec6a4f36e1918dd5eaa09e80e8e4308bbf8b86c946
       CLI_VERSION: 2.0.0-dev.25
-      CLI_SHA: a83e5eec036d566211f34fed22fdf6da112cb6b7
-      CLI_PRODUCER_RUN_ID: '44848100241'
+      CLI_SHA: d219a034e4fc6c84e1df16379ea45c8ed68f9680
+      CLI_PRODUCER_RUN_ID: '44856973045'
       CLI_PRODUCER_ATTEMPT: '1'
-      CLI_BINARY_SHA256: 042cf7dce4a3ffb7c9cb049aa977224638d3e86ddcfe6b881f1b85acd93b9af6
+      CLI_ARTIFACT_ID: ${{ matrix.cli_artifact }}
+      CLI_ZIP_SHA256: ${{ matrix.cli_zip_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,19 +53,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify the original candidate bytes
+      - name: Verify the exact updated candidate bytes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           bash scripts/require-native-linux-arm64.sh "$CLI_TARGET"
           zip="$RUNNER_TEMP/cli-original.zip"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/14684331616/zip" > "$zip"
-          printf '%s  %s\n' abe4a0a99ef98a66768c0ca2806e0f0a48d6d6573acf86ae66a233ddb337b083 "$zip" | sha256sum --check
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/$CLI_ARTIFACT_ID/zip" > "$zip"
+          printf '%s  %s\n' "$CLI_ZIP_SHA256" "$zip" | sha256sum --check
           unzip -q "$zip" -d validated-cli
           node npm/scripts/set-build-version.mjs "$CLI_VERSION"
           node npm/scripts/extract-artifact.mjs validated-cli cli
-          printf '%s  %s\n' "$CLI_BINARY_SHA256" cli/rsrs | sha256sum --check
+          printf 'CLI_BINARY_SHA256=%s\n' "$(sha256sum cli/rsrs | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
       - name: Verify the selected published Runtime and prepare a public model
         run: |
           set -euo pipefail
@@ -88,7 +87,14 @@ jobs:
             binary_sha256: proof.sha256, source: meta.source_commit
           }) + '\n');
           NODE
-          RSRS_DATA_DIR="$RUNNER_TEMP/model-preparation" RSRS_M3_DIR="$RUNNER_TEMP/model-preparation/models" cli/rsrs --direct model install-m3 --json
+          export RSRS_DATA_DIR="$RUNNER_TEMP/model-preparation"
+          export RSRS_M3_DIR="$RSRS_DATA_DIR/models/bge-m3"
+          cli/rsrs --direct model install-m3 --json
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' \
+            --output "$RSRS_M3_DIR/onnx/model_quantized.onnx"
+          printf '%s  %s\n' 0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d "$RSRS_M3_DIR/onnx/model_quantized.onnx" \
+            7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff "$RSRS_M3_DIR/onnx/model_quantized.cpu-v1.ort" | sha256sum --check
       - name: Replay the original native login continuation test
         run: |
           set -euo pipefail
@@ -98,11 +104,11 @@ jobs:
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py \
             --native-credentials --binary "$(realpath cli/rsrs)" --binary-sha256 "$CLI_BINARY_SHA256" \
             --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" \
-            --model-dir "$RUNNER_TEMP/model-preparation/models"
+            --model-dir "$RUNNER_TEMP/model-preparation/models/bge-m3"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: arm64-original-login-replay-${{ matrix.version }}-${{ matrix.target }}
+          name: arm64-cli-abi-transfer-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
             runtime-receipt.json
