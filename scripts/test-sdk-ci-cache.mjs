@@ -109,8 +109,8 @@ test('real model probe does not inherit the unit-test Core mode',()=>{
   runInNewContext(program,{assert,createHash,join:posix.join,dirname:posix.dirname,
    readFileSync:name=>{assert(files.has(name),`Unexpected input ${name}`);return files.get(name);},
    realpathSync:name=>name,statSync:()=>({isFile:()=>true}),appendFileSync:(file,value)=>output.push(value),
-   spawnSync:(command,args)=>{assert.equal(command,'bash');assert.equal(args[0],'scripts/probe-native-arm64-alpine.sh');return {status:0};},
-   process:{platform:'linux',env:{RSRS_DATA_DIR:'/data',SDK_TARGET:target,RSRS_RUNTIME_TRIPLE:target,CLI_FIXTURE_BINARY:'/cli',GITHUB_ENV:'/env',RUNNER_TEMP:'/temp',RSRS_M3_DIR:'/model'}}});
+   spawnSync:(command,args)=>{assert.equal(command,'bash');assert.equal(args[0],'scripts/probe-native-arm64-alpine.sh');assert.equal(args[1],target);return {status:0};},
+   process:{platform:'linux',env:{RSRS_DATA_DIR:'/data',SDK_TARGET:target,CLI_FIXTURE_BINARY:'/cli',GITHUB_ENV:'/env',RUNNER_TEMP:'/temp',RSRS_M3_DIR:'/model'}}});
   assert.deepEqual(output,[`RSRS_RUNTIME_BIN=${runtime}\n`]);
  };
  check();
