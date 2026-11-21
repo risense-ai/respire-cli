@@ -16,6 +16,18 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.ref_name == 'codex/cli-arm64-login-replay-20261121'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: 2.0.0-dev.28
+            target: aarch64-unknown-linux-musl
+            binary_sha: f5e8d8481336ee4e9b13a66b0863260f6e57b44f8af9e9dda82d26e94fca571a
+            archive_sha: d4f56d16a286ea34d4eb9dec6a4f36e1918dd5eaa09e80e8e4308bbf8b86c946
+          - version: 2.0.0-dev.29
+            target: aarch64-unknown-linux-gnu
+            binary_sha: 70d4998fbf688a3b18f2b26649c1b6da1f6ee8a9ea6aa8c52519742bb26f13b6
+            archive_sha: 91efac33ac73d3ddb3d191ede1959701655e33b96f952a245e9f2c750cc6b457
     permissions:
       actions: read
       contents: read
@@ -23,7 +35,10 @@ jobs:
       ARTIFACT_SOURCE: build
       VALIDATION_PROFILE: full
       CLI_TARGET: aarch64-unknown-linux-gnu
-      RSRS_RUNTIME_TRIPLE: aarch64-unknown-linux-gnu
+      RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
+      REPLAY_RUNTIME_VERSION: ${{ matrix.version }}
+      REPLAY_RUNTIME_SHA256: ${{ matrix.binary_sha }}
+      REPLAY_RUNTIME_ARCHIVE_SHA256: ${{ matrix.archive_sha }}
       CLI_VERSION: 2.0.0-dev.25
       CLI_SHA: a83e5eec036d566211f34fed22fdf6da112cb6b7
       CLI_PRODUCER_RUN_ID: '44848100241'
@@ -52,12 +67,27 @@ jobs:
           node npm/scripts/set-build-version.mjs "$CLI_VERSION"
           node npm/scripts/extract-artifact.mjs validated-cli cli
           printf '%s  %s\n' "$CLI_BINARY_SHA256" cli/rsrs | sha256sum --check
-      - name: Verify frozen Runtime and prepare a public model
+      - name: Verify the selected published Runtime and prepare a public model
         run: |
           set -euo pipefail
+          node -e 'require("node:fs").writeFileSync(".github/runtime-test-fixture.json", JSON.stringify({required: process.env.REPLAY_RUNTIME_VERSION}) + "\n")'
           RSRS_DATA_DIR="$RUNNER_TEMP/runtime-original" node scripts/ci-install-pinned-runtime.mjs cli/rsrs
-          runtime="$(realpath "$RUNNER_TEMP/runtime-original/bin/runtime/2.0.0-dev.28/rsrs-runtime")"
-          printf '%s  %s\n' 7f0f5be1ac04af29c7ffd224e58529632d30be7beec30f59d04a273663b24084 "$runtime" | sha256sum --check
+          runtime="$(realpath "$RUNNER_TEMP/runtime-original/bin/runtime/$REPLAY_RUNTIME_VERSION/rsrs-runtime")"
+          printf '%s  %s\n' "$REPLAY_RUNTIME_SHA256" "$runtime" | sha256sum --check
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync, writeFileSync} from 'node:fs';
+          const env = process.env;
+          const proof = JSON.parse(readFileSync(env.RUNNER_TEMP + '/runtime-original/bin/runtime.json'));
+          const meta = JSON.parse(proof.release.metadata_json);
+          assert.equal(meta.archive_sha256, env.REPLAY_RUNTIME_ARCHIVE_SHA256);
+          assert.equal(meta.target_triple, env.RSRS_RUNTIME_TRIPLE);
+          assert.equal(meta.runtime_version, env.REPLAY_RUNTIME_VERSION);
+          writeFileSync('runtime-receipt.json', JSON.stringify({
+            version: meta.runtime_version, target: meta.target_triple, archive_sha256: meta.archive_sha256,
+            binary_sha256: proof.sha256, source: meta.source_commit
+          }) + '\n');
+          NODE
           RSRS_DATA_DIR="$RUNNER_TEMP/model-preparation" RSRS_M3_DIR="$RUNNER_TEMP/model-preparation/models" cli/rsrs --direct model install-m3 --json
       - name: Replay the original native login continuation test
         run: |
@@ -72,8 +102,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: arm64-original-login-replay
-          path: ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+          name: arm64-original-login-replay-${{ matrix.version }}-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+            runtime-receipt.json
           if-no-files-found: warn
   workspace-tests:
     outputs:
