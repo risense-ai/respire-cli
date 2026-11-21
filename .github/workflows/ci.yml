@@ -12,6 +12,99 @@ concurrency:
   group: cli-ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 jobs:
+  linux-online-runtime-selection:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'codex/cli-linux-online-musl-proof-20261121'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+            runtime_sha: 3d9919c6f0b5e064006cd4be61d8d3b0216298a0d14934745660180abc641196
+            archive_sha: c58cb7ead24b5d15245a192ebbae7355d73322bf0a161b86e378ad75a395bbd3
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+            runtime_sha: f5e8d8481336ee4e9b13a66b0863260f6e57b44f8af9e9dda82d26e94fca571a
+            archive_sha: d4f56d16a286ea34d4eb9dec6a4f36e1918dd5eaa09e80e8e4308bbf8b86c946
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      EXPECTED_RUNTIME_SHA: ${{ matrix.runtime_sha }}
+      EXPECTED_ARCHIVE_SHA: ${{ matrix.archive_sha }}
+      BASELINE_VERSION: 2.0.0-dev.28
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Build the native GNU CLI
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$VERSION_ID" = 22.04
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          cargo build --locked -p respire --bin rsrs --target "$EXPECTED_ARCH-unknown-linux-gnu"
+          cli="$PWD/target/$EXPECTED_ARCH-unknown-linux-gnu/debug/rsrs"
+          readelf -l "$cli" | grep 'Requesting program interpreter:.*ld-linux'
+          printf 'NATIVE_CLI=%s\n' "$cli" >> "$GITHUB_ENV"
+      - name: Install and run the verified musl Runtime without Client2
+        run: |
+          set -euo pipefail
+          unset RSRS_RUNTIME_TRIPLE RSRS_RUNTIME_BIN RSRS_CORE_TEST_MODE GH_TOKEN GITHUB_TOKEN
+          export HOME="$RUNNER_TEMP/owned-home"
+          export RSRS_DATA_DIR="$RUNNER_TEMP/owned-data"
+          export RSRS_BIN_DIR="$RSRS_DATA_DIR/bin"
+          export RSRS_NO_AUTOSYNC=1 RSRS_UPDATE_CHECK=0
+          export RSRS_RPC_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          mkdir -m 0700 "$HOME" "$RSRS_DATA_DIR"
+          ! command -v respire
+          "$NATIVE_CLI" --json runtime install --version "$BASELINE_VERSION" > install.json
+          runtime="$RSRS_DATA_DIR/bin/runtime/$BASELINE_VERSION/rsrs-runtime"
+          printf '%s  %s\n' "$EXPECTED_RUNTIME_SHA" "$runtime" | sha256sum --check
+          trap '"$NATIVE_CLI" --json runtime stop' EXIT
+          "$NATIVE_CLI" --json runtime start > start.json
+          curl --fail --silent --show-error --noproxy '*' -H 'X-Respire-Health: runtime-v1' "http://127.0.0.1:$RSRS_RPC_PORT/api/health" > health.json
+          "$NATIVE_CLI" --json runtime stop > stop.json
+          trap - EXIT
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          def read(path):
+              return json.loads(Path(path).read_text(encoding="utf-8"))
+          env = os.environ
+          root = Path(env["RSRS_DATA_DIR"])
+          selected = read(root / "bin/runtime.json")
+          proof = selected["release"]
+          metadata = json.loads(proof["metadata_json"])
+          health = read("health.json")
+          receipt = read(root / "runtime" / f"stop-{health['instance_id']}.json")
+          assert selected["version"] == env["BASELINE_VERSION"] == metadata["runtime_version"]
+          assert hashlib.sha256(proof["metadata_json"].encode()).hexdigest() == proof["metadata_sha256"]
+          assert metadata["target_triple"] == f"{env['EXPECTED_ARCH']}-unknown-linux-musl"
+          assert metadata["archive_sha256"] == env["EXPECTED_ARCHIVE_SHA"]
+          assert selected["sha256"] == env["EXPECTED_RUNTIME_SHA"] == health["image_sha256"]
+          assert health["v"] == 1 and health["startup_complete"] and health["store_ready"] is False
+          assert health["credential_state"] == "required" and Path(health["installation_root"]) == root
+          assert receipt["state"] == "drained" and receipt["pid"] == health["pid"]
+          assert all(read(path)["status"] == "ok" for path in ("install.json", "start.json", "stop.json"))
+          report = {"status": "passed", "run": env["GITHUB_RUN_ID"], "harness_source": env["GITHUB_SHA"],
+                    "cli_sha256": hashlib.sha256(Path(env["NATIVE_CLI"]).read_bytes()).hexdigest(),
+                    "runtime": {key: metadata[key] for key in ("runtime_version", "target_triple", "archive_sha256", "binary_sha256")},
+                    "checks": ["gnu_cli_used_default_musl", "native_locked_start_without_client2", "drained_stop"]}
+          Path("linux-musl-selection.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-gnu-cli-musl-runtime-${{ matrix.arch }}
+          path: |
+            linux-musl-selection.json
+            install.json
+            start.json
+            health.json
+            stop.json
+          if-no-files-found: warn
   workspace-tests:
     outputs:
       rust_cache_key: ${{ steps.rust-key.outputs.key }}
