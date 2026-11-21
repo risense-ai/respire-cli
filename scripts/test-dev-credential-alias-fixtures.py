@@ -978,6 +978,12 @@ class SnapshotTests(unittest.TestCase):
         for value in (USER, PASSWORD, SUPER, '/private/', 'Assertion'):
             self.assertNotIn(value, json.dumps(location))
         self.assertEqual(secret_service.provider_abort_location(libc_assertion, -5), 'unknown')
+        critical = (b"** (gnome-keyring-daemon:123): GLib-CRITICAL **: 09:31:02.123: "
+                    b"g_variant_ref: assertion '" + private + b"' failed")
+        self.assertEqual(secret_service.provider_abort_location(critical, -5), dict(function='g_variant_ref'))
+        self.assertEqual(secret_service.provider_abort_location(critical, -6), 'unknown')
+        self.assertEqual(secret_service.provider_abort_location(critical.replace(b'g_variant_ref', b'token'), -5),
+                         'unknown')
         for filename in (b'gkd-secret-service.c', b'gkm-secret-item.c', b'egg-secure-memory.c', b'gmain.c'):
             header = b'Bail out! Gkm:ERROR:/private/' + private + b'/' + filename + b':42:some_function: assertion failed: (' + private + b')'
             location = secret_service.provider_abort_location(header, -6)

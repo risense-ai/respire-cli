@@ -6,7 +6,7 @@ on:
         description: Native autostart diagnostic target; no release acceptance
         type: choice
         default: all
-        options: [all, windows-latest, macos-15-intel, ubuntu-latest]
+        options: [all, windows-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
       runtime_source_sha:
         description: Exact reviewed source of the compatible newly published Runtime; update .github/runtime-test-fixture.json before product validation
         type: string
@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.platform == 'windows-latest' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"}]' || inputs.platform == 'macos-15-intel' && '[{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""}]' || inputs.platform == 'ubuntu-latest' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]' || '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"},{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]') }}
+        include: ${{ fromJSON(inputs.platform == 'ubuntu-24.04-arm' && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","suffix":""}]' || inputs.platform == 'windows-latest' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"}]' || inputs.platform == 'macos-15-intel' && '[{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""}]' || inputs.platform == 'ubuntu-latest' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]' || '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","suffix":".exe"},{"os":"macos-15-intel","target":"x86_64-apple-darwin","suffix":""},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","suffix":""}]') }}
     env:
       RSRS_ENGINE: cpu
       RUST_TEST_THREADS: '1'
@@ -93,9 +93,11 @@ jobs:
           test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
           printf '%s\n' "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.95.0
+        if: matrix.os != 'ubuntu-24.04-arm'
         with:
           targets: ${{ matrix.target }}
       - name: Build the current native CLI for explicit product validation
+        if: matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           SDK_TARGET: ${{ matrix.target }}
@@ -105,6 +107,7 @@ jobs:
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
           cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
       - name: Prepare and authenticate the explicitly reviewed published Runtime
+        if: matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           SDK_TARGET: ${{ matrix.target }}
@@ -154,6 +157,7 @@ jobs:
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           NODE
       - name: Foreground and actual isolated current-user service lifecycle
+        if: matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           SDK_TARGET: ${{ matrix.target }}
@@ -161,3 +165,35 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/test-runtime-autostart.py --binary "target/autostart-validation/$SDK_TARGET/debug/rsrs$EXE_SUFFIX" --register
+      - name: Verify exact ARM64 release inputs
+        if: matrix.os == 'ubuntu-24.04-arm'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_SOURCE: ${{ inputs.runtime_source_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = codex/cli-arm64-autostart-replay-20261121
+          bash scripts/require-native-linux-arm64.sh aarch64-unknown-linux-musl
+          cli_zip="$RUNNER_TEMP/cli-autostart-replay.zip"
+          gh api repos/risense-ai/respire-cli/actions/artifacts/14688604229/zip > "$cli_zip"
+          printf '%s  %s\n' 58d7e61af99f83e6800007d99d809b92899fb8c17fa2646065163cc9479bc72f "$cli_zip" | sha256sum --check
+          unzip -q "$cli_zip" -d "$RUNNER_TEMP/cli-autostart-artifact"
+          node npm/scripts/set-build-version.mjs 2.0.0-dev.25
+          env ARTIFACT_SOURCE=build VALIDATION_PROFILE=full CLI_TARGET=aarch64-unknown-linux-musl \
+            CLI_VERSION=2.0.0-dev.25 CLI_SHA=51ac46442d58639f97a06679bad23b5d3ace0cc7 \
+            CLI_PRODUCER_RUN_ID=44860343956 CLI_PRODUCER_ATTEMPT=1 \
+            node npm/scripts/extract-artifact.mjs "$RUNNER_TEMP/cli-autostart-artifact" "$RUNNER_TEMP/cli-autostart"
+          printf '%s  %s\n' 04cb60e9a9b9b4cc5cab34660c10840a7d6b5e06e30dffe81c46c3cafa918b74 "$RUNNER_TEMP/cli-autostart/rsrs" | sha256sum --check
+          test "$RUNTIME_SOURCE" = "$(gh api repos/risense-ai/respire-runtime/commits/v2.0.0-dev.28 --jq .sha)"
+          archive="$RUNNER_TEMP/rsrs-runtime-aarch64-unknown-linux-musl.tar.gz"
+          gh release download v2.0.0-dev.28 -R risense-ai/respire-runtime -p "$(basename "$archive")" -O "$archive"
+          printf '%s  %s\n' d4f56d16a286ea34d4eb9dec6a4f36e1918dd5eaa09e80e8e4308bbf8b86c946 "$archive" | sha256sum --check
+      - name: Replay the ARM64 current-user service lifecycle
+        if: matrix.os == 'ubuntu-24.04-arm'
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
+          python scripts/test-runtime-autostart.py --binary "$RUNNER_TEMP/cli-autostart/rsrs" --register \
+            --runtime-archive "$RUNNER_TEMP/rsrs-runtime-aarch64-unknown-linux-musl.tar.gz" --runtime-version 2.0.0-dev.28

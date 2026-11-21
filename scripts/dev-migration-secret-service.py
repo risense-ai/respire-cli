@@ -93,6 +93,14 @@ def provider_abort_location(stderr, exit_code):
         rb"assertion failed(?:[: ][^\r\n]*)?\r?$", stderr)
     if match is None and exit_code == -6:
         match = PROVIDER_LIBC_ASSERTION.search(stderr)
+    if match is None and exit_code == -5:
+        critical = re.search(
+            rb"(?m)^(?:\*\* )?\(gnome-keyring-daemon:[0-9]+\): "
+            rb"(?:GLib(?:-GIO|-GObject)?|Gkm|Gkd|Egg)-CRITICAL \*\*: "
+            rb"(?:[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}: )?"
+            rb"((?:g|gkm|gkd|egg)_[a-z0-9_]{1,80}): assertion [^\r\n]+ failed\r?$", stderr)
+        if critical:
+            return {"function": critical[1].decode("ascii")}
     if match is None:
         return "unknown"
     return {"file": match["file"].decode("ascii"), "line": int(match["line"]),
