@@ -133,6 +133,7 @@ jobs:
         if: always()
         with:
           name: linux-x64-gnu-login-interruption-diagnostic
+          retention-days: 1
           path: |
             ${{ runner.temp }}/frozen-input.json
             ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
