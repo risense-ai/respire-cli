@@ -84,14 +84,55 @@
     {
       "id": "cli.release-assets-eight-target-matrix",
       "area": "release-assets",
-      "status": "missing",
-      "reason": "Real published/candidate archives for all eight frozen release targets have no actual-asset execution report; source metadata/installer fixtures are insufficient.",
+      "status": "implemented",
       "introduced_in_stage": 1,
       "required_at_gate": [
         "G1",
         "G2"
       ],
-      "report_schema": "required-execution/v2"
+      "report_schema": "required-execution/v2",
+      "coverage": "real-artifact",
+      "required_targets": [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc"
+      ],
+      "source_suite": [
+        {
+          "file": "scripts/verify-candidate-npm.mjs",
+          "test": "verify-candidate-npm.mjs",
+          "command": "node scripts/verify-candidate-npm.mjs TARGET CANDIDATE_JSON SHA256 PACK_DIRECTORY NEW_FIXTURE_DIRECTORY",
+          "coverage": "real-artifact",
+          "scope": "Native offline installation and launcher execution of frozen candidate archives."
+        }
+      ],
+      "evidence": {
+        "workflow": ".github/workflows/g1-cli-source-evidence.yml",
+        "job": "native-packages",
+        "job_name": "Native npm package",
+        "command_fragment": "node scripts/verify-candidate-npm.mjs",
+        "matrix": [
+          "x86_64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-unknown-linux-musl",
+          "x86_64-apple-darwin",
+          "aarch64-apple-darwin",
+          "x86_64-pc-windows-msvc",
+          "aarch64-pc-windows-msvc"
+        ]
+      },
+      "required_cases": [
+        "offline-install",
+        "native-launcher-version",
+        "isolated-runtime-inventory"
+      ],
+      "execution_note": "Runs raw native package installation, actual launcher execution and frozen digest checks. Full Runtime lifecycle and DB upgrades remain in native release regression."
     }
   ]
 }
