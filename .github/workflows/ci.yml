@@ -112,6 +112,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
             runtime-receipt.json
+          retention-days: 1
           if-no-files-found: warn
   workspace-tests:
     outputs:
