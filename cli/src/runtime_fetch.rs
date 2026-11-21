@@ -952,12 +952,12 @@ struct PublicRelease {
     assets: Vec<PublicAsset>,
 }
 
-fn default_runtime_channel() -> RuntimeChannel {
-    if env!("CARGO_PKG_VERSION").contains("-dev.") {
-        RuntimeChannel::Dev
-    } else {
-        RuntimeChannel::Stable
-    }
+fn selected_runtime_channel() -> Result<RuntimeChannel> {
+    let Some(selected) = read_manifest().context(ManagedRuntimeRepairRequired)? else {
+        return Ok(RuntimeChannel::Dev);
+    };
+    let prerelease = selected.version.split('+').next().is_some_and(|version| version.contains('-'));
+    Ok(if prerelease { RuntimeChannel::Dev } else { RuntimeChannel::Stable })
 }
 
 fn runtime_channel_name(channel: RuntimeChannel) -> &'static str {
@@ -967,8 +967,8 @@ fn runtime_channel_name(channel: RuntimeChannel) -> &'static str {
     }
 }
 
-pub(crate) fn default_runtime_channel_name() -> &'static str {
-    runtime_channel_name(default_runtime_channel())
+pub(crate) fn selected_runtime_channel_name() -> Result<&'static str> {
+    Ok(runtime_channel_name(selected_runtime_channel()?))
 }
 
 fn latest_runtime_release(channel: RuntimeChannel) -> Result<String> {
@@ -1833,17 +1833,17 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 /// A damaged selected build requires repair; it never triggers automatic
 /// replacement. An explicit trusted offline install can re-establish proof.
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
-    download_runtime_release(pin, mirror, default_runtime_channel(), true)
+    download_runtime_release(pin, mirror, None, true)
 }
 
 pub(crate) fn install_published_runtime(version: Option<&str>, mirror: Option<&str>, channel: Option<RuntimeChannel>) -> Result<PathBuf> {
-    download_runtime_release(version, mirror, channel.unwrap_or_else(default_runtime_channel), false)
+    download_runtime_release(version, mirror, channel, false)
 }
 
 fn download_runtime_release(
     pin: Option<&str>,
     mirror: Option<&str>,
-    channel: RuntimeChannel,
+    channel: Option<RuntimeChannel>,
     reuse_selected: bool,
 ) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
@@ -1870,7 +1870,10 @@ fn download_runtime_release(
     }
     let required = match pin {
         Some(version) => version.to_owned(),
-        None => latest_runtime_release(channel)?,
+        None => latest_runtime_release(match channel {
+            Some(channel) => channel,
+            None => selected_runtime_channel()?,
+        })?,
     };
     let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");

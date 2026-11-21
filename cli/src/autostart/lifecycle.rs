@@ -1819,7 +1819,7 @@ fn runtime_inventory() -> Result<Value> {
         )
         .collect();
     Ok(json!({
-        "channel": crate::runtime_fetch::default_runtime_channel_name(),
+        "channel": crate::runtime_fetch::selected_runtime_channel_name()?,
         "installed": versions,
     }))
 }
@@ -2930,7 +2930,7 @@ mod tests {
         let installed = root.join("bin/runtime").join(&version);
         fs::create_dir_all(&installed)?;
         let inventory = runtime_inventory()?;
-        anyhow::ensure!(inventory["channel"] == crate::runtime_fetch::default_runtime_channel_name()
+        anyhow::ensure!(inventory["channel"] == crate::runtime_fetch::selected_runtime_channel_name()?
             && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);
         anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None, None).is_err());
