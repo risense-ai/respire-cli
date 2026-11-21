@@ -84,6 +84,9 @@ jobs:
           python -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.1.0
       - name: Replay the Windows v1.0.20 upgrade on the sealed Client2
         shell: bash
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
           python scripts/test-real-m3-account-switch.py --binary cli/rsrs.exe \
@@ -99,6 +102,7 @@ jobs:
           path: |
             ${{ runner.temp }}/isolated-client2-history/real-account-return-verification.json
             ${{ runner.temp }}/isolated-client2-history/fixture-dependencies.json
+          retention-days: 1
           if-no-files-found: warn
   workspace-tests:
     outputs:
