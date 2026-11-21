@@ -342,6 +342,8 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
     std::env::remove_var("RSRS_RUNTIME_BIN");
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    anyhow::ensure!(list_installed()?.is_empty());
+    anyhow::ensure!(!runtime_dir().exists());
     let binary_name = release_binary_name(&triple);
     let binary_bytes = b"synthetic runtime bytes, never executed";
     let resource_bytes = b"synthetic SDK resource";
