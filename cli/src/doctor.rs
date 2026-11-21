@@ -505,7 +505,7 @@ mod tests {
             ));
             let binary = crate::mcp::stable_bin_path();
             assert!(matches!(
-                row(host_rows(false), "mcp bin")?.status,
+                row(host_rows(false, None), "mcp bin")?.status,
                 Status::Skip
             ));
             assert!(!binary.exists());
@@ -514,7 +514,7 @@ mod tests {
                 std::fs::create_dir_all(binary.parent().context("fixture binary parent")?)?;
                 std::os::unix::fs::symlink(root.join("missing-cli"), &binary)?;
                 assert!(matches!(
-                    row(host_rows(false), "mcp bin")?.status,
+                    row(host_rows(false, None), "mcp bin")?.status,
                     Status::Fail
                 ));
                 std::fs::remove_file(&binary)?;
