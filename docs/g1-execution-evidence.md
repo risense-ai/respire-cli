@@ -92,6 +92,12 @@ Neither mode certifies G1.
 
 ### Workflow input and artifact contract
 
+Run `g1-cli-freeze-input.yml` on the same trusted-main commit to store the
+reviewed inventory. Supply the original JSON and its SHA-256. The workflow
+checks the source identity and records the exact bytes. Its successful run
+and artifact IDs are inputs to the G1 source workflow. Recording the inventory
+does not validate the product assets or certify G1.
+
 The opt-in `g1-cli-source-evidence.yml` workflow produces the two CLI source
 reports on trusted main. Its dispatch inputs are `candidate_run_id`,
 `candidate_artifact_id` and `candidate_sha256`. The workflow keeps the

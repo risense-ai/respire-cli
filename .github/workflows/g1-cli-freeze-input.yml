@@ -1,0 +1,52 @@
+name: Record a reviewed CLI G1 candidate
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_json:
+        description: Exact reviewed schema 2 candidate.json bytes
+        required: true
+        type: string
+      candidate_sha256:
+        description: SHA-256 of the reviewed candidate.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: Verify and preserve the reviewed inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Check the reviewed inventory and commit identity
+        env:
+          CANDIDATE_JSON: ${{ inputs.candidate_json }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {mkdirSync,writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          import {verifyCandidate} from './scripts/produce-required-tests.mjs';
+
+          const env = process.env;
+          assert.equal(env.GITHUB_REF, 'refs/heads/main');
+          const bytes = Buffer.from(env.CANDIDATE_JSON, 'utf8');
+          verifyCandidate(bytes, env.CANDIDATE_SHA256, {source_sha: env.GITHUB_SHA});
+          const directory = join(env.RUNNER_TEMP, 'reviewed-g1-input');
+          mkdirSync(directory);
+          writeFileSync(join(directory, 'candidate.json'), bytes, {flag:'wx'});
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g1-candidate-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reviewed-g1-input/candidate.json
+          retention-days: 1
+          if-no-files-found: error
