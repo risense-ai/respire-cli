@@ -69,8 +69,11 @@ jobs:
           node scripts/ci-install-pinned-runtime.mjs cli/rsrs.exe
           printf '%s  %s\n' 6b18fd68618f1459b99c4ed8848b3e2144f95e69982572c606e013f91a653a14 \
             "$RSRS_DATA_DIR/bin/runtime/2.0.0-dev.28/rsrs-runtime.exe" | sha256sum --check
-          export RSRS_M3_DIR="$RUNNER_TEMP/release-models"
+          export RSRS_M3_DIR="$RSRS_DATA_DIR/models/bge-m3"
           cli/rsrs.exe --direct model install-m3 --json
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' \
+            --output "$RSRS_M3_DIR/onnx/model_quantized.onnx"
           mkdir -p native-legacy-model/onnx
           cp "$RSRS_M3_DIR/tokenizer.json" native-legacy-model/tokenizer.json
           cp "$RSRS_M3_DIR/onnx/"model_quantized.* native-legacy-model/onnx/
@@ -85,7 +88,7 @@ jobs:
           set -euo pipefail
           python scripts/test-real-m3-account-switch.py --binary cli/rsrs.exe \
             --seed-binary historical/rsrs.exe --seed-source v1.0.20 \
-            --model-dir "$RUNNER_TEMP/release-models" --legacy-model-dir native-legacy-model \
+            --model-dir "$RUNNER_TEMP/windows-runtime-source/models/bge-m3" --legacy-model-dir native-legacy-model \
             --output-dir "$RUNNER_TEMP/isolated-client2-history" \
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --client2-binary verified-client2/respire-windows-amd64.exe --client2-sha256 "$CLIENT2_SHA256"
