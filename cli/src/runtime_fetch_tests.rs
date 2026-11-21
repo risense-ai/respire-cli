@@ -788,9 +788,13 @@ fn release_triple_override_is_validated() -> Result<()> {
         anyhow::ensure!(
             release_triple()? == format!("{}-unknown-linux-{abi}", std::env::consts::ARCH)
         );
+        anyhow::ensure!(
+            release_triple_for(true)? == format!("{}-unknown-linux-musl", std::env::consts::ARCH)
+        );
     }
-    std::env::set_var("RSRS_RUNTIME_TRIPLE", "aarch64-unknown-linux-musl");
-    anyhow::ensure!(release_triple()? == "aarch64-unknown-linux-musl");
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", "aarch64-unknown-linux-gnu");
+    anyhow::ensure!(release_triple()? == "aarch64-unknown-linux-gnu");
+    anyhow::ensure!(release_triple_for(true)? == "aarch64-unknown-linux-gnu");
     std::env::set_var("RSRS_RUNTIME_TRIPLE", "not-a-triple");
     anyhow::ensure!(release_triple().is_err());
     Ok(())

@@ -175,7 +175,8 @@ jobs:
           const metadata = JSON.parse(selected.release.metadata_json);
           assert.equal(metadata.schema_version, 2);
           assert.match(metadata.source_commit, /^[0-9a-f]{40}$/);
-          assert.equal(metadata.triple ?? metadata.target_triple, process.env.SDK_TARGET);
+          const runtimeTarget = process.env.SDK_TARGET.replace(/-unknown-linux-gnu$/, '-unknown-linux-musl');
+          assert.equal(metadata.triple ?? metadata.target_triple, runtimeTarget);
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.binary_sha256, selected.sha256);
           const runtime = realpathSync(join(root, 'bin', 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
@@ -187,7 +188,7 @@ jobs:
             metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
           const core = JSON.parse(coreBytes);
           assert.equal(core.schema_version, 1);
-          assert.equal(core.target, process.env.SDK_TARGET);
+          assert.equal(core.target, runtimeTarget);
           // The authenticated Runtime manifest owns its SDK identity independently of CLI.
           assert.equal(typeof core.sdk_version, 'string');
           assert.ok(core.sdk_version.trim(), 'The Runtime must declare its own SDK identity');

@@ -207,9 +207,13 @@ pub fn valid_version(version: &str) -> bool {
 }
 
 /// Release asset triple for the running platform. The darwin-amd64 asset keeps
-/// its obfuscated triple name (see [`TRIPLES`]); Linux follows the compiled
-/// ABI, with an explicit asset override available through `RSRS_RUNTIME_TRIPLE`.
+/// its obfuscated triple name (see [`TRIPLES`]); existing offline installs use
+/// the compiled ABI unless an explicit asset target is supplied.
 pub fn release_triple() -> Result<String> {
+    release_triple_for(false)
+}
+
+fn release_triple_for(online: bool) -> Result<String> {
     if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_TRIPLE") {
         let trimmed = raw.trim();
         anyhow::ensure!(
@@ -223,8 +227,8 @@ pub fn release_triple() -> Result<String> {
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("macos", "x86_64") => DARWIN_AMD64_RELEASE_TRIPLE,
-        ("linux", "x86_64") if cfg!(target_env = "musl") => "x86_64-unknown-linux-musl",
-        ("linux", "aarch64") if cfg!(target_env = "musl") => "aarch64-unknown-linux-musl",
+        ("linux", "x86_64") if online || cfg!(target_env = "musl") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") if online || cfg!(target_env = "musl") => "aarch64-unknown-linux-musl",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         _ => bail!("no published rsrs-runtime asset for this platform"),
@@ -1852,7 +1856,7 @@ fn download_runtime_release(
             return Ok(binary);
         }
     }
-    let triple = release_triple()?;
+    let triple = release_triple_for(true)?;
     // Hermetic tests fail explicitly instead of downloading or synthesizing a shim.
     anyhow::ensure!(
         !respire_client_host::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),

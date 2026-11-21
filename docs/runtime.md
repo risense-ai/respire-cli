@@ -25,9 +25,10 @@ exact `--version` to select a different source release. Start it with
 to model files. For a deliberate Runtime source override, use the Runtime
 command's `--mirror` option with an approved origin.
 
-On Linux, a musl CLI selects the published musl Runtime for its architecture,
-and a GNU CLI selects the GNU Runtime for a fresh install. Both can verify an
-existing shared selection for the same architecture using the installed
+On Linux, fresh online installs select the published musl Runtime for the
+local architecture. Offline installs keep the CLI's compiled ABI as the
+default. Set `RSRS_RUNTIME_TRIPLE` to install a specific published target.
+Both CLI builds can verify an existing shared selection using the installed
 Runtime release's own target, digest, and inventory. The managed directory
 is keyed by version. Installing a different build of an occupied version fails before
 switching `runtime.json`. Use separate `RSRS_DATA_DIR` roots when both ABI
