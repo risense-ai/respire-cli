@@ -583,6 +583,7 @@ jobs:
           path: |
             ${{ runner.temp }}/published-upgrades/published-upgrades.json
             ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
+            ${{ runner.temp }}/published-upgrades/**/results-client2/real-account-return-verification.json
             ${{ runner.temp }}/published-upgrades/**/results/**/boundary-inspector/inspector.log
             ${{ runner.temp }}/published-upgrades/**/results/**/boundary-inspector/inspection-failure.json
           if-no-files-found: error
