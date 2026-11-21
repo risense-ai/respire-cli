@@ -5,6 +5,10 @@ name: Dev server sweep
 on:
   workflow_dispatch:
     inputs:
+      arm64_gnu_only:
+        description: Run the base and supplemental suites on the exact Linux ARM64 GNU candidate
+        type: boolean
+        default: false
       database_sync_only:
         description: Only test legacy ciphertext migration, real sync and independent current-device decryption
         type: boolean
@@ -70,14 +74,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
+    if: ${{ inputs.arm64_gnu_only || !inputs.api_only || inputs.local_api_only || inputs.database_sync_only || inputs.business_only }}
     name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(inputs.arm64_gnu_only && '[{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]' || (inputs.local_api_only || inputs.database_sync_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -101,14 +105,19 @@ jobs:
           DATABASE_SYNC_ONLY: ${{ inputs.database_sync_only }}
           HISTORY_SOURCES: ${{ inputs.history_sources }}
           BUSINESS_ONLY: ${{ inputs.business_only }}
+          ARM64_GNU_ONLY: ${{ inputs.arm64_gnu_only }}
           EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
         run: |
+          node -e 'if(process.env.ARM64_GNU_ONLY==="true"&&["API_ONLY","LOCAL_API_ONLY","DATABASE_SYNC_ONLY","BUSINESS_ONLY"].some(key=>process.env[key]==="true")) throw new Error("ARM64 GNU accepts only the base and supplemental diagnostic scope")'
           node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.DATABASE_SYNC_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.DATABASE_SYNC_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.HISTORY_SOURCES&&process.env.DATABASE_SYNC_ONLY!=="true") throw new Error("Historical sources require database_sync_only")'
           node -e 'if(process.env.BUSINESS_ONLY==="true"&&!/^[a-f0-9]{40}$/.test(process.env.EXPECTED_RUNTIME_SHA||"")) throw new Error("Pass the exact published Runtime source SHA for business diagnostics")'
           node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("CLI smoke requires https://api-dev.rsrs.rs"); if(!process.env.CLI_RUN_ID||!process.env.CLI_SHA) throw new Error("Pass the exact CI run ID and source SHA; mutable npm tags are not smoke artifacts")'
+      - name: Require a native Linux ARM64 runner
+        if: inputs.arm64_gnu_only
+        run: bash scripts/require-native-linux-arm64.sh aarch64-unknown-linux-gnu
       - name: Verify the original release build
         if: inputs.cli_run_id != ''
         shell: bash
@@ -423,7 +432,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.database_sync_only && !inputs.business_only }}
+    if: ${{ !inputs.arm64_gnu_only && !inputs.database_sync_only && !inputs.business_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
