@@ -44,6 +44,7 @@ use sha2::{Digest, Sha256};
 use crate::model_progress;
 use respire_commands::autostart::RuntimeChannel;
 use respire_commands::rpc_client::PROTOCOL_V;
+use respire_protocol::runtime::{ProtocolRange, RuntimeBuildFile};
 
 /// Release repository that publishes the runtime artifacts.
 pub const RUNTIME_REPO: &str = "risense-ai/respire-runtime";
@@ -454,9 +455,7 @@ fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
         let metadata = manifest.bound_local_metadata()?;
         let triple = metadata.target_triple()?;
         let directory = version_dir(&manifest.version);
-        // Authenticate core-runtime.json before trusting its resource declarations.
-        metadata.verify_files(&directory)?;
-        verify_stage(&directory, RUNTIME_BINARY, triple, &manifest.sha256)
+        verify_release_stage(&metadata, &directory, RUNTIME_BINARY, triple, &manifest.sha256)
     })()
     .context(ManagedRuntimeRepairRequired)
 }
@@ -484,8 +483,8 @@ pub(crate) fn verified_migrated_image(image: &str) -> Result<Option<PathBuf>> {
     let manifest: ManagedManifest = serde_json::from_slice(&fs::read(receipt)?)?;
     anyhow::ensure!(manifest.version == version, "migrated Runtime receipt version mismatch");
     let metadata = manifest.bound_local_metadata()?;
-    metadata.verify_files(&directory)?;
-    Ok(Some(verify_stage(
+    Ok(Some(verify_release_stage(
+        &metadata,
         &directory,
         RUNTIME_BINARY,
         metadata.target_triple()?,
@@ -576,20 +575,7 @@ pub struct BuildMetadata {
     #[serde(default, deserialize_with = "deserialize_capabilities")]
     pub capabilities: BTreeMap<String, String>,
     #[serde(default)]
-    pub files: Vec<BuildFile>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProtocolRange {
-    pub minimum: u32,
-    pub maximum: u32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct BuildFile {
-    pub path: String,
-    pub size: u64,
-    pub sha256: String,
+    pub files: Vec<RuntimeBuildFile>,
 }
 
 fn deserialize_metadata_string<'de, D>(
@@ -791,6 +777,10 @@ impl BuildMetadata {
     }
 
     fn verify_files(&self, stage: &Path) -> Result<()> {
+        self.verify_files_with(stage, &mut ReleaseFileVerification::default())
+    }
+
+    fn verify_files_with(&self, stage: &Path, verification: &mut ReleaseFileVerification) -> Result<()> {
         if self.schema_version < 2 {
             return Ok(());
         }
@@ -818,7 +808,12 @@ impl BuildMetadata {
                 "release file size mismatch: {}",
                 file.path
             );
-            let actual = sha256_file(&path)?;
+            let actual = if name == CORE_MANIFEST_FILE {
+                verification.read_core_manifest(&path)?;
+                verification.hash(&path)?
+            } else {
+                verification.hash(&path)?
+            };
             anyhow::ensure!(
                 actual.eq_ignore_ascii_case(&file.sha256),
                 "release file checksum mismatch: {}",
@@ -1200,14 +1195,15 @@ fn download_archive(url: &str, dest: &Path) -> Result<String> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let file = fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    sha256_reader(file).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn sha256_reader(mut file: impl Read) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let read = file
-            .read(&mut buf)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        let read = file.read(&mut buf)?;
         if read == 0 {
             break;
         }
@@ -1488,17 +1484,114 @@ struct CoreManifestFile {
     sha256: String,
 }
 
+/// Digests are reusable only inside one verification pass over one payload.
+#[derive(Default)]
+struct ReleaseFileVerification {
+    digests: BTreeMap<PathBuf, (String, fs::Metadata)>,
+    core_manifest: Option<Vec<u8>>,
+}
+
+fn same_release_file(before: &fs::Metadata, after: &fs::Metadata) -> Result<bool> {
+    if !before.is_file() || !after.is_file() || before.len() != after.len()
+        || before.modified()? != after.modified()? {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Ok((before.dev(), before.ino(), before.ctime(), before.ctime_nsec())
+            == (after.dev(), after.ino(), after.ctime(), after.ctime_nsec()));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return Ok(before.creation_time() == after.creation_time() && before.file_attributes() == after.file_attributes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    Ok(before.created()? == after.created()?)
+}
+
+fn verify_release_file_identity(path: &Path, before: &fs::Metadata, after: &fs::Metadata) -> Result<()> {
+    anyhow::ensure!(same_release_file(before, after)?,
+        "runtime release file changed during verification: {}", path.display());
+    Ok(())
+}
+
+impl ReleaseFileVerification {
+    fn hash(&mut self, path: &Path) -> Result<&str> {
+        use std::collections::btree_map::Entry;
+        let path_metadata = fs::symlink_metadata(path)?;
+        let digest = match self.digests.entry(path.to_path_buf()) {
+            Entry::Occupied(entry) => {
+                verify_release_file_identity(path, &entry.get().1, &path_metadata)?;
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => {
+                let mut file = fs::File::open(path)?;
+                verify_release_file_identity(path, &path_metadata, &file.metadata()?)?;
+                let digest = sha256_reader(&mut file)?;
+                verify_release_file_identity(path, &path_metadata, &file.metadata()?)?;
+                verify_release_file_identity(path, &path_metadata, &fs::symlink_metadata(path)?)?;
+                entry.insert((digest, path_metadata))
+            }
+        };
+        Ok(&digest.0)
+    }
+
+    fn read_core_manifest(&mut self, path: &Path) -> Result<&[u8]> {
+        if self.core_manifest.is_none() {
+            let path_metadata = fs::symlink_metadata(path)?;
+            let mut file = fs::File::open(path)?;
+            verify_release_file_identity(path, &path_metadata, &file.metadata()?)?;
+            let mut bytes = Vec::new();
+            (&mut file).take(MAX_METADATA_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= MAX_METADATA_BYTES, "runtime manifest is too large");
+            verify_release_file_identity(path, &path_metadata, &file.metadata()?)?;
+            verify_release_file_identity(path, &path_metadata, &fs::symlink_metadata(path)?)?;
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            self.digests.insert(path.to_path_buf(), (actual, path_metadata));
+            self.core_manifest = Some(bytes);
+        } else {
+            self.hash(path)?;
+        }
+        self.core_manifest.as_deref().context("missing verified runtime manifest bytes")
+    }
+
+    fn verify_unchanged(&self) -> Result<()> {
+        for (path, (_, expected)) in &self.digests {
+            verify_release_file_identity(path, expected, &fs::symlink_metadata(path)?)?;
+        }
+        Ok(())
+    }
+}
+
+fn verify_release_stage(metadata: &BuildMetadata, stage: &Path, binary: &str, triple: &str, hash: &str) -> Result<PathBuf> {
+    let mut verification = ReleaseFileVerification::default();
+    // Authenticate core-runtime.json before using its resource declarations,
+    // and parse exactly the bytes that passed the outer inventory's digest.
+    metadata.verify_files_with(stage, &mut verification)?;
+    let binary = verify_stage_with(stage, binary, triple, hash, &mut verification)?;
+    verification.verify_unchanged()?;
+    Ok(binary)
+}
+
 /// Verify the extracted stage against the shipped manifest and the expected
 /// binary hash (client2 `verifyRuntime` semantics). `binary_file` is the
 /// archive-side binary name inside `stage`.
-fn verify_stage(
+#[cfg(test)]
+fn verify_stage(stage: &Path, binary_file: &str, triple: &str, binary_hash: &str) -> Result<PathBuf> {
+    verify_stage_with(stage, binary_file, triple, binary_hash, &mut ReleaseFileVerification::default())
+}
+
+fn verify_stage_with(
     stage: &Path,
     binary_file: &str,
     triple: &str,
     binary_hash: &str,
+    verification: &mut ReleaseFileVerification,
 ) -> Result<PathBuf> {
     let binary = regular_install_file(stage, binary_file)?;
-    let actual = sha256_file(&binary)?;
+    let actual = verification.hash(&binary)?;
     anyhow::ensure!(
         actual.eq_ignore_ascii_case(binary_hash),
         "runtime checksum mismatch: expected {binary_hash}, found {actual}"
@@ -1513,8 +1606,8 @@ fn verify_stage(
         fs::metadata(&manifest_path)?.len() <= MAX_METADATA_BYTES as u64,
         "runtime manifest is too large"
     );
-    let bytes = fs::read(&manifest_path)?;
-    let manifest: CoreManifest = serde_json::from_slice(&bytes)
+    let bytes = verification.read_core_manifest(&manifest_path)?;
+    let manifest: CoreManifest = serde_json::from_slice(bytes)
         .with_context(|| format!("invalid {} manifest", CORE_MANIFEST_FILE))?;
     anyhow::ensure!(
         manifest.schema_version == 1 && manifest.target == triple && !manifest.files.is_empty(),
@@ -1550,7 +1643,7 @@ fn verify_stage(
             "runtime manifest file is missing: {}",
             file.path
         );
-        let actual = sha256_file(&target)?;
+        let actual = verification.hash(&target)?;
         anyhow::ensure!(
             actual.eq_ignore_ascii_case(&file.sha256),
             "runtime checksum mismatch: {}",
@@ -1908,8 +2001,7 @@ fn download_runtime_release(
             );
             let unpacked = stage.join("unpacked");
             extract_archive(&archive, &unpacked)?;
-            verify_stage(&unpacked, &metadata.binary_file, &triple, &binary_sha256)?;
-            metadata.verify_files(&unpacked)?;
+            verify_release_stage(&metadata, &unpacked, &metadata.binary_file, &triple, &binary_sha256)?;
             // Release archives carry the full-triple binary name; publish the
             // bare managed name before switching the version directory.
             place_managed_binary(&unpacked, &metadata.binary_file)?;
@@ -1999,8 +2091,7 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
         extract_archive(&staged_archive, &unpacked)?;
         let binary_file = metadata.binary_file.clone();
         let binary_hash = metadata.binary_sha256()?.to_owned();
-        verify_stage(&unpacked, &binary_file, &triple, &binary_hash)?;
-        metadata.verify_files(&unpacked)?;
+        verify_release_stage(&metadata, &unpacked, &binary_file, &triple, &binary_hash)?;
         place_managed_binary(&unpacked, &binary_file)?;
         adopt_or_verify_version_dir(&unpacked, &manifest)?;
         publish_manifest(&manifest)?;
@@ -2132,7 +2223,7 @@ mod revision4_install_validation {
         let mut metadata: BuildMetadata = serde_json::from_value(fixture["payload"].clone())?;
         metadata.validate_schema2()?;
         let duplicate = metadata.files.first().context("fixture has no binary")?;
-        metadata.files.push(BuildFile {
+        metadata.files.push(RuntimeBuildFile {
             path: duplicate.path.to_ascii_uppercase(),
             size: duplicate.size,
             sha256: duplicate.sha256.clone(),

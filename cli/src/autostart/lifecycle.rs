@@ -2576,10 +2576,12 @@ mod tests {
         let _port = PortRestore(std::env::var_os("RSRS_RPC_PORT"));
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
-        drop(listener);
+        // Host preferences must not probe or cycle the serving owner even if
+        // the port is already occupied. Identity-bound operations are below.
         let result = crate::autostart::control_agent_config("diary_mode=verbose")?;
         assert!(matches!(result.status, respire_commands::output::Status::Ok));
         assert!(!marker_path(&root).exists() && !root.join("bin").exists() && !root.join("rsrs.db").exists());
+        drop(listener);
         let mut terminal_core = None;
         for intent in ["read_heat=false", "read_heat=true", "recall_fusion={\"fusion\":\"attention\"}"] {
             let saved = crate::autostart::control_agent_config(intent)?;

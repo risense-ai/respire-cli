@@ -96,10 +96,31 @@ pub fn off_mode() -> Result<bool> {
     })
 }
 
+/// The profile agent.json setting is authoritative. Read the historical
+/// device client.json value only when the profile did not set a mirror.
 pub fn mirror_from_env() -> Result<Option<String>> {
-    // Validate client.json even when the environment supplies the selected mirror.
-    let agent = read_agent_config()?;
+    let (client, agent) = read_settings()?;
     Ok(crate::env::var("RSRS_MIRROR").ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| agent["model_mirror"].as_str().map(str::to_owned)))
+        .or_else(|| configured_mirror(client.as_ref(), &agent).map(str::to_owned)))
+}
+
+fn configured_mirror<'a>(client: Option<&'a Value>, agent: &'a Value) -> Option<&'a str> {
+    let nonempty = |value: &'a Value| value["model_mirror"].as_str()
+        .filter(|mirror| !mirror.trim().is_empty());
+    nonempty(agent).or_else(|| client.and_then(nonempty))
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn model_mirror_prefers_profile_setting_and_falls_back_to_legacy_device() {
+        let device = json!({"model_mirror":"legacy.example"});
+        assert_eq!(configured_mirror(Some(&device), &json!({"model_mirror":"auto"})), Some("auto"));
+        assert_eq!(configured_mirror(Some(&device), &json!({"model_mirror":"  "})), Some("legacy.example"));
+        assert_eq!(configured_mirror(None, &json!({})), None);
+    }
 }

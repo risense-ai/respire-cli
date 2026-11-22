@@ -50,6 +50,16 @@ requests and writes, checkpoints a candidate generation, validates both main
 and diary indexes, and only then activates it. Pending snapshots survive restart
 for an explicit `model resume`; no uncertain operation is automatically replayed.
 
+In a terminal, `rsrs model switch` waits for the original scoped operation to
+become ready or fail and shows progress on standard error. Existing redirected
+and JSON output keeps the immediate acceptance receipt; use `--wait` to wait
+in a script or `--no-wait` (alias `--async`) to return immediately in a
+terminal. A lost or expired receipt is reported as unknown, not as permission
+to submit the switch again. The TUI's profile picker uses the Runtime model
+catalog and the same scoped switch path. Existing legacy model commands remain
+available where there is no active profile.
+
+
 ```mermaid
 flowchart LR
   Host[Host terminal] -->|owns lifecycle| Runtime[Loopback HTTP runtime]
@@ -94,6 +104,31 @@ Runtime artifact, without a CLI shim override or `--runtime-internal`. The legac
 Client-only mode forbids lifecycle changes, binary copies, upgrades, CPU recovery and
 `--direct` execution. MCP stdio does not copy the executable. A failed request never
 triggers sandbox takeover. An idle runtime stays running until the host stops it.
+
+## Embed a separate local library
+
+Give the host its own absolute `RSRS_DATA_DIR` and an unused `RSRS_RPC_PORT`,
+and pass both values consistently to its installer, lifecycle commands and RPC
+clients. The port alone does not isolate data. If you set `RSRS_BIN_DIR`, keep
+that directory private to the installation too. Use the native CLI distributed
+for the host's target: its `cli-build-<target>.json` records the matching binary
+name and SHA-256. Runtime selection is independent of that CLI release; check
+the [wire compatibility contract](runtime-compatibility.md).
+
+Install Runtime before starting it. Use the host to initialize or unlock the
+intended library, and check Runtime's scoped state before sending business RPCs.
+For ordinary client-only RPC or MCP stdio, do not copy the CLI into the library
+just to materialize a fixed path; opt-in native supervision handles its own
+executable registration. Stop the instance with `rsrs runtime stop` using the
+same data root and port. If the host is retiring its startup registration as
+well, use `rsrs runtime autostart remove --stop`. A stop error is not a
+successful shutdown: do not remove the library or binary while its owner
+has not been verified stopped.
+
+`--client-only` restricts local host side effects. It does **not** make a
+normal Runtime recall free of read-heat or query-log effects. Do not treat it
+as per-request observation-only access to someone else's existing library;
+that guarantee is not part of the current recall interface.
 
 ## Query an uncertain operation
 

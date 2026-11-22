@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-pub(crate) fn exchange_control(
+pub fn exchange_control(
     binary: &Path,
     grant: &HostControlLaunchGrant,
     request: &RpcRequest,
@@ -243,6 +243,38 @@ mod tests {
             .context("invalid JSON must fail")?
             .to_string();
         assert_eq!(error, "invalid host control response JSON");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_owned_helper_is_stopped_at_the_response_deadline() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let binary = directory.path().join("synthetic-helper");
+        // No descendant inherits the output pipe; only the owned fixture is stopped.
+        std::fs::write(&binary, b"#!/bin/sh\nwhile :; do :; done\n")?;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+        let grant: HostControlLaunchGrant = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "protocol_version":crate::PROTOCOL_V, "nonce":"fixture",
+            "instance_id":"fixture", "installation_root":directory.path(),
+            "installation_id":"fixture", "profile":directory.path(), "account_id":"fixture",
+            "sync_generation":0, "image_path":binary, "image_sha256":"fixture",
+            "supervisor_pid":std::process::id(), "supervisor_birth":"fixture",
+            "port":0, "issued_at_ms":0, "expires_at_ms":100
+        }))?;
+        let request: RpcRequest = serde_json::from_value(serde_json::json!({
+            "v":crate::PROTOCOL_V,"id":"silent-helper","method":"fixture"
+        }))?;
+        let started = Instant::now();
+        let error = exchange_control(
+            &binary, &grant, &request, started + Duration::from_millis(250),
+            |_, _| anyhow::bail!("silent helper did not return a response"),
+        ).err().context("silent helper must fail")?;
+        let message = format!("{error:#}");
+        assert!(message.contains("response deadline"), "{message}");
+        assert!(!message.contains("cleanup_failed"), "{message}");
+        assert!(started.elapsed() < Duration::from_secs(4));
         Ok(())
     }
 

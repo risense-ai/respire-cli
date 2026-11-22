@@ -31,6 +31,18 @@ pub fn prepare_model_assets_with_sources(
     allowed_roots: &[PathBuf],
     sources: &[Vec<String>],
 ) -> Result<bool> {
+    prepare_model_assets_tracking_publication(plan, allowed_roots, sources, || {})
+}
+
+/// The observer runs immediately before an asset can be published. Once it
+/// runs, an error no longer proves the previous live asset set is intact.
+#[doc(hidden)]
+pub fn prepare_model_assets_tracking_publication(
+    plan: &respire_protocol::AssetsStatus,
+    allowed_roots: &[PathBuf],
+    sources: &[Vec<String>],
+    mut before_publish: impl FnMut(),
+) -> Result<bool> {
     use respire_protocol::AssetState;
     anyhow::ensure!(sources.len() == plan.assets.len()
         && sources.iter().all(|list| list.iter().all(|source| !source.is_empty())),
@@ -182,10 +194,9 @@ pub fn prepare_model_assets_with_sources(
                 asset.expected_size,
             )?;
         }
-        anyhow::ensure!(
-            crate::model_download::file_valid(staged, hash, asset.expected_size)?,
-            "prepared model asset failed size or SHA-256 validation"
-        );
+        // A pre-existing staging file was verified above; the downloader
+        // verifies a freshly written one. Recheck at the publication boundary,
+        // not immediately after writing on the same path.
     }
     // Never publish the first replacement until every required download verifies.
     for (target, staged, asset, _) in &pending {
@@ -212,6 +223,7 @@ pub fn prepare_model_assets_with_sources(
         );
         check_model_path(&staged.with_extension("onnx.parts"))?;
         remove_download_parts(staged)?;
+        before_publish();
         replace_file(staged, target)?;
     }
     for (target, _, asset, _) in &pending {
@@ -544,6 +556,36 @@ mod tests {
         prepare_model_assets(&plan, std::slice::from_ref(&root))?;
         assert!(prepare_model_assets_with_sources(&plan, std::slice::from_ref(&root),
             &[vec!["https://local-mirror.invalid/unused-verified-file".to_owned()]])?);
+        assert_eq!(std::fs::read(root.join(file))?, b"abc");
+
+        // Maintenance may restore the old runtime after a failure only
+        // when the staging lane has not crossed the publication boundary.
+        let observed = std::cell::Cell::new(0);
+        let mut invalid_plan = plan.clone();
+        invalid_plan.assets[0].sha256 = None;
+        invalid_plan.missing = invalid_plan.assets.clone();
+        let offline = vec![vec!["https://fixture.invalid/never-requested".to_owned()]];
+        assert!(prepare_model_assets_tracking_publication(
+            &invalid_plan, std::slice::from_ref(&root), &offline, || observed.set(observed.get() + 1)
+        ).is_err());
+        assert_eq!(observed.get(), 0);
+        assert!(prepare_model_assets_tracking_publication(
+            &plan, std::slice::from_ref(&root), &offline, || observed.set(observed.get() + 1)
+        )?);
+        assert_eq!(observed.get(), 0);
+        std::fs::remove_file(root.join(file))?;
+        let leaf = file.rsplit('/').next().context("fixture model filename")?;
+        let staged = root.join(file).with_file_name(format!(".{sha256}-{leaf}.partial"));
+        assert_eq!(staged.parent(), root.join(file).parent());
+        std::fs::write(&staged, b"abc")?;
+        assert!(!prepare_model_assets_tracking_publication(
+            &plan, std::slice::from_ref(&root), &offline, || {
+                assert!(!root.join(file).exists(), "observer must precede the first rename");
+                observed.set(observed.get() + 1);
+            }
+        )?);
+        assert_eq!(observed.get(), 1);
+        assert!(!staged.exists());
         assert_eq!(std::fs::read(root.join(file))?, b"abc");
 
         for (case, expected_error) in [

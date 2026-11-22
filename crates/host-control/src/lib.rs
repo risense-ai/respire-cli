@@ -20,6 +20,7 @@ pub use account::{
     AccountContinuation, AccountCoordinator, AccountHandoffPending, AccountOutcomeUnknown,
 };
 pub use account_control::register_rejection_class;
+pub use exchange::exchange_control;
 pub use key::{KeyCoordinator, KeyRecoveryRequired};
 pub use launch::spawn_serving;
 pub use maintenance::{HostLifecycle, LaunchContext, Maintenance, RegistrationMode, KeygenAccountTransfer, KeygenAccountAdmission};

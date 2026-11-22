@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use crate::i18n::{self, Lang};
 
+mod model_profiles;
 mod model_task;
 mod model_weights;
 mod recall_api;
@@ -56,6 +57,7 @@ enum ConfirmKind {
     CancelModel(String),
     RestartM3(String, String),
     Engine(String),
+    ModelProfile(model_profiles::Selection),
     Weights(String, String),
     InstallVariant(String, String),
     InstallEngines,
@@ -72,6 +74,7 @@ enum Overlay {
     RecallFusion(recall_fusion::Form),
     ModelMirror(text_input::Input),
     ModelWeights(model_weights::Form),
+    ModelProfiles(model_profiles::Picker),
     SavingWeights,
     HostModel,
     RecallTest(recall_test::Form),
@@ -721,6 +724,15 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         model_weights_key(app, code);
         return false;
     }
+    if let Overlay::ModelProfiles(picker) = &mut app.overlay {
+        if code == KeyCode::Esc {
+            app.overlay = Overlay::None;
+        } else if let Some(selection) = picker.key(code) {
+            ask(app, format!("{}: {}?", t("切换模型", "Switch model"), selection.label()),
+                ConfirmKind::ModelProfile(selection));
+        }
+        return false;
+    }
     if let Overlay::ModelTask(task) = &app.overlay {
         if matches!(code, KeyCode::Esc | KeyCode::Char('c' | 'C')) {
             task.cancel.store(true, Ordering::Release);
@@ -761,7 +773,7 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         Page::Model => list_key(
             app,
             code,
-            15 + model_engines().len() + usize::from(cfg!(windows)),
+            16 + model_engines().len() + usize::from(cfg!(windows)),
             |app, code| model_key(app, code),
         ),
         Page::Workspace => workspace_key(app, code),
@@ -1226,6 +1238,11 @@ fn try_model_key(app: &mut App, code: KeyCode) -> Result<()> {
                         Err(error) => app.set_notice(error),
                     },
                     Some(10) => app.page = Page::Home,
+                    Some(11) => {
+                        let catalog = model_profiles::catalog()?
+                            .ok_or_else(|| anyhow::anyhow!("This Runtime does not provide model profiles"))?;
+                        app.overlay = Overlay::ModelProfiles(model_profiles::Picker::new(&catalog)?);
+                    }
                     _ => {}
                 }
             }
@@ -1303,12 +1320,31 @@ fn save_model_settings(
     engine: &str,
     variant: Option<&str>,
 ) -> Result<String, String> {
+    if let Some(catalog) = model_profiles::catalog().map_err(|error| error.to_string())? {
+        if let Some(active) = model_profiles::active(&catalog).map_err(|error| error.to_string())? {
+            return switch_model_profile(active.change_engine(engine, variant).map_err(|error| error.to_string())?);
+        }
+    }
     let settings = save_model_settings_with(engine, variant, retrieval_action)?;
     if let Ok(mut live) = shared.lock() {
         live.engine = settings["engine"].as_str().unwrap_or("").to_owned();
         live.model_settings = settings;
     }
     Ok(t("\u{6743}\u{91cd}\u{5df2}\u{6821}\u{9a8c}\u{3001}\u{52a0}\u{8f7d}\u{3001}\u{8bd5}\u{63a8}\u{7406}\u{5e76}\u{4fdd}\u{5b58}\u{ff1b}\u{5df2}\u{56de}\u{8bfb}\u{8bbe}\u{7f6e}", "Weights validated, loaded, trial inference passed, saved and read back."))
+}
+
+fn switch_model_profile(choice: model_profiles::Selection) -> Result<String, String> {
+    if choice.unchanged() {
+        return Ok(format!("{}: {}", t("模型已激活", "Model already active"), choice.model()));
+    }
+    let result = choice.switch().map_err(|error| format!("{error:#}"))?;
+    if matches!(result.status, crate::output::Status::Fail) {
+        return Err(result.errors.first().cloned().unwrap_or_else(|| "Model profile switch failed".into()));
+    }
+    if result.summary["state"] != "ready" {
+        return Err("Runtime did not confirm model activation; inspect model progress without resubmitting".into());
+    }
+    Ok(format!("{}: {}", t("模型已激活", "Model active"), choice.model()))
 }
 
 fn probe_notice(value: Value) -> Result<String, String> {
@@ -1472,6 +1508,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
         ConfirmKind::RestartM3(_, _) => t("\u{6b63}\u{5728}\u{53d6}\u{6d88}\u{65e7}\u{4efb}\u{52a1}\u{5e76}\u{91cd}\u{65b0}\u{5b89}\u{6392}\u{4e0b}\u{8f7d}", "Cancelling the old task and scheduling a new download"),
         ConfirmKind::Weights(_, _) => t("\u{6b63}\u{5728}\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d}\u{ff1b}\u{8bd5}\u{63a8}\u{7406}\u{6210}\u{529f}\u{540e}\u{4fdd}\u{5b58}", "Validating and loading; saving after trial inference"),
         ConfirmKind::InstallVariant(_, _) => t("\u{6b63}\u{5728}\u{4e0b}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}\u{ff1b}\u{4e0d}\u{5207}\u{6362}\u{6a21}\u{578b}", "Downloading selected weights; current model unchanged"),
+        ConfirmKind::ModelProfile(selection) => format!("{}: {}", t("正在切换模型", "Switching model"), selection.label()),
         ConfirmKind::Engine(_) => t("\u{6b63}\u{5728}\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d}\u{63a8}\u{7406}\u{5f15}\u{64ce}", "Validating and loading inference engine"),
         ConfirmKind::InstallEngines => t("\u{6b63}\u{5728}\u{4e0b}\u{8f7d} NPU \u{63a8}\u{7406}\u{5f15}\u{64ce}", "Downloading NPU providers"),
         ConfirmKind::ProbeEngine => t("\u{6b63}\u{5728}\u{9a8c}\u{8bc1}\u{63a8}\u{7406}\u{5f15}\u{64ce}", "Checking inference engine"),
@@ -1483,7 +1520,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             &format!("Updating {spec} with {tool}"),
         ),
     };
-    let changing_model = matches!(&kind, ConfirmKind::Engine(_) | ConfirmKind::Weights(_, _));
+    let changing_model = matches!(&kind, ConfirmKind::Engine(_) | ConfirmKind::Weights(_, _) | ConfirmKind::ModelProfile(_));
     if changing_model {
         app.overlay = Overlay::SavingWeights;
         MODEL_REVISION.fetch_add(1, Ordering::AcqRel);
@@ -1515,6 +1552,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                 host_command(&["model", "uninstall-m3"]).map(|_| t("BGE-M3 \u{5df2}\u{5378}\u{8f7d}", "BGE-M3 uninstalled"))
             }
             ConfirmKind::Engine(engine) => save_model_settings(&shared, &engine, None),
+            ConfirmKind::ModelProfile(selection) => switch_model_profile(selection),
             ConfirmKind::Weights(engine, variant) => save_model_settings(&shared, &engine, Some(&variant)),
             ConfirmKind::InstallVariant(engine, variant) => selected_model_mirror().map_err(|error| format!("{error:#}"))
                 .and_then(|mirror| host_command(&["model", "install-m3", "--model", &variant, "--for-engine", &engine,
@@ -2627,6 +2665,10 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
         app.cursor == index + 11,
         t("0  \u{8fd4}\u{56de}", "0  Back"),
     ));
+    lines.push(choice(
+        app.cursor == index + 12,
+        t("选择 Runtime 模型配置…", "Choose a Runtime model profile…"),
+    ));
     lines
 }
 
@@ -3003,6 +3045,7 @@ fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
     match &app.overlay {
         Overlay::None => None,
         Overlay::ModelWeights(form) => Some(form.lines(&app.live.model_settings)),
+        Overlay::ModelProfiles(picker) => Some(picker.lines()),
         Overlay::RecallFusion(form) => Some(form.lines()),
         Overlay::HostModel => Some(vec![
             line(t("\u{7b49}\u{5f85}\u{5bbf}\u{4e3b}\u{5b50}\u{8fdb}\u{7a0b}\u{8fd4}\u{56de}\u{7ed3}\u{679c}", "Waiting for the host subprocess result")),

@@ -18,6 +18,7 @@ mod doctor;
 mod host_rpc;
 mod login;
 mod mcp;
+mod model_switch;
 mod profile_control;
 mod profile_discovery;
 mod rpc;
@@ -1242,7 +1243,8 @@ fn main_body() -> i32 {
             match Cli::try_parse_from(std::iter::once(std::ffi::OsString::from("rsrs")).chain(args))
             {
                 Ok(cli)
-                    if matches!(
+                    if local_inspection_before_runtime_gates(cli.command.as_ref())
+                        || matches!(
                         cli.command,
                         Some(
                             Command::AgentConfig { set: None }
@@ -1517,6 +1519,28 @@ fn run_classify_config(
     ))
 }
 
+fn local_inspection_before_runtime_gates(command: Option<&Command>) -> bool {
+    matches!(
+        command,
+        Some(Command::Prompt | Command::V | Command::Inject {
+            targets: true,
+            preview: false,
+            expected: None,
+            tui: false,
+            ..
+        }),
+    )
+}
+
+fn requires_host_snapshot_preflight(command: Option<&Command>) -> bool {
+    // Generic local profile configuration can change the active library or
+    // its synchronization policy. The dedicated account/space operations
+    // already own their transaction before reaching this point.
+    matches!(command, Some(Command::Config { data_dir, addr, autosync, cure_auto, rpc_parallelism })
+        if data_dir.is_some() || addr.is_some() || autosync.is_some()
+            || cure_auto.is_some() || rpc_parallelism.is_some())
+}
+
 fn run(args: Cli) -> Result<()> {
     if let Some(Command::UpdateCheck { force, clear }) = args.command.as_ref() {
         set_json_mode(args.json || respire::env::var("RSRS_JSON")
@@ -1527,6 +1551,14 @@ fn run(args: Cli) -> Result<()> {
     // in-process capture callers reach run() without main(), so wire them
     // idempotently here too (the first installation always wins).
     let _ = install_cli_host_hooks();
+    if local_inspection_before_runtime_gates(args.command.as_ref()) {
+        set_json_mode(args.json || respire::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        if matches!(args.command, Some(Command::V)) {
+            return crate::app_version::emit(json_mode());
+        }
+        return host_command(&args).context("local inspection handler is missing")?;
+    }
     if matches!(args.command.as_ref(), Some(Command::AgentConfig { set: None })) {
         set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
             .is_ok_and(|value| value == "1" || value == "true"));
@@ -1651,7 +1683,7 @@ fn run(args: Cli) -> Result<()> {
     }
     // Legacy recovery owns its Paused transaction before ordinary requests hit the fence.
     if !runtime_policy::client_only()
-        && !matches!(args.command, Some(Command::V | Command::MemoryRevision))
+        && !matches!(args.command, Some(Command::MemoryRevision))
     {
         rpc::recover_interrupted_login()?;
     }
@@ -1844,37 +1876,7 @@ fn run(args: Cli) -> Result<()> {
     }
     // Business RPC retains Runtime's post-ownership snapshot gate and bootstrap.
     // Only local host writes need this offline check before they change files.
-    let host_snapshot_write = match args.command.as_ref() {
-        Some(
-            Command::AgentConfig { set: Some(_) }
-            | Command::ClassifyConfig { set: true, .. }
-            | Command::Inject {
-                targets: false,
-                preview: false,
-                ..
-            }
-            | Command::Plugin {
-                command: PluginCommand::Test { .. },
-            },
-        ) => true,
-        Some(Command::Config {
-            data_dir,
-            addr,
-            autosync,
-            cure_auto,
-            rpc_parallelism,
-        }) => {
-            data_dir.is_some()
-                || addr.is_some()
-                || autosync.is_some()
-                || cure_auto.is_some()
-                || rpc_parallelism.is_some()
-        }
-        Some(Command::Account { action, .. }) => action == "remove",
-        Some(Command::Space { action, .. }) => matches!(action.as_str(), "create" | "remove"),
-        _ => false,
-    };
-    if host_snapshot_write && !runtime_policy::client_only() {
+    if requires_host_snapshot_preflight(args.command.as_ref()) && !runtime_policy::client_only() {
         runtime_policy::require_host("local host write snapshot preflight")?;
         if runtime_fetch::read_manifest()?.is_none() {
             runtime_fetch::download_and_install(None, None)?;
@@ -1899,12 +1901,19 @@ fn run(args: Cli) -> Result<()> {
                 backend,
                 engine,
                 variant,
-            } => Some((
-                "model.switch",
-                vec![serde_json::to_string(
-                    &serde_json::json!({"model":model,"backend":backend,"engine":engine,"variant":variant}),
-                )?],
-            )),
+                wait,
+                no_wait,
+            } => {
+                anyhow::ensure!(
+                    !DIRECT_MODE.load(Ordering::Relaxed),
+                    "model profiles require the resident runtime; omit --direct"
+                );
+                let choice = serde_json::json!({"model":model,"backend":backend,"engine":engine,"variant":variant});
+                // Keep existing machine pipelines asynchronous unless explicitly
+                // opting in; an interactive terminal gets the terminal result.
+                let interactive = !json_mode() && std::io::IsTerminal::is_terminal(&std::io::stdout());
+                return emit_result(model_switch::submit(choice, *wait || (!*no_wait && interactive), !json_mode())?);
+            }
             ModelAction::Progress => Some(("model.progress", Vec::new())),
             ModelAction::Resume => Some(("model.resume", Vec::new())),
             _ => None,
@@ -2034,9 +2043,6 @@ fn run(args: Cli) -> Result<()> {
             ResultEnvelope::new("migrate", OutputStatus::Ok, value.clone(), Vec::new());
         envelope.details = value;
         return emit_result(envelope);
-    }
-    if matches!(args.command, Some(Command::V)) {
-        return crate::app_version::emit(json_mode());
     }
     if let Some(Command::ClassifyConfig {
         backend,
@@ -2263,6 +2269,62 @@ mod capture_tests {
     }
 
     use super::capture_run;
+
+    #[test]
+    fn static_prompt_and_version_bypass_unrelated_runtime_markers() -> anyhow::Result<()> {
+        let _serial = super::TEST_ENV_LOCK.lock().map_err(|_| anyhow::anyhow!("environment lock poisoned"))?;
+        let root = tempfile::tempdir()?;
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 { std::env::set_var("RSRS_DATA_DIR", value); }
+                else { std::env::remove_var("RSRS_DATA_DIR"); }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RSRS_DATA_DIR"));
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        let marker = root.path().join("runtime/autostart/maintenance.json");
+        std::fs::create_dir_all(marker.parent().ok_or_else(|| anyhow::anyhow!("missing marker parent"))?)?;
+        let contents = b"unrelated maintenance fixture";
+        std::fs::write(&marker, contents)?;
+        anyhow::ensure!(super::autostart::check_managed_request().is_err(), "fixture must block ordinary requests");
+        let (prompt, version) = respire_commands::output_state::HOST_RPC_OUTPUT.with(|mode| {
+            let previous = mode.replace(true);
+            let prompt = capture_run(vec!["--json".into(), "prompt".into()]);
+            let version = capture_run(vec!["--json".into(), "version".into()]);
+            mode.set(previous);
+            (prompt, version)
+        });
+        let observed_marker = std::fs::read(marker)?;
+        drop(_restore);
+        drop(_serial);
+        assert_eq!(prompt.exit, 0);
+        assert!(prompt.envelope.summary["instructions"].as_str() == Some(respire::inject::INSTRUCTIONS_MD));
+        assert_eq!(version.exit, 0);
+        assert_eq!(observed_marker, contents);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_snapshot_preflight_and_switch_flags_remain_distinct() -> anyhow::Result<()> {
+        for (args, inspection, snapshot) in [
+            (&["rsrs", "inject", "--targets"][..], true, false),
+            (&["rsrs", "inject", "--id", "codex", "--expected", "fixture"][..], false, false),
+            (&["rsrs", "classify-config", "--set", "--backend", "jev"][..], false, false),
+            (&["rsrs", "plugin", "test", "post-sync", "--payload", "{}"][..], false, false),
+            (&["rsrs", "config", "--data-dir", "fixture"][..], false, true),
+            (&["rsrs", "config"][..], false, false),
+        ] {
+            let parsed = super::Cli::try_parse_from(args.iter().copied())?;
+            assert_eq!(super::local_inspection_before_runtime_gates(parsed.command.as_ref()), inspection);
+            assert_eq!(super::requires_host_snapshot_preflight(parsed.command.as_ref()), snapshot);
+        }
+        for flag in ["--wait", "--no-wait", "--async"] {
+            assert!(super::Cli::try_parse_from(["rsrs", "model", "switch", "m3", flag]).is_ok());
+        }
+        assert!(super::Cli::try_parse_from(["rsrs", "model", "switch", "m3", "--wait", "--no-wait"]).is_err());
+        Ok(())
+    }
 
     #[test]
     fn input_failures_remain_distinct_from_runtime_failures() {

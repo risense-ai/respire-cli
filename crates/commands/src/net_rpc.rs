@@ -481,6 +481,21 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     rpc_method_with_timeout(method, args, None)
 }
 
+/// Send a switch for the scope whose catalog the UI displayed, not whichever
+/// profile happens to be active when the confirmation is pressed.
+pub fn rpc_model_switch_for_scope(
+    choice: String,
+    scope: &respire_protocol::RuntimeRequestScope,
+) -> Result<Value> {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let operation = OperationContext {
+        scope: scope.clone(),
+        idempotency_key: operation_id.clone(),
+        operation_id,
+    };
+    rpc_request("model.switch", vec![choice], Some(&operation), None)
+}
+
 pub fn request_scope(health: &Health) -> Result<respire_protocol::RuntimeRequestScope> {
     anyhow::ensure!(
         health.v == crate::rpc_client::PROTOCOL_V
@@ -504,6 +519,11 @@ pub fn request_scope(health: &Health) -> Result<respire_protocol::RuntimeRequest
 
 /// Inspect the original operation without refreshing health or replaying it.
 pub fn rpc_result(operation: &OperationContext) -> Result<Value> {
+    rpc_result_with_timeout(operation, None)
+}
+
+/// Bound each observation by the caller's remaining wait budget.
+pub fn rpc_result_with_timeout(operation: &OperationContext, timeout: Option<Duration>) -> Result<Value> {
     anyhow::ensure!(
         !operation.scope.account_id.is_empty()
             && !operation.scope.instance_id.is_empty()
@@ -516,7 +536,7 @@ pub fn rpc_result(operation: &OperationContext) -> Result<Value> {
         "runtime.result",
         vec![operation.operation_id.clone()],
         Some(operation),
-        None,
+        timeout,
     )
 }
 
@@ -550,7 +570,7 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     }
 }
 
-pub(crate) fn rpc_method_with_timeout(
+pub fn rpc_method_with_timeout(
     method: &str,
     args: Vec<String>,
     test_timeout: Option<Duration>,

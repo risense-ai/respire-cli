@@ -1,4 +1,4 @@
-//! One reviewed agent setting, using the existing maintenance marker and config CAS.
+//! Reviewed agent settings; safe host-only preferences use config CAS without maintenance.
 use std::time::Duration;
 use anyhow::{Context, Result};
 use respire_commands::output::{ResultEnvelope, Status};
@@ -429,6 +429,25 @@ fn control_core_setting(record: &mut AgentConfigMaintenance, maintenance: &mut s
     Ok(output)
 }
 
+fn online_preference(intent: &AgentConfigIntent) -> bool {
+    // Not a blanket bypass: workspace mode, core configuration, identity and
+    // unclassified keys keep their existing ownership/recovery requirements.
+    matches!(intent.key.trim(), "model_mirror" | "diary_mode" | "language")
+}
+
+fn publish_online_preference(intent: AgentConfigIntent, root: &std::path::Path, profile: &std::path::Path) -> Result<ResultEnvelope> {
+    host_config_preflight(root, profile)?;
+    validate_host_agent_config(&intent, profile)?;
+    let result = ResultEnvelope::new("agent-config", Status::Ok,
+        serde_json::json!({"action":"updated", "key":intent.key, "value":intent.value()}),
+        vec![respire_commands::output::Item::new(&intent.key, Status::Ok, &intent.raw_value)]);
+    let review = crate::client_config::review_agent_config_for_operation(intent, root.to_path_buf(), profile.to_path_buf(), None)?;
+    // The caller retains takeover ownership; this path locks only the actual
+    // configuration file and compares the full original bytes before replace.
+    crate::client_config::publish_agent_config(&review, || Ok(()))?;
+    Ok(result)
+}
+
 fn control_host_agent_config(intent: Option<respire_protocol::config_control::AgentConfigIntent>,
     query: Option<(&respire_commands::runtime_error::OperationContext, &std::path::Path)>,
     request: Option<(&str, bool)>) -> anyhow::Result<respire_commands::output::ResultEnvelope> {
@@ -442,6 +461,10 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
     let identity = metadata_identity(&profile, super::hash)?;
     let account = identity.account_id.clone().unwrap_or_else(|| super::hash(profile.display().to_string().as_bytes()));
     let saved = super::lifecycle::pending_agent_config(&root, query.is_some() || request.is_some())?;
+    if saved.is_none() && query.is_none() && request.is_none()
+        && intent.as_ref().is_some_and(online_preference) {
+        return publish_online_preference(intent.context("online preference intent missing")?, &root, &profile);
+    }
     let mut query_only = query.is_some() || request.is_some_and(|(_, query)| query);
     let requested = query.map(|(context, _)| context.operation_id.as_str())
         .or(request.map(|(id, _)| id));

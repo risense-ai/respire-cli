@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::model_progress;
 
+mod proxy;
+
 pub(super) fn file_valid(path: &Path, expected: &str, expected_size: Option<u64>) -> Result<bool> {
     if !path.is_file() {
         return Ok(false);
@@ -27,6 +29,8 @@ pub(super) fn sha256_file(path: &Path) -> Result<String> {
     let item = path.file_name().unwrap_or_default().to_string_lossy();
     let total = path.metadata()?.len();
     let mut checked = 0;
+    let mut reported = 0;
+    let mut last_report = std::time::Instant::now();
     model_progress::update("verify", &item, 0, Some(total))?;
     let mut file =
         File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -41,8 +45,15 @@ pub(super) fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
         checked += n as u64;
-        model_progress::update("verify", &item, checked, Some(total))?;
+        if checked - reported >= 4 * 1024 * 1024
+            || last_report.elapsed() >= std::time::Duration::from_millis(100)
+        {
+            model_progress::update("verify", &item, checked, Some(total))?;
+            reported = checked;
+            last_report = std::time::Instant::now();
+        }
     }
+    model_progress::update("verify", &item, checked, Some(total))?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -331,7 +342,7 @@ fn download_parallel_with_timeouts(
     use std::time::Duration;
     let item = dest.file_name().unwrap_or_default().to_string_lossy();
     model_progress::update("connect", &item, 0, None)?;
-    let response = download_agent(timeouts)
+    let response = download_agent(url, timeouts)?
         .get(url)
         .set("Accept-Encoding", "identity")
         .set("Range", "bytes=0-0")
@@ -455,6 +466,45 @@ fn download_part(
     timeouts: DownloadTimeouts,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    for attempt in 0..3_u32 {
+        match download_part_once(url, path, begin, end, total, count, stop, timeouts) {
+            Err(error) if attempt < 2 && error.is::<TransientSegment>() => {
+                let delay = Duration::from_millis(100) * 2_u32.pow(attempt);
+                for _ in 0..(delay.as_millis() / 25) {
+                    anyhow::ensure!(!stop.load(Ordering::Relaxed), "download segment stopped");
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+            outcome => return outcome,
+        }
+    }
+    unreachable!("the final segment attempt always returns its outcome")
+}
+
+#[derive(Debug)]
+struct TransientSegment(String);
+
+impl std::fmt::Display for TransientSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransientSegment {}
+
+fn download_part_once(
+    url: &str,
+    path: &Path,
+    begin: u64,
+    end: u64,
+    total: u64,
+    count: &std::sync::atomic::AtomicU64,
+    stop: &std::sync::atomic::AtomicBool,
+    timeouts: DownloadTimeouts,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
     let length = end - begin;
     let mut offset = if path.is_file() {
         path.metadata()?.len()
@@ -468,12 +518,26 @@ fn download_part(
     }
     anyhow::ensure!(!stop.load(Ordering::Relaxed), "download segment stopped");
     let start = begin + offset;
-    let response = download_agent(timeouts)
+    let response = download_agent(url, timeouts)?
         .get(url)
         .set("Accept-Encoding", "identity")
         .set("Range", &format!("bytes={start}-{}", end - 1))
         .call()
-        .with_context(|| format!("segment download failed ({url})"))?;
+        .map_err(|error| {
+            let retry = match &error {
+                ureq::Error::Status(code, _) => matches!(code, 500 | 502 | 503 | 504),
+                ureq::Error::Transport(transport) => matches!(
+                    transport.kind(),
+                    ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io
+                ),
+            };
+            let message = format!("segment download failed ({url}): {error}");
+            if retry {
+                TransientSegment(message).into()
+            } else {
+                anyhow!(message)
+            }
+        })?;
     anyhow::ensure!(
         response.status() == 206,
         "source did not honor the segment range"
@@ -489,13 +553,22 @@ fn download_part(
     while offset < length {
         anyhow::ensure!(!stop.load(Ordering::Relaxed), "download segment stopped");
         let limit = buffer.len().min((length - offset) as usize);
-        let received = reader
-            .read(&mut buffer[..limit])
-            .map_err(|error| anyhow!("segment interrupted ({url}): {error}"))?;
-        anyhow::ensure!(
-            received > 0,
-            "segment download incomplete; partial bytes retained"
-        );
+        let received = match reader.read(&mut buffer[..limit]) {
+            Ok(n) if n > 0 => n,
+            Ok(_) => {
+                file.flush()?;
+                return Err(TransientSegment(
+                    "segment download incomplete; partial bytes retained".into(),
+                )
+                .into());
+            }
+            Err(error) => {
+                file.flush()?;
+                return Err(
+                    TransientSegment(format!("segment interrupted ({url}): {error}")).into(),
+                );
+            }
+        };
         file.write_all(&buffer[..received])?;
         offset += received as u64;
         count.store(offset, Ordering::Relaxed);
@@ -504,12 +577,16 @@ fn download_part(
     Ok(())
 }
 
-fn download_agent(timeouts: DownloadTimeouts) -> ureq::Agent {
-    ureq::AgentBuilder::new()
+fn download_agent(url: &str, timeouts: DownloadTimeouts) -> Result<ureq::Agent> {
+    let builder = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
         .timeout_connect(timeouts.connect)
         .timeout_read(timeouts.read)
-        .timeout_write(timeouts.write)
-        .build()
+        .timeout_write(timeouts.write);
+    Ok(match proxy::configured_proxy(url)? {
+        Some(proxy) => builder.proxy(proxy).build(),
+        None => builder.build(),
+    })
 }
 
 fn download_response(
@@ -522,7 +599,7 @@ fn download_response(
     model_progress::update("connect", &item, offset, None)?;
     // Headers and body reads share the same bounded idle wait. No total deadline
     // cuts off a large model while bytes are still arriving.
-    let request = download_agent(timeouts)
+    let request = download_agent(url, timeouts)?
         .get(url)
         .set("Accept-Encoding", "identity");
     let request = if offset > 0 {
@@ -585,6 +662,75 @@ mod tests {
             assert_eq!(result.is_ok(), valid, "unexpected result: {result:?}");
             if target.exists() {
                 assert!(target.metadata()?.len() <= 3);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn segment_resumes_same_source_after_short_body_but_not_bad_range_or_4xx() -> Result<()> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow!("{error}"))?;
+        for (responses, should_succeed) in [
+            (
+                vec![
+                    (206, "bytes 0-5/6", "ab", 6, "bytes=0-5"),
+                    (206, "bytes 2-5/6", "cdef", 4, "bytes=2-5"),
+                ],
+                true,
+            ),
+            (vec![(206, "bytes 1-5/6", "bcdef", 5, "bytes=0-5")], false),
+            (vec![(404, "", "", 0, "bytes=0-5")], false),
+        ] {
+            let directory = tempfile::tempdir()?;
+            let segment = directory.path().join("seg");
+            let server =
+                tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
+            let url = format!("http://{}/model", server.server_addr());
+            let thread = std::thread::spawn(move || -> Result<()> {
+                for (status, range, body, size, requested) in responses {
+                    let request = server
+                        .recv_timeout(std::time::Duration::from_secs(3))?
+                        .context("segment request not received")?;
+                    let received = request
+                        .headers()
+                        .iter()
+                        .find(|header| header.field.equiv("Range"));
+                    assert_eq!(
+                        received.map(|header| header.value.as_str()),
+                        Some(requested)
+                    );
+                    let mut socket = request.into_writer();
+                    write!(socket, "HTTP/1.1 {status} Result\r\nContent-Range: {range}\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n{body}")?;
+                    socket.flush()?;
+                }
+                assert!(server
+                    .recv_timeout(std::time::Duration::from_millis(350))?
+                    .is_none());
+                Ok(())
+            });
+            let count = AtomicU64::new(0);
+            let result = download_part(
+                &url,
+                &segment,
+                0,
+                6,
+                6,
+                &count,
+                &AtomicBool::new(false),
+                fast_timeouts(),
+            );
+            thread
+                .join()
+                .map_err(|_| anyhow!("segment server panicked"))??;
+            assert_eq!(result.is_ok(), should_succeed, "{result:?}");
+            if should_succeed {
+                assert_eq!(std::fs::read(&segment)?, b"abcdef");
+                assert_eq!(count.load(Ordering::Relaxed), 6);
+            } else {
+                assert!(!segment.exists());
             }
         }
         Ok(())
