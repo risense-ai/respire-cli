@@ -74,6 +74,6 @@ jobs:
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/upgrade-python"
           py="$RUNNER_TEMP/upgrade-python/bin/python"
-          "$py" -m pip install --only-binary=:all: cryptography==46.0.3
+          "$py" -m pip install --only-binary=:all: cryptography==46.0.3 SecretStorage==3.3.3 jeepney==0.9.0
           "$py" scripts/test-runtime-autostart.py --binary "$RUNNER_TEMP/rsrs-$RUNTIME_TARGET" --register \
             --runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" --runtime-version "$RUNTIME_VERSION"
