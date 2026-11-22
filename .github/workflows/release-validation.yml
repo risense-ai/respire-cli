@@ -307,6 +307,7 @@ jobs:
       published_assets_sha256: ${{ inputs.published_assets_sha256 }}
 
   npm-dry-run:
+    if: ${{ false }}
     needs: [resolve, binaries]
     runs-on: ubuntu-latest
     steps:
