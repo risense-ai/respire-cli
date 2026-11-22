@@ -1,0 +1,97 @@
+name: Frozen Windows Client2 v1.0.20 history replay
+on:
+  push:
+    branches: [codex/cli-client2-v1020-replay]
+permissions:
+  contents: read
+jobs:
+  sealed-client2-windows-history:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TARGET: x86_64-pc-windows-msvc
+      CLI_VERSION: 2.0.0
+      CLI_SHA: 116e8a7e6503b058f18da909ce27671809b7abe5
+      CLI_PRODUCER_RUN_ID: '44979974050'
+      CLI_PRODUCER_ATTEMPT: '1'
+      RSRS_RUNTIME_TRIPLE: x86_64-pc-windows-msvc
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      CLIENT2_SHA256: 5d22e94ffebe58ceefd84debbf46f2c8b8c0c0181bb28f238020bc9670bfa1b0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact pending candidates and the historical seed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir verified-cli verified-client2 historical
+          gh api repos/risense-ai/respire-cli/actions/artifacts/14736968071/zip > cli-candidate.zip
+          printf '%s\n' 'caeb78de49bb43df3840fc755fb80e0d1178927158c4adae020db5232d58d839  cli-candidate.zip' | sha256sum --check
+          python -m zipfile -e cli-candidate.zip verified-cli
+          gh release download v2.0.0-dev.25 -R risense-ai/respire-client2 --dir verified-client2 -p respire-windows-amd64.exe
+          printf '%s  %s\n' "$CLIENT2_SHA256" verified-client2/respire-windows-amd64.exe | sha256sum --check
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+          node npm/scripts/extract-artifact.mjs verified-cli cli
+          printf '%s\n' 'e55f73ee20729ccc5a1918e8f3df97e4d7d9986c33ab0225e61ea829e877e0cb  cli/rsrs.exe' | sha256sum --check
+          gh release download v1.0.20 -R risense-ai/respire-cli --dir historical \
+            -p "rsrs-$CLI_TARGET.exe" -p "rsrs-$CLI_TARGET-runtime.tar.gz"
+          printf '%s  %s\n' 2aebf94df73844e015a185fe39bb9c3e9c6976c64386291ceb3efc5c920ac6c3 "historical/rsrs-$CLI_TARGET.exe" \
+            7b9143eacd503233ded0aa424f7b195e072208f52a59439ba7b382630669045f "historical/rsrs-$CLI_TARGET-runtime.tar.gz" | sha256sum --check
+          python -c 'import sys,tarfile; tarfile.open(sys.argv[1]).extractall("historical",filter="data")' "historical/rsrs-$CLI_TARGET-runtime.tar.gz"
+          cp "historical/rsrs-$CLI_TARGET.exe" historical/rsrs.exe
+      - name: Prepare verified Runtime and inference models
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RSRS_DATA_DIR="$RUNNER_TEMP/windows-runtime-source"
+          node scripts/ci-install-pinned-runtime.mjs cli/rsrs.exe
+          printf '%s  %s\n' 6b18fd68618f1459b99c4ed8848b3e2144f95e69982572c606e013f91a653a14 \
+            "$RSRS_DATA_DIR/bin/runtime/2.0.0-dev.28/rsrs-runtime.exe" | sha256sum --check
+          export RSRS_M3_DIR="$RSRS_DATA_DIR/models/bge-m3"
+          cli/rsrs.exe --direct model install-m3 --json
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_quantized.onnx' \
+            --output "$RSRS_M3_DIR/onnx/model_quantized.onnx"
+          mkdir -p native-legacy-model/onnx
+          cp "$RSRS_M3_DIR/tokenizer.json" native-legacy-model/tokenizer.json
+          cp "$RSRS_M3_DIR/onnx/"model_quantized.* native-legacy-model/onnx/
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' \
+            --output native-legacy-model/onnx/model_fp16.onnx
+          python scripts/native-model-cache.py verify --model-dir "$RSRS_M3_DIR" --legacy-dir native-legacy-model
+          python -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.1.0
+      - name: Replay the Windows v1.0.20 upgrade on the sealed Client2
+        shell: bash
+        env:
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          python scripts/test-real-m3-account-switch.py --binary cli/rsrs.exe \
+            --seed-binary historical/rsrs.exe --seed-source v1.0.20 \
+            --model-dir "$RUNNER_TEMP/windows-runtime-source/models/bge-m3" --legacy-model-dir native-legacy-model \
+            --output-dir "$RUNNER_TEMP/isolated-client2-history" \
+            --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
+            --client2-binary verified-client2/respire-windows-amd64.exe --client2-sha256 "$CLIENT2_SHA256"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sealed-client2-windows-v1020-history
+          path: |
+            ${{ runner.temp }}/isolated-client2-history/real-account-return-verification.json
+            ${{ runner.temp }}/isolated-client2-history/fixture-dependencies.json
+          retention-days: 1
+          if-no-files-found: warn

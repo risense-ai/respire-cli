@@ -294,7 +294,27 @@ for binary in BINARIES:
         cli_paths = [p / 'rsrs.exe' for p in (main / 'bin', args.client2_binary.parent, *system_path)]
         assert not any(os.path.lexists(p) for p in cli_paths), 'Client2 must start without an installed CLI'
         result = captured_run([str(args.client2_binary),'--headless',action,*arguments],env=desktop_env,timeout=960)
-        assert result.returncode==0, f'Client2 {action} failed with exit {result.returncode}'
+        if result.returncode != 0:
+            try:
+                failure = json.loads(result.stdout)
+            except ValueError:
+                failure = None
+            error = failure.get('error', '') if isinstance(failure, dict) else ''
+            error = error.casefold() if isinstance(error, str) else ''
+            categories = (
+                ('legacy_runtime_migration_required', 'legacy_runtime_migration_required'),
+                ('runtime exited before core configuration', 'runtime_exited_before_core_configuration'),
+                ('host_key_required', 'host_key_required'),
+                ('credential', 'credential_error'),
+                ('凭据', 'credential_error'),
+                ('解锁', 'unlock_error'),
+                ('scope_mismatch', 'scope_mismatch'),
+                ('停止身份', 'stop_identity_error'),
+                ('拒绝访问', 'access_denied'),
+            )
+            category = next((label for marker, label in categories if marker in error),
+                            'unclassified_json_error' if isinstance(failure, dict) else 'missing_json_response')
+            raise AssertionError(f'Client2 {action} failed with exit {result.returncode} ({category})')
         response = json.loads(result.stdout)
         assert response.get('ok') is True, f'Client2 {action} did not confirm success'
         assert not any(os.path.lexists(p) for p in cli_paths), 'Client2 unexpectedly installed a CLI'
