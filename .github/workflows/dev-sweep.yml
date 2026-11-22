@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       x64_gnu_history_replay:
-        description: Replay the isolated Linux x64 GNU old-library matrix against candidate 44899529957
+        description: Replay the isolated Linux x64 GNU v1.0.15 upgrade against candidate 44979974050
         type: boolean
         default: false
       arm64_gnu_only:
@@ -257,16 +257,16 @@ jobs:
         run: |
           set -euo pipefail
           test "$DATABASE_SYNC_ONLY" = true
-          test "$HISTORY_SOURCES" = v1.0.11,v1.0.11-dev.1,v1.0.12,v1.0.15,v1.0.16,v1.0.17-dev.6,v1.0.18,v1.0.19,v1.0.20,v1.0.7,v1.0.8,v1.0.9
+          test "$HISTORY_SOURCES" = v1.0.15
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {readFileSync} from 'node:fs';
           import {join} from 'node:path';
           const proof = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'standalone-diagnostic-identity.json')));
-          assert.equal(proof.producer.run_id.toString(), '44899529957');
+          assert.equal(proof.producer.run_id.toString(), '44979974050');
           assert.equal(Number(proof.producer.run_attempt), 1);
           assert.equal(proof.target, 'x86_64-unknown-linux-gnu');
-          assert.equal(proof.cli.binary_sha256, 'd157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447');
+          assert.equal(proof.cli.binary_sha256, '89adecfbc010b1aa15c27ee938643135c947a98b124db080a4ecee210186d394');
           assert.equal(proof.runtime.binary_sha256, '95852e50e8534a0ad46a457c6f6883f21be171737ef73e933dff12e137ee7c52');
           assert.equal(proof.runtime.release_metadata.archive_sha256, 'a6ed1c49fdd35169680bc9cc9875652b2e2e2af1d6e8aff2639ebdc5f5deab74');
           NODE
