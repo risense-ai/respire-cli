@@ -1,0 +1,76 @@
+name: Replay Linux x64 musl DEV autostart
+
+on:
+  push:
+    branches: [codex/cli-musl-autostart-dev-replay]
+
+permissions:
+  contents: read
+
+jobs:
+  autostart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [2.0.0-dev.30, 2.0.0-dev.31]
+    env:
+      RUNTIME_VERSION: ${{ matrix.runtime }}
+      RUNTIME_TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify public CLI and Runtime inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          cli="rsrs-$RUNTIME_TARGET"
+          archive="rsrs-runtime-$RUNTIME_TARGET.tar.gz"
+          gh release download v2.0.0-dev.26 -R risense-ai/respire-cli -p "$cli"
+          printf '%s  %s\n' 82eb872644a874b27473d639ec3dd1252a686e1bfb34e0145a725759808eb2c6 "$cli" | sha256sum --check
+          gh release download "v$RUNTIME_VERSION" -R risense-ai/respire-runtime -p "$archive"
+          digest=$(gh api "repos/risense-ai/respire-runtime/releases/tags/v$RUNTIME_VERSION" --jq ".assets[] | select(.name == \"$archive\") | .digest")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "${digest#sha256:}" "$archive" | sha256sum --check
+          chmod 0700 "$cli"
+      - name: Prepare the hosted user systemd and Secret Service
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
+          dpkg-query -W gnome-keyring
+          uid=$(id -u)
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$uid.service"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test ! -L "$XDG_RUNTIME_DIR"
+          test "$(stat -c '%u:%a' "$XDG_RUNTIME_DIR")" = "$uid:700"
+          test ! -L "$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          test "$(stat -c '%u' "$XDG_RUNTIME_DIR/bus")" = "$uid"
+          systemctl --user start dbus.service
+          systemctl --user is-active --quiet dbus.socket dbus.service
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.systemd1)" = 'b true'
+          test "$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixUser s org.freedesktop.systemd1)" = "u $uid"
+          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+      - name: Replay the original isolated native autostart test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/upgrade-python"
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          "$py" -m pip install --only-binary=:all: cryptography==46.0.3
+          "$py" scripts/test-runtime-autostart.py --binary "$RUNNER_TEMP/rsrs-$RUNTIME_TARGET" --register \
+            --runtime-archive "$RUNNER_TEMP/rsrs-runtime-$RUNTIME_TARGET.tar.gz" --runtime-version "$RUNTIME_VERSION"
