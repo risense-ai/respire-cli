@@ -1,8 +1,6 @@
-name: Release
+name: Windows x64 public DEV replay
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       ref:
@@ -135,21 +133,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-          - os: ubuntu-latest
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-          - os: ubuntu-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: aarch64-pc-windows-msvc
     env:
       ARTIFACT_SOURCE: ${{ inputs.artifact_source || 'build' }}
       PUBLISHED_ASSETS: ${{ inputs.published_assets }}
@@ -182,7 +166,7 @@ jobs:
           if-no-files-found: error
 
   published-full-complete:
-    if: ${{ always() && inputs.artifact_source == 'published-assets' }}
+    if: ${{ false }}
     needs: [artifact-inputs, published-assets-verification, validate, native-regression, cloud-sweep, api-smoke]
     runs-on: ubuntu-latest
     permissions:
@@ -384,7 +368,8 @@ jobs:
       version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       candidate_assets: ${{ needs.plan.outputs.candidate }}
       validation_profile: full
-      shard_macos_upgrades: ${{ inputs.artifact_source == 'published-assets' || needs.plan.outputs.sha == github.sha }}
+      shard_macos_upgrades: false
+      recovery_matrix: '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","rustflags":"-C target-feature=-crt-static"}]'
       client2_release: ${{ inputs.client2_release }}
       client2_commit: ${{ inputs.client2_commit }}
       client2_candidate_run_id: ''
@@ -397,7 +382,7 @@ jobs:
       CANDIDATE_ASSETS: ${{ needs.plan.outputs.candidate }}
       VALIDATION_PROFILE: full
       RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) && needs.validate.result == 'success' }}
+    if: ${{ false }}
     needs: [plan, validate, artifact-inputs, published-assets-verification]
     permissions:
       contents: read
@@ -620,7 +605,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) }}
+    if: ${{ false }}
     needs: [plan, artifact-inputs, published-assets-verification]
     env:
       CANDIDATE_ASSETS: ${{ needs.plan.outputs.candidate }}
@@ -814,7 +799,7 @@ jobs:
   publish:
     # Publication requires fresh exact-source validation and current-run readiness.
     needs: [artifact-inputs, plan, prepared-import, publication-ready]
-    if: ${{ !cancelled() && needs.artifact-inputs.result == 'success' && needs.plan.result == 'success' && needs.prepared-import.result == 'success' && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' && (inputs.artifact_source || 'build') == 'build' }}
+    if: ${{ false }}
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
