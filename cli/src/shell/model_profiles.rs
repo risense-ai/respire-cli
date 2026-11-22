@@ -4,6 +4,7 @@ use super::{choice, line, t, KeyCode, Line, Value};
 use anyhow::{Context, Result};
 use respire_protocol::RuntimeRequestScope;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 pub(super) struct Selection {
@@ -12,6 +13,7 @@ pub(super) struct Selection {
     engine: String,
     variant: Option<String>,
     unchanged: bool,
+    registry_fingerprint: Option<[u8; 32]>,
     scope: RuntimeRequestScope,
 }
 
@@ -29,6 +31,7 @@ impl Selection {
             engine: field("engine")?.into(),
             variant: value["variant"].as_str().map(str::to_owned),
             unchanged: true,
+            registry_fingerprint: None,
             scope: scope.clone(),
         })
     }
@@ -66,11 +69,56 @@ impl Selection {
     pub(super) fn unchanged(&self) -> bool {
         self.unchanged
     }
+
+    pub(super) fn revalidate_picker_noop(&self) -> Result<()> {
+        if !self.unchanged() {
+            return Ok(());
+        }
+        let fresh = catalog()?
+            .context("Runtime no longer provides the model catalog; reopen the picker")?;
+        self.check_picker_noop(&fresh)
+    }
+
+    fn check_picker_noop(&self, fresh: &Catalog) -> Result<()> {
+        anyhow::ensure!(
+            self.scope == fresh.scope,
+            "Runtime scope changed; reopen the model picker"
+        );
+        let current = active(fresh)?
+            .context("Runtime no longer has this active profile; reopen the model picker")?;
+        anyhow::ensure!(
+            current.arguments() == self.arguments()
+                && self.registry_fingerprint.is_some()
+                && fresh.active_registry_fingerprint(&current) == self.registry_fingerprint,
+            "Runtime model selection changed; reopen the model picker"
+        );
+        Ok(())
+    }
 }
 
 pub(super) struct Catalog {
     body: Value,
     scope: RuntimeRequestScope,
+}
+
+impl Catalog {
+    fn active_registry_fingerprint(&self, current: &Selection) -> Option<[u8; 32]> {
+        let model = self.body["registry"]["models"].get(&current.model)?;
+        let backend = self.body["registry"]["backends"].get(&current.backend)?;
+        let active = &self.body["active"];
+        if !model.is_object()
+            || !backend.is_object()
+            || &active["profile"] != model
+            || &active["backend_profile"] != backend
+        {
+            return None;
+        }
+        // Keep only a locally computed fingerprint, not registry paths or
+        // provider details. It never leaves this client or alters the wire.
+        serde_json::to_vec(&(model, backend))
+            .ok()
+            .map(|encoded| Sha256::digest(encoded).into())
+    }
 }
 
 pub(super) fn catalog() -> Result<Option<Catalog>> {
@@ -162,14 +210,11 @@ impl Picker {
                     rows.push(match current {
                         Some(current) => {
                             let mut selected = current.clone();
-                            let active_data = &catalog.body["active"];
-                            // A saved registry draft can reuse the IDs of the
-                            // active library's immutable selection. Suppress
-                            // activation only when both complete payloads match.
-                            selected.unchanged = active_data["profile"].is_object()
-                                && active_data["backend_profile"].is_object()
-                                && &active_data["profile"] == model
-                                && &active_data["backend_profile"] == backend;
+                            // Matching IDs alone do not prove the saved
+                            // registry matches the active immutable selection.
+                            selected.registry_fingerprint =
+                                catalog.active_registry_fingerprint(current);
+                            selected.unchanged = selected.registry_fingerprint.is_some();
                             selected
                         }
                         None => Selection {
@@ -178,6 +223,7 @@ impl Picker {
                             engine: "cpu".into(),
                             variant: None,
                             unchanged: false,
+                            registry_fingerprint: None,
                             scope: catalog.scope.clone(),
                         },
                     });
@@ -276,7 +322,42 @@ mod tests {
             .key(KeyCode::Enter)
             .context("missing same-ID selection")
         };
-        assert!(selected(body.clone())?.unchanged());
+        let current = selected(body.clone())?;
+        assert!(current.unchanged());
+        current.check_picker_noop(&Catalog {
+            body: body.clone(),
+            scope: scope.clone(),
+        })?;
+
+        let mut different_scope = scope.clone();
+        different_scope.generation += 1;
+        let error = current
+            .check_picker_noop(&Catalog {
+                body: body.clone(),
+                scope: different_scope,
+            })
+            .err()
+            .context("a stale picker scope was accepted")?;
+        assert!(error.to_string().contains("reopen"));
+        let mut other_active = body.clone();
+        other_active["active"]["model"] = json!("another");
+        assert!(current
+            .check_picker_noop(&Catalog {
+                body: other_active,
+                scope: scope.clone(),
+            })
+            .is_err());
+        let mut updated_in_place = body.clone();
+        updated_in_place["registry"]["backends"]["remote"]["endpoint"] =
+            json!("https://new.invalid");
+        updated_in_place["active"]["backend_profile"]["endpoint"] = json!("https://new.invalid");
+        assert!(current
+            .check_picker_noop(&Catalog {
+                body: updated_in_place,
+                scope: scope.clone(),
+            })
+            .is_err());
+
         let mut model_draft = body.clone();
         model_draft["registry"]["models"]["custom"]["embedding"]["revision"] = json!("r2");
         let mut backend_draft = body.clone();

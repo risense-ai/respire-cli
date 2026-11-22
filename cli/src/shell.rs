@@ -1552,7 +1552,9 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                 host_command(&["model", "uninstall-m3"]).map(|_| t("BGE-M3 \u{5df2}\u{5378}\u{8f7d}", "BGE-M3 uninstalled"))
             }
             ConfirmKind::Engine(engine) => save_model_settings(&shared, &engine, None),
-            ConfirmKind::ModelProfile(selection) => switch_model_profile(selection),
+            ConfirmKind::ModelProfile(selection) => selection.revalidate_picker_noop()
+                .map_err(|error| format!("{error:#}"))
+                .and_then(|()| switch_model_profile(selection)),
             ConfirmKind::Weights(engine, variant) => save_model_settings(&shared, &engine, Some(&variant)),
             ConfirmKind::InstallVariant(engine, variant) => selected_model_mirror().map_err(|error| format!("{error:#}"))
                 .and_then(|mirror| host_command(&["model", "install-m3", "--model", &variant, "--for-engine", &engine,
