@@ -1484,11 +1484,24 @@ struct CoreManifestFile {
     sha256: String,
 }
 
-/// Digests are reusable only inside one verification pass over one payload.
-#[derive(Default)]
+/// Digests can be reused inside one payload verification pass only when the
+/// platform exposes a stronger file identity and content-change timestamp.
 struct ReleaseFileVerification {
     digests: BTreeMap<PathBuf, (String, fs::Metadata)>,
     core_manifest: Option<Vec<u8>>,
+    rehash_reused: bool,
+}
+
+impl Default for ReleaseFileVerification {
+    fn default() -> Self {
+        Self {
+            digests: BTreeMap::new(),
+            core_manifest: None,
+            // Windows metadata below has no supported content-change token;
+            // creation and modification times alone do not authenticate bytes.
+            rehash_reused: !cfg!(unix),
+        }
+    }
 }
 
 fn same_release_file(before: &fs::Metadata, after: &fs::Metadata) -> Result<bool> {
@@ -1517,21 +1530,42 @@ fn verify_release_file_identity(path: &Path, before: &fs::Metadata, after: &fs::
     Ok(())
 }
 
+fn hash_release_file(path: &Path, before: &fs::Metadata) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    verify_release_file_identity(path, before, &file.metadata()?)?;
+    let digest = sha256_reader(&mut file)?;
+    verify_release_file_identity(path, before, &file.metadata()?)?;
+    verify_release_file_identity(path, before, &fs::symlink_metadata(path)?)?;
+    Ok(digest)
+}
+
+fn verify_cached_release_file(
+    path: &Path,
+    expected: &(String, fs::Metadata),
+    rehash: bool,
+) -> Result<()> {
+    verify_release_file_identity(path, &expected.1, &fs::symlink_metadata(path)?)?;
+    if rehash {
+        anyhow::ensure!(
+            hash_release_file(path, &expected.1)? == expected.0,
+            "runtime release file checksum changed during verification: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 impl ReleaseFileVerification {
     fn hash(&mut self, path: &Path) -> Result<&str> {
         use std::collections::btree_map::Entry;
-        let path_metadata = fs::symlink_metadata(path)?;
         let digest = match self.digests.entry(path.to_path_buf()) {
             Entry::Occupied(entry) => {
-                verify_release_file_identity(path, &entry.get().1, &path_metadata)?;
+                verify_cached_release_file(path, entry.get(), self.rehash_reused)?;
                 entry.into_mut()
             }
             Entry::Vacant(entry) => {
-                let mut file = fs::File::open(path)?;
-                verify_release_file_identity(path, &path_metadata, &file.metadata()?)?;
-                let digest = sha256_reader(&mut file)?;
-                verify_release_file_identity(path, &path_metadata, &file.metadata()?)?;
-                verify_release_file_identity(path, &path_metadata, &fs::symlink_metadata(path)?)?;
+                let path_metadata = fs::symlink_metadata(path)?;
+                let digest = hash_release_file(path, &path_metadata)?;
                 entry.insert((digest, path_metadata))
             }
         };
@@ -1558,8 +1592,8 @@ impl ReleaseFileVerification {
     }
 
     fn verify_unchanged(&self) -> Result<()> {
-        for (path, (_, expected)) in &self.digests {
-            verify_release_file_identity(path, expected, &fs::symlink_metadata(path)?)?;
+        for (path, expected) in &self.digests {
+            verify_cached_release_file(path, expected, self.rehash_reused)?;
         }
         Ok(())
     }
