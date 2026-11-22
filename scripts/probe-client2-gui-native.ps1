@@ -1731,12 +1731,16 @@ function Read-RecoveryRecord {
     $record = $matches[0]
     $allowed = @('id','name','started','state','host','transaction','materialSaved')
     $transactionFields = @('operation_id','source_profile','kind')
-    if ($binding.verified_candidate_assets -and -not $binding.fixture_mode) {
+    $requiresRuntimeKey = $binding.verified_candidate_assets -and -not $binding.fixture_mode
+    if ($requiresRuntimeKey -or $binding.final_public_assets -eq $true) {
         # Native key recovery persists its route with the original operation identity.
         $transactionFields += 'runtime_key'
     }
-    $publicTransaction = @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin $transactionFields }).Count -eq 0 -and
-        ($transactionFields -cnotcontains 'runtime_key' -or ($record.transaction.runtime_key -is [bool] -and $record.transaction.runtime_key))
+    $persistedFields = $record.transaction.PSObject.Properties.Name
+    $hasRuntimeKey = $persistedFields -ccontains 'runtime_key'
+    $publicTransaction = @($persistedFields | Where-Object { $_ -cnotin $transactionFields }).Count -eq 0 -and
+        (-not $requiresRuntimeKey -or $hasRuntimeKey) -and
+        (-not $hasRuntimeKey -or ($record.transaction.runtime_key -is [bool] -and $record.transaction.runtime_key))
     if (@($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -or
         -not $publicTransaction -or
         $record.id -cnotmatch '\Adesktop-[0-9a-f-]{36}\z' -or $record.state -cne 'done' -or
@@ -1836,7 +1840,8 @@ function Invoke-RecoveryMaterialAcceptance {
             $record.transaction.source_profile -cne $binding.recovery_request.transaction.source_profile) {
             throw 'Saved restart changed the original reset identity'
         }
-        if ($binding.sealed_recovery_explicit_start -eq $true) {
+        $explicitRecoveryStart = $binding.sealed_recovery_explicit_start -eq $true -or $record.transaction.runtime_key -eq $true
+        if ($explicitRecoveryStart) {
             # The account label uses live Runtime status. This fixture keeps autoRuntime off.
             Wait-OfflinePreferences 'autoRuntime' $false
             $report.offline.action_stage = 'saved_recovery_runtime_start'
@@ -1857,7 +1862,7 @@ function Invoke-RecoveryMaterialAcceptance {
         }
         Press-OfflineButton ([regex]::Unescape('^\u8d26\u6237\u4e0e\u7a7a\u95f4$'))
         $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u5df2\u4fdd\u5b58$'))
-        if ($binding.sealed_recovery_explicit_start -eq $true) {
+        if ($explicitRecoveryStart) {
             Assert-OfflineLocalKeys (Read-OfflineRpc @('--json','status'))
             $report.recovery.saved_key_ui_verified = $true
         }
@@ -1871,7 +1876,7 @@ function Invoke-RecoveryMaterialAcceptance {
         $report.recovery.saved_restart_no_prompt = $true
         $report.recovery.absence_samples = 3
         Invoke-NativeGuiProbe
-        if ($binding.sealed_recovery_explicit_start -eq $true) { Stop-OfflineRuntime }
+        if ($explicitRecoveryStart) { Stop-OfflineRuntime }
         $report.recovery.status = 'recovery-subset-passed'
         return
     }
@@ -1940,7 +1945,15 @@ function Invoke-OfflineGuiAcceptance {
     Press-OfflineButton ([regex]::Unescape('\u005e\u521b\u5efa\u672c\u673a\u5bc6\u94a5\u0024'))
     # Keep capture blocked until the selected dialog is proven absent.
     $report.offline.action_stage = 'recovery_dismiss'
-    if ($binding.keygen_acknowledgement -eq $true) {
+    $requiresAcknowledgement = $binding.keygen_acknowledgement -eq $true
+    if (-not $requiresAcknowledgement) {
+        $acknowledgementField = [regex]::Unescape('\u6062\u590d\u6750\u6599')
+        $legacyField = [regex]::Unescape('\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599')
+        $selector = '\A(?:' + [regex]::Escape($acknowledgementField) + '|' + [regex]::Escape($legacyField) + ')\z'
+        $material = Find-OfflineControl 'ControlType.Edit' $selector 60
+        $requiresAcknowledgement = $material.Current.Name -ceq $acknowledgementField
+    }
+    if ($requiresAcknowledgement) {
         Assert-RecoveryMaterialGate
         Confirm-RecoveryMaterial
     } else {

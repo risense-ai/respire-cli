@@ -577,7 +577,8 @@ public static class RespireGuiNative {
             (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256) { throw 'Online installed Runtime differs from the exact published asset' }
         # The installer verifies the full archive, then removes release-only core-notices.
         foreach ($file in @($runtimeMetadata.files | Where-Object { -not $_.path.StartsWith('core-notices/', [StringComparison]::Ordinal) })) {
-            $installedFile = Join-Path $managed $file.path
+            $name = if ($file.path -ceq $runtimeMetadata.binary_file) { 'rsrs-runtime.exe' } else { $file.path }
+            $installedFile = Join-Path $managed $name
             if ((Get-Item -LiteralPath $installedFile).Length -ne $file.size -or
                 (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {
                 throw 'Online installed Runtime payload differs from the published inventory'
@@ -773,10 +774,7 @@ public static class RespireGuiNative {
         }
         $autostartProbe = $phase -ceq 'initial' -and $candidateAssets -and $OfflineAcceptance -and
             $checkGuiCli -and $report.sealed_client2.six_package_receipts_verified -eq $true
-        # The verified public dev.23 GUI uses the same recovery acknowledgement as the sealed fixture.
-        $publicRecoveryAcknowledgement = $report.official_exe_verified -and $Client2Release -ceq 'v2.0.0-dev.23' -and
-            $Client2Commit -ceq '401679b87f08b09ddf8764b4a07fa2a9e77b467a'
-        if ($autostartProbe -or $publicRecoveryAcknowledgement) {
+        if ($autostartProbe) {
             $report.native_binding.keygen_acknowledgement = $true
         }
         if ($autostartProbe) {
@@ -897,7 +895,9 @@ public static class RespireGuiNative {
                     $report.recovery.original_operation_not_repeated = $true
                 } else {
                     if (-not $native.recovery.saved_restart_no_prompt) { throw 'Saved acknowledgement was not verified after another restart' }
-                    if ($report.native_binding.sealed_recovery_explicit_start -and
+                    $explicitRecoveryStart = $report.native_binding.sealed_recovery_explicit_start -or
+                        $report.recovery.request.transaction.runtime_key -eq $true
+                    if ($explicitRecoveryStart -and
                         (-not $native.recovery.saved_key_ui_verified -or -not $native.offline.runtime_normal_stop_confirmed)) {
                         throw 'Saved recovery UI or normal Runtime stop was not verified'
                     }
