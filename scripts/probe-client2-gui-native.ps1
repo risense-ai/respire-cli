@@ -1940,7 +1940,15 @@ function Invoke-OfflineGuiAcceptance {
     Press-OfflineButton ([regex]::Unescape('\u005e\u521b\u5efa\u672c\u673a\u5bc6\u94a5\u0024'))
     # Keep capture blocked until the selected dialog is proven absent.
     $report.offline.action_stage = 'recovery_dismiss'
-    if ($binding.keygen_acknowledgement -eq $true) {
+    $requiresAcknowledgement = $binding.keygen_acknowledgement -eq $true
+    if (-not $requiresAcknowledgement) {
+        $acknowledgementField = [regex]::Unescape('\u6062\u590d\u6750\u6599')
+        $legacyField = [regex]::Unescape('\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599')
+        $selector = '\A(?:' + [regex]::Escape($acknowledgementField) + '|' + [regex]::Escape($legacyField) + ')\z'
+        $material = Find-OfflineControl 'ControlType.Edit' $selector 60
+        $requiresAcknowledgement = $material.Current.Name -ceq $acknowledgementField
+    }
+    if ($requiresAcknowledgement) {
         Assert-RecoveryMaterialGate
         Confirm-RecoveryMaterial
     } else {
