@@ -34,12 +34,15 @@ jobs:
           cd "$RUNNER_TEMP"
           cli="rsrs-$RUNTIME_TARGET"
           archive="rsrs-runtime-$RUNTIME_TARGET.tar.gz"
+          metadata="runtime-build-$RUNTIME_TARGET.json"
           gh release download v2.0.0-dev.26 -R risense-ai/respire-cli -p "$cli"
           printf '%s  %s\n' 82eb872644a874b27473d639ec3dd1252a686e1bfb34e0145a725759808eb2c6 "$cli" | sha256sum --check
-          gh release download "v$RUNTIME_VERSION" -R risense-ai/respire-runtime -p "$archive"
-          digest=$(gh api "repos/risense-ai/respire-runtime/releases/tags/v$RUNTIME_VERSION" --jq ".assets[] | select(.name == \"$archive\") | .digest")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          printf '%s  %s\n' "${digest#sha256:}" "$archive" | sha256sum --check
+          gh release download "v$RUNTIME_VERSION" -R risense-ai/respire-runtime -p "$archive" -p "$metadata"
+          for file in "$archive" "$metadata"; do
+            digest=$(gh api "repos/risense-ai/respire-runtime/releases/tags/v$RUNTIME_VERSION" --jq ".assets[] | select(.name == \"$file\") | .digest")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s  %s\n' "${digest#sha256:}" "$file" | sha256sum --check
+          done
           chmod 0700 "$cli"
       - name: Prepare the hosted user systemd and Secret Service
         shell: bash
