@@ -1731,12 +1731,16 @@ function Read-RecoveryRecord {
     $record = $matches[0]
     $allowed = @('id','name','started','state','host','transaction','materialSaved')
     $transactionFields = @('operation_id','source_profile','kind')
-    if ($binding.verified_candidate_assets -and -not $binding.fixture_mode) {
+    $requiresRuntimeKey = $binding.verified_candidate_assets -and -not $binding.fixture_mode
+    if ($requiresRuntimeKey -or $binding.final_public_assets -eq $true) {
         # Native key recovery persists its route with the original operation identity.
         $transactionFields += 'runtime_key'
     }
-    $publicTransaction = @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin $transactionFields }).Count -eq 0 -and
-        ($transactionFields -cnotcontains 'runtime_key' -or ($record.transaction.runtime_key -is [bool] -and $record.transaction.runtime_key))
+    $persistedFields = $record.transaction.PSObject.Properties.Name
+    $hasRuntimeKey = $persistedFields -ccontains 'runtime_key'
+    $publicTransaction = @($persistedFields | Where-Object { $_ -cnotin $transactionFields }).Count -eq 0 -and
+        (-not $requiresRuntimeKey -or $hasRuntimeKey) -and
+        (-not $hasRuntimeKey -or ($record.transaction.runtime_key -is [bool] -and $record.transaction.runtime_key))
     if (@($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -or
         -not $publicTransaction -or
         $record.id -cnotmatch '\Adesktop-[0-9a-f-]{36}\z' -or $record.state -cne 'done' -or
