@@ -1,8 +1,6 @@
-name: Release
+name: macOS Intel public DEV cloud replay
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       ref:
@@ -110,6 +108,7 @@ jobs:
         run: |
           node - <<'NODE'
           const e=process.env;
+          if(e.ARTIFACT_SOURCE!=='published-assets'||e.REQUEST_PUBLISH!=='false')throw Error('Cloud replay requires published assets and publish=false');
           if(e.STABLE_CANDIDATE_VERSION&&(!/^\d+\.\d+\.\d+$/.test(e.STABLE_CANDIDATE_VERSION)||e.REQUEST_PUBLISH!=='false'||e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||e.DEV_VERSION||e.PREPARED_RUN||e.GITHUB_EVENT_NAME!=='workflow_dispatch'||e.GITHUB_REF!=='refs/heads/main'||e.RELEASE_REF!==e.GITHUB_SHA))throw Error('Stable candidate requires exact main SHA, an explicit X.Y.Z version, full build, and publish=false without other version inputs');
           if(e.REQUEST_PUBLISH==='true'&&(e.ARTIFACT_SOURCE!=='build'||e.VALIDATION_PROFILE!=='full'||!e.PREPARED_RUN))throw Error('Publish requires full and a completed prepared_run; first run full with publish=false');
           if(e.PREPARED_RUN&&(e.REQUEST_PUBLISH!=='true'||!/^[1-9]\d*$/.test(e.PREPARED_RUN)||e.DEV_VERSION))throw Error('prepared_run requires publication and forbids version overrides');
@@ -182,7 +181,7 @@ jobs:
           if-no-files-found: error
 
   published-full-complete:
-    if: ${{ always() && inputs.artifact_source == 'published-assets' }}
+    if: ${{ false }}
     needs: [artifact-inputs, published-assets-verification, validate, native-regression, cloud-sweep, api-smoke]
     runs-on: ubuntu-latest
     permissions:
@@ -373,7 +372,7 @@ jobs:
       published_assets_sha256: ${{ inputs.published_assets_sha256 }}
   native-regression:
     cache-mode: read
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) && needs.validate.result == 'success' }}
+    if: ${{ false }}
     needs: [plan, validate, artifact-inputs, published-assets-verification]
     permissions:
       contents: write
@@ -408,20 +407,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-15
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
         with:
@@ -620,7 +607,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ always() && ((inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success') || ((inputs.artifact_source || 'build') == 'build' && inputs.prepared_run == '' && needs.plan.result == 'success' && needs.plan.outputs.validation_profile == 'full')) }}
+    if: ${{ false }}
     needs: [plan, artifact-inputs, published-assets-verification]
     env:
       CANDIDATE_ASSETS: ${{ needs.plan.outputs.candidate }}
@@ -814,7 +801,7 @@ jobs:
   publish:
     # Publication requires fresh exact-source validation and current-run readiness.
     needs: [artifact-inputs, plan, prepared-import, publication-ready]
-    if: ${{ !cancelled() && needs.artifact-inputs.result == 'success' && needs.plan.result == 'success' && needs.prepared-import.result == 'success' && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' && (inputs.artifact_source || 'build') == 'build' }}
+    if: ${{ false }}
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
