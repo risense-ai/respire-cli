@@ -577,7 +577,8 @@ public static class RespireGuiNative {
             (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256) { throw 'Online installed Runtime differs from the exact published asset' }
         # The installer verifies the full archive, then removes release-only core-notices.
         foreach ($file in @($runtimeMetadata.files | Where-Object { -not $_.path.StartsWith('core-notices/', [StringComparison]::Ordinal) })) {
-            $installedFile = Join-Path $managed $file.path
+            $name = if ($file.path -ceq $runtimeMetadata.binary_file) { 'rsrs-runtime.exe' } else { $file.path }
+            $installedFile = Join-Path $managed $name
             if ((Get-Item -LiteralPath $installedFile).Length -ne $file.size -or
                 (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {
                 throw 'Online installed Runtime payload differs from the published inventory'
