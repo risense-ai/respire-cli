@@ -895,7 +895,9 @@ public static class RespireGuiNative {
                     $report.recovery.original_operation_not_repeated = $true
                 } else {
                     if (-not $native.recovery.saved_restart_no_prompt) { throw 'Saved acknowledgement was not verified after another restart' }
-                    if ($report.native_binding.sealed_recovery_explicit_start -and
+                    $explicitRecoveryStart = $report.native_binding.sealed_recovery_explicit_start -or
+                        $report.recovery.request.transaction.runtime_key -eq $true
+                    if ($explicitRecoveryStart -and
                         (-not $native.recovery.saved_key_ui_verified -or -not $native.offline.runtime_normal_stop_confirmed)) {
                         throw 'Saved recovery UI or normal Runtime stop was not verified'
                     }
