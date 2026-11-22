@@ -179,6 +179,19 @@ fn terminal_receipt(receipt: &Value, operation: &OperationContext) -> Result<Rec
             _ => Err(anyhow!("Runtime returned inconsistent model switch status")),
         };
     }
+    // Runtime writes the stored response before it removes the in-flight
+    // marker. An authenticated failure can briefly coexist with "pending".
+    // Wait for the marker to settle; never submit a new switch.
+    if state == "pending"
+        && !original.ok
+        && original.exit != 0
+        && original
+            .error
+            .as_ref()
+            .is_some_and(|message| !message.is_empty())
+    {
+        return Ok(Receipt::Pending);
+    }
     anyhow::ensure!(
         state == "failed" && !original.ok,
         "Runtime omitted the terminal switch receipt"
@@ -240,6 +253,41 @@ mod tests {
         receipt["envelope"]["summary"]["response"] = Value::Null;
         receipt["envelope"]["summary"]["state"] = json!("unknown");
         assert!(terminal_receipt(&receipt, &op).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_switch_failure_waits_for_inflight_marker_then_returns_exact_error() -> Result<()> {
+        let op = operation();
+        let mut lookup = json!({"ok":true,"envelope":{"summary":{
+            "request_id":"different-poll-id","operation_id":op.operation_id,"scope":op.scope,
+            "state":"pending",
+            "response":{"v":crate::rpc::PROTOCOL_V,"id":"original-submit-id",
+                "operation_id":op.operation_id,"scope":op.scope,"idempotency_key":op.idempotency_key,
+                "ok":false,"exit":1,"bin":"fixture","error":"model checksum mismatch"}
+        }}});
+        assert!(matches!(terminal_receipt(&lookup, &op)?, Receipt::Pending));
+
+        for (field, wrong) in [
+            ("operation_id", json!("different-operation")),
+            (
+                "scope",
+                json!({"account_id":"another","instance_id":"instance","generation":1}),
+            ),
+            ("idempotency_key", json!("different-idempotency")),
+        ] {
+            let mut foreign = lookup.clone();
+            foreign["envelope"]["summary"]["response"][field] = wrong;
+            assert!(terminal_receipt(&foreign, &op).is_err());
+        }
+
+        lookup["envelope"]["summary"]["state"] = json!("failed");
+        let Receipt::Terminal(failure) = terminal_receipt(&lookup, &op)? else {
+            anyhow::bail!("authoritative switch failure must finish polling");
+        };
+        assert_eq!(failure.summary["id"], op.operation_id);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(failure.errors, ["model checksum mismatch"]);
         Ok(())
     }
 
