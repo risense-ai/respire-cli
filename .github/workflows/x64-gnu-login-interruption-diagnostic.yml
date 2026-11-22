@@ -1,8 +1,8 @@
-name: Frozen Linux x64 GNU login interruption diagnostic
+name: Frozen Linux x64 GNU resident and login diagnostics
 
 on:
   push:
-    branches: [codex/cli-x64-gnu-login-replay-20261121]
+    branches: [codex/cli-candidate-gnu-v1015]
 
 permissions:
   contents: read
@@ -14,9 +14,9 @@ jobs:
     timeout-minutes: 25
     env:
       CLI_TARGET: x86_64-unknown-linux-gnu
-      CLI_SHA: 79083eb3fea58d476af5501c0ca73c4931924ec2
+      CLI_SHA: 116e8a7e6503b058f18da909ce27671809b7abe5
       CLI_VERSION: 2.0.0
-      CLI_PRODUCER_RUN_ID: '44893978988'
+      CLI_PRODUCER_RUN_ID: '44979974050'
       CLI_PRODUCER_ATTEMPT: '1'
     steps:
       - uses: actions/checkout@v5
@@ -30,16 +30,16 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: '14703142635'
+          artifact-ids: '14737193840'
           merge-multiple: true
-          run-id: 44893978988
+          run-id: 44979974050
           github-token: ${{ github.token }}
           path: validated-cli
       - uses: actions/download-artifact@v4
         with:
-          artifact-ids: '14703511844'
+          artifact-ids: '14737811088'
           merge-multiple: true
-          run-id: 44893978988
+          run-id: 44979974050
           github-token: ${{ github.token }}
           path: candidate-proof
       - name: Verify the unchanged candidate CLI
@@ -64,14 +64,14 @@ jobs:
           const candidate = receipt.candidate;
           assert.equal(candidate.source.sha, process.env.CLI_SHA);
           assert.equal(candidate.source.version, process.env.CLI_VERSION);
-          assert.equal(candidate.source.run_id, 44893978988);
+          assert.equal(candidate.source.run_id, 44979974050);
           assert.equal(candidate.source.run_attempt, 1);
           const runtime = candidate.runtime;
           assert.equal(runtime.version, '2.0.0-dev.28');
           assert.equal(runtime.producer.run_id, 44679730133);
           assert.equal(runtime.producer.run_attempt, 1);
           assert.equal(runtime.source_sha, '3e10e56a2c73e5ba54ce8c57b61c72aaf4b6bdb5');
-          assert.equal(receipt.payload_identity.cli_binary_sha256, 'd157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447');
+          assert.equal(receipt.payload_identity.cli_binary_sha256, '89adecfbc010b1aa15c27ee938643135c947a98b124db080a4ecee210186d394');
           await inspectPublishedRelease(runtime, {token: process.env.GH_TOKEN});
           const folder = resolve('runtime-public'); mkdirSync(folder);
           const [metaName, binaryName, archiveName] = publishedAssetNames('runtime', process.env.CLI_TARGET);
@@ -106,6 +106,7 @@ jobs:
           bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
       - name: Install the verified fixture model into an isolated profile
+        id: fixture_model
         env:
           RSRS_DATA_DIR: ${{ runner.temp }}/login-model-setup
           RSRS_M3_DIR: ${{ runner.temp }}/login-model-setup/models/bge-m3
@@ -121,20 +122,34 @@ jobs:
           "$binary" --runtime-internal --stop --json
           printf '%s  %s\n' 7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff \
             "$RSRS_M3_DIR/onnx/model_quantized.cpu-v1.ort" | sha256sum --check --strict
+          printf 'NATIVE_RUNTIME_BIN=%s\n' "$RSRS_RUNTIME_BIN" >> "$GITHUB_ENV"
       - name: Run existing contracts and the isolated loopback interruption fixture
         run: |
           set -euo pipefail
           python3 scripts/test-login-interruption-contract.py
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          test "$checksum" = d157619a70121174ba00241323ac6c10d0ce4144fa56c38c514e9eee20618447
+          test "$checksum" = 89adecfbc010b1aa15c27ee938643135c947a98b124db080a4ecee210186d394
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/login-model-setup/models/bge-m3"
+      - name: Run existing resident concurrency acceptance
+        if: ${{ !cancelled() && steps.fixture_model.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/test-native-fixture-process.py --output-dir "$RUNNER_TEMP/native-fixture-bounds"
+          RSRS_INTRA_THREADS=2 python3 scripts/test-real-m3-account-switch.py --binary "$(realpath cli/rsrs)" \
+            --runtime-binary "$NATIVE_RUNTIME_BIN" \
+            --runtime-sha256 "$RSRS_PUBLISHED_RUNTIME_SHA256" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION" \
+            --model-dir "$RUNNER_TEMP/login-model-setup/models/bge-m3" --output-dir "$RUNNER_TEMP/resident-concurrency" \
+            --expect-supervised-worker --resident-stress --expect-background-threads 2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-x64-gnu-login-interruption-diagnostic
+          name: linux-x64-gnu-native-diagnostics
           retention-days: 1
           path: |
             ${{ runner.temp }}/frozen-input.json
             ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
+            ${{ runner.temp }}/resident-concurrency/resident-stress-metrics.json
+            ${{ runner.temp }}/resident-concurrency/real-account-return-verification.json
+            ${{ runner.temp }}/native-fixture-bounds/fixture-process-verification.json
           if-no-files-found: error
