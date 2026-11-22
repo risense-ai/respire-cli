@@ -774,10 +774,7 @@ public static class RespireGuiNative {
         }
         $autostartProbe = $phase -ceq 'initial' -and $candidateAssets -and $OfflineAcceptance -and
             $checkGuiCli -and $report.sealed_client2.six_package_receipts_verified -eq $true
-        # The verified public dev.23 GUI uses the same recovery acknowledgement as the sealed fixture.
-        $publicRecoveryAcknowledgement = $report.official_exe_verified -and $Client2Release -ceq 'v2.0.0-dev.23' -and
-            $Client2Commit -ceq '401679b87f08b09ddf8764b4a07fa2a9e77b467a'
-        if ($autostartProbe -or $publicRecoveryAcknowledgement) {
+        if ($autostartProbe) {
             $report.native_binding.keygen_acknowledgement = $true
         }
         if ($autostartProbe) {
