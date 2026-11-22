@@ -49,13 +49,14 @@ impl Selection {
         Ok(choice)
     }
 
+    fn arguments(&self) -> Value {
+        json!({
+            "model":self.model,"backend":self.backend,"engine":self.engine,"variant":self.variant
+        })
+    }
+
     pub(super) fn switch(&self) -> Result<crate::output::ResultEnvelope> {
-        crate::model_switch::submit_for_scope(
-            json!({
-                "model":self.model,"backend":self.backend,"engine":self.engine,"variant":self.variant
-            }),
-            &self.scope,
-        )
+        crate::model_switch::submit_for_scope(self.arguments(), &self.scope)
     }
 
     pub(super) fn model(&self) -> &str {
@@ -158,14 +159,28 @@ impl Picker {
                     let current = active
                         .as_ref()
                         .filter(|item| item.model == *name && item.backend == *id);
-                    rows.push(current.cloned().unwrap_or_else(|| Selection {
-                        model: name.clone(),
-                        backend: id.clone(),
-                        engine: "cpu".into(),
-                        variant: None,
-                        unchanged: false,
-                        scope: catalog.scope.clone(),
-                    }));
+                    rows.push(match current {
+                        Some(current) => {
+                            let mut selected = current.clone();
+                            let active_data = &catalog.body["active"];
+                            // A saved registry draft can reuse the IDs of the
+                            // active library's immutable selection. Suppress
+                            // activation only when both complete payloads match.
+                            selected.unchanged = active_data["profile"].is_object()
+                                && active_data["backend_profile"].is_object()
+                                && &active_data["profile"] == model
+                                && &active_data["backend_profile"] == backend;
+                            selected
+                        }
+                        None => Selection {
+                            model: name.clone(),
+                            backend: id.clone(),
+                            engine: "cpu".into(),
+                            variant: None,
+                            unchanged: false,
+                            scope: catalog.scope.clone(),
+                        },
+                    });
                 }
             }
         }
@@ -205,8 +220,14 @@ impl Picker {
             let active = self.active.as_ref().is_some_and(|current| {
                 current.model == selection.model && current.backend == selection.backend
             });
-            let label = if active {
+            let label = if active && selection.unchanged() {
                 format!("{} ({})", selection.label(), t("当前", "active"))
+            } else if active {
+                format!(
+                    "{} ({})",
+                    selection.label(),
+                    t("应用已保存配置", "apply saved profile")
+                )
             } else {
                 selection.label()
             };
@@ -223,6 +244,58 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_ids_only_skip_switch_when_saved_model_and_backend_both_match() -> Result<()> {
+        let model = json!({
+            "id":"custom","embedding":{"model_id":"custom","revision":"r1","dimensions":512},
+            "onnx":null,"weights":null,"tokenizer":null
+        });
+        let backend = json!({
+            "id":"remote","backend":"host_transport","provider":"provider",
+            "protocol":"openai_embeddings","native":null,"endpoint":"https://old.invalid",
+            "keyring_service":"test", "keyring_account":"not-a-credential"
+        });
+        let scope = RuntimeRequestScope {
+            account_id: "account".into(),
+            instance_id: "instance".into(),
+            generation: 17,
+        };
+        let body = json!({
+            "registry":{"models":{"custom":model.clone()},"backends":{"remote":backend.clone()}},
+            "active":{
+                "model":"custom","backend":"remote","engine":"cpu","variant":null,
+                "profile":model,"backend_profile":backend,"generation":"index-revision"
+            }
+        });
+        let selected = |body| -> Result<Selection> {
+            Picker::new(&Catalog {
+                body,
+                scope: scope.clone(),
+            })?
+            .key(KeyCode::Enter)
+            .context("missing same-ID selection")
+        };
+        assert!(selected(body.clone())?.unchanged());
+        let mut model_draft = body.clone();
+        model_draft["registry"]["models"]["custom"]["embedding"]["revision"] = json!("r2");
+        let mut backend_draft = body.clone();
+        backend_draft["registry"]["backends"]["remote"]["endpoint"] = json!("https://new.invalid");
+        let mut projection = body;
+        projection["active"]["profile"] = Value::Null;
+        for observed in [model_draft, backend_draft, projection] {
+            let selection = selected(observed)?;
+            assert!(!selection.unchanged());
+            assert_eq!(selection.scope, scope);
+            assert_eq!(
+                selection.arguments(),
+                json!({
+                    "model":"custom","backend":"remote","engine":"cpu","variant":null
+                })
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn model_picker_uses_registry_ids_for_local_and_configured_remote_profiles() -> Result<()> {
