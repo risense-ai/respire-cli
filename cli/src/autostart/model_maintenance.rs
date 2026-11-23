@@ -515,6 +515,8 @@ fn apply_cpu_reset(
 }
 
 pub(crate) fn control_install_engines() -> Result<ResultEnvelope> {
+    anyhow::ensure!(!cfg!(windows),
+        "Windows NPU engine installation is unavailable: its signed provider is not verified");
     coordinate(ModelMaintenanceKind::InstallEngines)
 }
 pub(crate) fn control_uninstall_m3() -> Result<ResultEnvelope> {

@@ -211,7 +211,21 @@ fn migrated_destination(root: &Path, source_id: &str) -> Result<Option<PathBuf>>
 }
 
 pub(crate) fn list_legacy_profiles() -> Result<Value> {
-    let (installation, _) = roots()?;
+    let (installation, selected) = roots()?;
+    // A ready, scoped listener can positively identify the active library. An
+    // offline or old listener without this proof must not hide legacy sources.
+    // A migration listing never starts or unlocks a Runtime.
+    let opened = crate::rpc::probe_runtime().ok().flatten().and_then(|health| {
+        let opened = PathBuf::from(&health.data_dir);
+        (health.store_ready && opened.is_absolute()
+            && crate::mcp::same_path(&opened, &selected)
+            && crate::net_rpc::request_scope(&health).is_ok())
+        .then_some(opened)
+    });
+    legacy_profiles(&installation, opened.as_deref())
+}
+
+fn legacy_profiles(installation: &Path, opened: Option<&Path>) -> Result<Value> {
     // Explicit migration discovery retains the fixed HOME roots; active profile selection
     // never becomes a scan root. RSRS_DATA_DIR still scopes destinations and receipt search.
     let home = absolute(&paths::home_dir()?)?;
@@ -233,6 +247,9 @@ pub(crate) fn list_legacy_profiles() -> Result<Value> {
         }
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         for (name, source) in candidates {
+            if opened.is_some_and(|opened| crate::mcp::same_path(opened, &source)) {
+                continue;
+            }
             let legacy_db = is_file(&source.join("onememory.db"))?;
             if !legacy_db && !is_file(&source.join("session.json"))? {
                 continue;
@@ -261,7 +278,7 @@ pub(crate) fn list_legacy_profiles() -> Result<Value> {
                     receipt["complete"] == true && receipt["source_identity"] == source_id
                 })
                 .and_then(|receipt| receipt["destination"].as_str().map(PathBuf::from));
-            let migrated_to = marked.or(migrated_destination(&installation, &source_id)?);
+            let migrated_to = marked.or(migrated_destination(installation, &source_id)?);
             rows.push(json!({"source_id":source_id,"source":source,"user":session["user"].as_str().unwrap_or(""),
                 "account":account,"migrated_to":migrated_to}));
         }
@@ -270,18 +287,14 @@ pub(crate) fn list_legacy_profiles() -> Result<Value> {
 }
 
 pub(crate) fn pending_legacy_profiles(opened: Option<&Path>) -> Result<Vec<Value>> {
-    let report = list_legacy_profiles()?;
+    let (installation, _) = roots()?;
+    let report = legacy_profiles(&installation, opened)?;
     let rows = report["profiles"]
         .as_array()
         .context("migration discovery did not return profiles")?;
     Ok(rows
         .iter()
-        .filter(|row| {
-            row["migrated_to"].is_null()
-                && !opened.zip(row["source"].as_str()).is_some_and(|(opened, source)| {
-                    crate::mcp::same_path(opened, Path::new(source))
-                })
-        })
+        .filter(|row| row["migrated_to"].is_null())
         .cloned()
         .collect())
 }
@@ -335,9 +348,12 @@ mod tests {
             "source_identity":source_id,"complete":true
         }))?)?;
         fs::write(legacy.join(SOURCE_RECEIPT), br#"{"source_identity":"foreign","complete":true,"destination":"foreign"}"#)?;
-        let result = list_legacy_profiles()?;
+        let result = legacy_profiles(&installation, None)?;
         let rows = result["profiles"].as_array().context("legacy rows missing")?;
         assert_eq!(rows.len(), 2);
+        let filtered = legacy_profiles(&installation, Some(&account))?;
+        assert_eq!(filtered["profiles"].as_array().map(Vec::len), Some(1));
+        assert_eq!(filtered["profiles"][0]["source_id"], source_id);
         let imported = rows.iter().find(|row| row["source_id"] == source_id)
             .context("legacy database source missing")?;
         assert_eq!(Path::new(imported["migrated_to"].as_str().context("migration destination missing")?).canonicalize()?,
@@ -348,7 +364,7 @@ mod tests {
         fs::write(legacy.join(SOURCE_RECEIPT), serde_json::to_vec(&json!({
             "source_identity":source_id,"complete":true,"destination":account
         }))?)?;
-        let result = list_legacy_profiles()?;
+        let result = legacy_profiles(&installation, None)?;
         let imported = result["profiles"].as_array().context("legacy rows missing")?
             .iter().find(|row| row["source_id"] == source_id).context("source missing")?;
         assert_eq!(Path::new(imported["migrated_to"].as_str().context("migration destination missing")?).canonicalize()?,
@@ -365,7 +381,7 @@ mod tests {
         assert_eq!(fs::read(child.join("session.json"))?, child_session);
         assert!(respire_client_host::host_credentials::legacy_migration::LegacyMigration::collect(&"0".repeat(64)).is_err());
         fs::write(account.join("session.json"), b"{")?;
-        assert!(list_legacy_profiles().is_err());
+        assert!(legacy_profiles(&installation, None).is_err());
         Ok(())
     }
 

@@ -48,6 +48,12 @@ pub enum ModelAction {
         engine: String,
         #[arg(long)]
         variant: Option<String>,
+        /// Wait for the original operation's terminal result, even with --json.
+        #[arg(long, conflicts_with = "no_wait")]
+        wait: bool,
+        /// Return the acceptance receipt immediately (the default for noninteractive output).
+        #[arg(long, visible_alias = "async")]
+        no_wait: bool,
     },
     /// Read the profile-switch task, cancellation ID and current operation.
     Progress,

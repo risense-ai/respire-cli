@@ -61,6 +61,10 @@ pub(super) fn owner_scope_id(profile: &Path, account_id: Option<&str>) -> Result
 /// Host entry point. Only a previously serving owner is restarted on success.
 pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(AssetsStatus, bool)> {
     crate::runtime_policy::require_host("model preparation")?;
+    anyhow::ensure!(
+        !(cfg!(windows) && intent.for_engine.as_deref() == Some("npu")),
+        "Windows NPU model installation is unavailable: its signed provider is not verified"
+    );
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(),
         "model preparation must own its host maintenance transaction");
     let takeover = crate::runtime_policy::takeover_lock()?;
@@ -91,17 +95,17 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
         verify_model_owner(owner, &root, &profile, managed, &binary, &manifest, expected_account.as_deref())?;
     }
     let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
-    let prepared: Result<(AssetsStatus, bool)> = (|| {
-        maintenance.auth_launch_binding(&profile)?
-            .context("model preparation requires persistent Paused host maintenance")?;
-        maintenance.check_account_runtime()?;
-        let assets = prepare_model_locked(&takeover, &mut maintenance, owner.as_ref(), intent)?;
+    let verify_installation = || -> Result<()> {
         let (current_binary, current_manifest) = installed_model_runtime()?;
         anyhow::ensure!(current_binary == binary && current_manifest.version == manifest.version
             && current_manifest.sha256.eq_ignore_ascii_case(&manifest.sha256)
             && local_roots()? == (root.clone(), profile.clone())
             && account(&profile)? == expected_account,
             "model preparation owner selection changed before restoration");
+        Ok(())
+    };
+    let restore_owner = |maintenance: &mut super::lifecycle::Maintenance| -> Result<()> {
+        verify_installation()?;
         if let Some(original) = owner.as_ref() {
             maintenance.start_account_runtime()?;
             let restored = crate::rpc::probe_runtime()?.context("original model owner did not resume")?;
@@ -109,17 +113,59 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
             anyhow::ensure!(!original.store_ready || restored.store_ready,
                 "restored model owner did not confirm its original store readiness");
         }
+        Ok(())
+    };
+    let mut recoverable_staging = false;
+    let prepared: Result<(AssetsStatus, bool)> = (|| {
+        maintenance.auth_launch_binding(&profile)?
+            .context("model preparation requires persistent Paused host maintenance")?;
+        maintenance.check_account_runtime()?;
+        let assets = prepare_model_locked(&takeover, &mut maintenance, owner.as_ref(), intent, &mut recoverable_staging)?;
+        restore_owner(&mut maintenance)?;
         maintenance.finish()?;
         Ok(assets)
     })();
     match prepared {
         Ok(assets) => { maintenance.finish_handoff()?; Ok(assets) },
         Err(error) => {
-            if let Err(pause) = maintenance.mark(super::lifecycle::Phase::Paused) {
-                return Err(error.context(format!("model preparation failed; Paused marker publication failed: {pause:#}")));
+            if recoverable_staging {
+                let recovered = (|| -> Result<()> {
+                    // We only enter this path after a verified drain and
+                    // before any model destination may have been changed.
+                    maintenance.auth_launch_binding(&profile)?
+                        .context("original Paused maintenance grant is unavailable")?;
+                    anyhow::ensure!(!crate::net_rpc::port_is_open()
+                        && !crate::rpc::endpoint_path().try_exists()?,
+                        "a Runtime owner or endpoint appeared after the verified drain");
+                    restore_owner(&mut maintenance)?;
+                    maintenance.finish()?;
+                    Ok(())
+                })();
+                match recovered {
+                    Ok(()) => {
+                        return match maintenance.finish_handoff() {
+                            Ok(()) => Err(error.context("model staging failed before publication; previous Runtime state restored")),
+                            Err(handoff) => Err(error.context(format!(
+                                "model staging failed and maintenance was cleared; host handoff pending: {handoff:#}"
+                            ))),
+                        };
+                    }
+                    Err(restore) => {
+                        return Err(retain_model_maintenance(error.context(format!(
+                            "pre-publication restoration could not be verified: {restore:#}"
+                        )), &mut maintenance));
+                    }
+                }
             }
-            Err(error.context("model preparation failed; maintenance remains Paused"))
+            Err(retain_model_maintenance(error, &mut maintenance))
         }
+    }
+}
+
+fn retain_model_maintenance(error: anyhow::Error, maintenance: &mut super::lifecycle::Maintenance) -> anyhow::Error {
+    match maintenance.mark(super::lifecycle::Phase::Paused) {
+        Ok(()) => error.context("model preparation failed; maintenance remains Paused"),
+        Err(pause) => error.context(format!("model preparation failed; Paused marker publication failed: {pause:#}")),
     }
 }
 
@@ -174,8 +220,10 @@ pub(crate) fn prepare_model_locked(
     maintenance: &mut super::lifecycle::Maintenance,
     owner: Option<&crate::net_rpc::Health>,
     intent: &ModelInstallIntent,
+    recoverable_staging: &mut bool,
 ) -> Result<(AssetsStatus, bool)> {
     crate::runtime_policy::require_host("model preparation")?;
+    *recoverable_staging = false;
     let roots = local_roots()?;
     let allowed = allowed_model_roots()?;
     anyhow::ensure!(
@@ -206,8 +254,14 @@ pub(crate) fn prepare_model_locked(
         &super::model_maintenance::local_m3_directory()?,
         &std::path::absolute(respire_client_host::roots::default_user_model_dir()?
             .join("onnx").join("model_quantized.cpu-v1.ort"))?)?;
+    *recoverable_staging = true;
     let sources = local_model_sources(intent, &installation)?;
-    let skipped = respire_commands::model_asset_files::prepare_model_assets_with_sources(&installation, &allowed, &sources)?;
+    let skipped = respire_commands::model_asset_files::prepare_model_assets_tracking_publication(
+        &installation, &allowed, &sources, || *recoverable_staging = false,
+    )?;
+    // Backend verification can have an unknown Runtime outcome independently
+    // of whether files were replaced. Never apply the staging-only recovery.
+    *recoverable_staging = false;
     let verified = model_install_verify_locked(takeover, maintenance, intent, &plan.selection_sha256)?.assets;
     anyhow::ensure!(
         local_roots()? == roots
@@ -437,6 +491,10 @@ fn host_installation_plan(
     directory: &Path,
     cpu_container: &Path,
 ) -> Result<AssetsStatus> {
+    if let Some(asset) = requirements.assets.iter().find(|asset| asset.state == AssetState::Incompatible) {
+        anyhow::bail!("core resource {} is incompatible: {}", asset.name,
+            asset.reason.as_deref().unwrap_or("unsupported backend"));
+    }
     anyhow::ensure!(requirements.assets.len() == 2, "core selection must describe exactly its tokenizer and weights; prepare providers separately");
     let mut assets = Vec::new();
     let profile = selected.filter(|_| intent.for_engine.is_none());
@@ -467,6 +525,9 @@ fn host_installation_plan(
         }
     } else {
         assets.push(host_tokenizer(directory)?);
+        // Historical Runtime private plans can report the ORT container but
+        // still require quantized ONNX in resolve_model_dir(). Without an
+        // additive minimal-asset contract a two-file plan is not sufficient.
         assets.push(host_variant(directory, "quantized")?);
         for requirement in &requirements.assets {
             match requirement.name.as_str() {
@@ -488,8 +549,6 @@ fn host_installation_plan(
     let mut claimed = std::collections::BTreeSet::new();
     for requirement in &requirements.assets {
         anyhow::ensure!(claimed.insert(&requirement.name), "duplicate core asset requirement");
-        anyhow::ensure!(requirement.state != AssetState::Incompatible,
-            "core resource {} is incompatible: {}", requirement.name, requirement.reason.as_deref().unwrap_or("unsupported backend"));
         let host = assets.iter().find(|asset| asset.name == requirement.name
             || (requirement.name == "bge-m3-model" && requirement.version.as_deref() == Some("quantized")
                 && asset.name == "bge-m3-baseline"))
@@ -511,9 +570,10 @@ fn local_model_sources(intent: &ModelInstallIntent, plan: &AssetsStatus) -> Resu
     let config = respire_client_host::config::read_client_config(
         &respire_client_host::paths::client_config_path())?;
     let config_value = |name: &str| config.as_ref().and_then(|config| config[name].as_str()).map(str::to_owned);
-    let mirror = intent.mirror.clone()
-        .or_else(|| respire_client_host::env::var("RSRS_MIRROR").ok().filter(|value| !value.trim().is_empty()))
-        .or_else(|| config_value("model_mirror")).unwrap_or_else(|| "auto".to_owned());
+    let mirror = match &intent.mirror {
+        Some(value) => value.clone(),
+        None => respire_client_host::settings::mirror_from_env()?.unwrap_or_else(|| "auto".to_owned()),
+    };
     let origins = if mirror.trim() == "auto" {
         vec!["https://hf-mirror.com".to_owned(), "https://hf-mirror.net".to_owned(), "https://huggingface.co".to_owned()]
     } else { vec![model_mirror_origin(&mirror)?] };
@@ -547,8 +607,6 @@ fn local_model_sources(intent: &ModelInstallIntent, plan: &AssetsStatus) -> Resu
         }
         let relative = official.strip_prefix("https://huggingface.co/")
             .context("model artifact lacks its official immutable source")?;
-        // Profile resources previously used their own pinned download URL, not the M3 mirror.
-        if asset.name.starts_with("profile-") { return Ok(vec![official.clone()]); }
         Ok(origins.iter().map(|origin| format!("{origin}/{relative}")).collect())
     }).collect()
 }

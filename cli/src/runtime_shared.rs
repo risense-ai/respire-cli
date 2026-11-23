@@ -75,8 +75,7 @@ fn copy_release(source: &Path, stage: &Path, manifest: &ManagedManifest) -> Resu
         }
         fs::copy(&input, &output)?;
     }
-    metadata.verify_files(stage)?;
-    verify_stage(stage, RUNTIME_BINARY, metadata.target_triple()?, &manifest.sha256)?;
+    verify_release_stage(&metadata, stage, RUNTIME_BINARY, metadata.target_triple()?, &manifest.sha256)?;
     Ok(())
 }
 

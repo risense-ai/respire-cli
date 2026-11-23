@@ -248,6 +248,80 @@ fn tar_fixture_truncated() -> Vec<u8> {
 }
 
 #[test]
+fn release_stage_reuses_exact_authenticated_manifest_and_shared_digests() -> Result<()> {
+    use serde_json::json;
+    let dir = tempfile::tempdir()?;
+    let stage = dir.path();
+    let target = "x86_64-unknown-linux-gnu";
+    let binary = release_binary_name(target);
+    let payload = b"synthetic runtime";
+    let shared_path = "provider.bin";
+    let provider = b"private provider";
+    let core = json!({"schema_version":1,"target":target,"files":[
+        {"path":shared_path,"sha256":sha256_hex(provider)}
+    ]}).to_string();
+    fs::write(stage.join(&binary), payload)?;
+    fs::write(stage.join(shared_path), provider)?;
+    fs::write(stage.join(CORE_MANIFEST_FILE), &core)?;
+    let metadata: BuildMetadata = serde_json::from_value(json!({
+        "schema_version":2,"runtime_version":"1.0.21-dev.1","tag":"v1.0.21-dev.1","target_triple":target,
+        "archive_file":format!("rsrs-runtime-{target}.tar.gz"),"archive_sha256":"0".repeat(64),
+        "binary_file":binary,"binary_sha256":sha256_hex(payload),"source_commit":"0".repeat(40),
+        "protocol_range":{"minimum":1,"maximum":1},"files":[
+            {"path":binary,"size":payload.len(),"sha256":sha256_hex(payload)},
+            {"path":shared_path,"size":provider.len(),"sha256":sha256_hex(provider)},
+            {"path":CORE_MANIFEST_FILE,"size":core.len(),"sha256":sha256_hex(core.as_bytes())}
+        ]
+    }))?;
+    metadata.validate("1.0.21-dev.1", target)?;
+    let mut checked = ReleaseFileVerification::default();
+    metadata.verify_files_with(stage, &mut checked)?;
+    assert_eq!(checked.digests.len(), 3);
+    assert_eq!(checked.core_manifest.as_deref(), Some(core.as_bytes()));
+    verify_stage_with(stage, &binary, target, &sha256_hex(payload), &mut checked)?;
+    assert_eq!(checked.digests.len(), 3);
+    fs::write(stage.join(shared_path), b"changed provider length")?;
+    assert!(verify_stage_with(stage, &binary, target, &sha256_hex(payload), &mut checked).is_err());
+    fs::write(stage.join(shared_path), provider)?;
+
+    // A second verification must not reuse the previous pass; peer metadata
+    // containing altered bytes must fail outer authentication before parse.
+    fs::write(stage.join(CORE_MANIFEST_FILE), vec![b'x'; core.len()])?;
+    let failure = verify_release_stage(&metadata, stage, &binary, target, &sha256_hex(payload))
+        .err().context("modified inner manifest was accepted")?.to_string();
+    assert!(failure.contains("release file checksum mismatch"));
+    Ok(())
+}
+
+#[test]
+fn conservative_stage_verification_checks_bytes_on_cache_hits_and_final_pass() -> Result<()> {
+    assert_eq!(ReleaseFileVerification::default().rehash_reused, !cfg!(unix));
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("fixture-runtime");
+    let actual = b"ordinary fixture contents";
+    fs::write(&path, actual)?;
+
+    let mut verification = ReleaseFileVerification {
+        rehash_reused: true, // Exercise the Windows/non-Unix policy on source CI too.
+        ..ReleaseFileVerification::default()
+    };
+    assert_eq!(verification.hash(&path)?, sha256_hex(actual));
+    verification.verify_unchanged()?;
+
+    // An inconsistent expected digest must be rejected even though the
+    // untouched fixture's metadata still looks exactly as it did before.
+    verification.digests.get_mut(&path).context("digest should be recorded")?.0 = "0".repeat(64);
+    for result in [
+        verification.hash(&path).map(|_| ()),
+        verification.verify_unchanged(),
+    ] {
+        let error = result.err().context("conservative policy reused an incorrect digest")?;
+        assert!(error.to_string().contains("checksum changed"));
+    }
+    Ok(())
+}
+
+#[test]
 fn stage_verification_enforces_manifest_and_binary_hash() -> Result<()> {
     let _env = env_scope(&[])?;
     let triple = match release_triple() {

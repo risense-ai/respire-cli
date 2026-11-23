@@ -218,8 +218,14 @@ fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> R
             "accepted mismatched core pin {field}");
     }
     let mut incompatible = core.clone();
-    incompatible.assets[0].state = AssetState::Incompatible;
-    assert!(host_installation_plan(&intent, &incompatible, None, &directory, &ort).is_err());
+    let mut provider = incompatible.assets[0].clone();
+    provider.name = "unverified-provider".into();
+    provider.state = AssetState::Incompatible;
+    provider.reason = Some("fixture provider requires signature verification".into());
+    incompatible.assets.push(provider);
+    let error = host_installation_plan(&intent, &incompatible, None, &directory, &ort)
+        .err().context("incompatible provider was not rejected")?;
+    assert!(error.to_string().contains("fixture provider requires signature verification"));
     let mut duplicate = core.clone();
     duplicate.assets[1] = duplicate.assets[0].clone();
     assert!(host_installation_plan(&intent, &duplicate, None, &directory, &ort).is_err());
@@ -331,7 +337,11 @@ fn local_mirror_policy_has_explicit_environment_config_and_default_precedence() 
             official
         ]
     );
-    assert_eq!(sources[1], [profile_official]);
+    assert_eq!(sources[1], [
+        "https://hf-mirror.com/fixture/profile/resolve/fixed/config.json",
+        "https://hf-mirror.net/fixture/profile/resolve/fixed/config.json",
+        profile_official,
+    ]);
     assert_eq!(
         sources[2],
         [format!("https://gh-proxy.org/{cpu}"), cpu.to_owned()]
@@ -347,6 +357,11 @@ fn local_mirror_policy_has_explicit_environment_config_and_default_precedence() 
         ["https://config.invalid/fixture/model/resolve/fixed/model.onnx"]
     );
     assert_eq!(sources[2], [cpu]);
+    std::fs::write(
+        root.join("agent.json"), br#"{"model_mirror":"profile.invalid"}"#,
+    )?;
+    assert_eq!(local_model_sources(&intent, &plan)?[0],
+        ["https://profile.invalid/fixture/model/resolve/fixed/model.onnx"]);
     std::env::set_var("RSRS_MIRROR", "https://environment.invalid");
     std::env::set_var("RSRS_CPU_ORT_MIRROR", "cpu.invalid");
     let sources = local_model_sources(&intent, &plan)?;
@@ -363,8 +378,8 @@ fn local_mirror_policy_has_explicit_environment_config_and_default_precedence() 
     );
     assert_eq!(
         sources[1],
-        [profile_official],
-        "profile assets retain their immutable official source"
+        ["http://explicit.invalid:1234/fixture/profile/resolve/fixed/config.json"],
+        "profile mirrors only replace the origin, retaining the immutable path"
     );
     std::env::set_var("RSRS_CPU_ORT_MIRROR", "https://github.com/");
     assert_eq!(local_model_sources(&intent, &plan)?[2], [cpu]);
@@ -372,8 +387,10 @@ fn local_mirror_policy_has_explicit_environment_config_and_default_precedence() 
     intent.mirror = None;
     assert_eq!(
         local_model_sources(&intent, &plan)?[0],
-        ["https://config.invalid/fixture/model/resolve/fixed/model.onnx"]
+        ["https://profile.invalid/fixture/model/resolve/fixed/model.onnx"]
     );
+    let local = assets(&[("profile-weights", "")])?;
+    assert!(local_model_sources(&intent, &local)?[0].is_empty());
     Ok(())
 }
 
