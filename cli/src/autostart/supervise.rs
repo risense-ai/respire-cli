@@ -129,13 +129,11 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
             Err(error) => {
                 respire_logging::error(format_args!("runtime resolution failed"));
                 eprintln!("runtime resolution failed: {error:#}");
-                if error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>() {
-                    lifecycle::record_supervise_event(&config, "exit_error");
-                    return Err(error);
-                }
-                if !failure_backoff(&config, &root, &mut failures, Duration::ZERO)? {
-                    return Err(error);
-                }
+                handle_resolution_failure(
+                    error,
+                    || lifecycle::record_supervise_event(&config, "exit_error"),
+                    || failure_backoff(&config, &root, &mut failures, Duration::ZERO),
+                )?;
                 continue;
             }
         };
@@ -275,6 +273,24 @@ fn resolve_child_plan() -> Result<PathBuf> {
     Ok(binary)
 }
 
+/// A bad managed selection is not a crashed child: report it once without
+/// touching the restart budget. Other failures retain the existing backoff.
+fn handle_resolution_failure(
+    error: anyhow::Error,
+    record_terminal_exit: impl FnOnce(),
+    backoff: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    if crate::runtime_fetch::is_terminal_selection_error(&error) {
+        record_terminal_exit();
+        return Err(error);
+    }
+    if backoff()? {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 /// Record the failure, keep the restart budget bounded and sleep out the retry
 /// delay while still honoring disablement. `Ok(false)` stops the supervisor.
 fn failure_backoff(
@@ -330,6 +346,96 @@ fn supervise_retry(failures: &mut u8, uptime: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_exits_before_backoff_on_incompatible_or_damaged_selection() -> Result<()> {
+        use crate::runtime_fetch::{self, ManagedManifest, ReleaseProof};
+        use std::cell::Cell;
+        const OVERRIDES: &[&str] = &[
+            "RSRS_DATA_DIR", "ONEMEMORY_DATA_DIR", "RESPIRE_DATA_DIR",
+            "RSRS_DEFAULT_DATA_DIR", "ONEMEMORY_DEFAULT_DATA_DIR", "RESPIRE_DEFAULT_DATA_DIR",
+            "RSRS_BIN_DIR", "ONEMEMORY_BIN_DIR", "RESPIRE_BIN_DIR",
+            "RSRS_RUNTIME_BIN", "ONEMEMORY_RUNTIME_BIN", "RESPIRE_RUNTIME_BIN",
+            "RSRS_RUNTIME_TRIPLE", "ONEMEMORY_RUNTIME_TRIPLE", "RESPIRE_RUNTIME_TRIPLE",
+            "RSRS_CORE_TEST_MODE", "ONEMEMORY_CORE_TEST_MODE", "RESPIRE_CORE_TEST_MODE",
+        ];
+        let _env = runtime_fetch::runtime_fetch_tests::env_scope(OVERRIDES)?;
+        for key in OVERRIDES {
+            std::env::remove_var(key);
+        }
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let bin = root.join("bin");
+        std::env::set_var("RSRS_DATA_DIR", root);
+        std::env::set_var("RSRS_BIN_DIR", &bin);
+        // Keep unexpected fallback hermetic as well: no Runtime download.
+        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+
+        assert!(crate::embedding::selection().is_none());
+        assert_eq!(runtime_fetch::installation_root(), root);
+        let path = runtime_fetch::manifest_path();
+        let runtime = runtime_fetch::runtime_dir();
+        assert_eq!(path, bin.join("runtime.json"));
+        assert_eq!(runtime, bin.join("runtime"));
+        std::fs::create_dir(&bin)?;
+        let metadata = r#"{"schema_version":3,"new_inventory":[]}"#;
+        let hash = super::super::hash(metadata.as_bytes());
+        for (digest, diagnostic) in [
+            (hash, "runtime_metadata_incompatible:"),
+            ("0".repeat(64), "managed Runtime release metadata digest mismatch"),
+        ] {
+            let manifest = ManagedManifest {
+                version: "2.0.0-dev.31".into(),
+                sha256: "a".repeat(64),
+                release: Some(ReleaseProof {
+                    metadata_sha256: digest,
+                    metadata_json: metadata.into(),
+                }),
+            };
+            let bytes = serde_json::to_vec(&manifest)?;
+            std::fs::write(&path, &bytes)?;
+            let selection_failure = resolve_child_plan()
+                .expect_err("invalid managed selection was accepted")
+                .context("synthetic wrapper");
+            let original = format!("{selection_failure:#}");
+            assert!(original.contains(diagnostic));
+            let exits = Cell::new(0);
+            let stopped = handle_resolution_failure(
+                selection_failure,
+                || exits.set(exits.get() + 1),
+                || panic!("terminal selection failure entered retry backoff"),
+            ).expect_err("a terminal failure should exit the supervisor");
+            assert_eq!(exits.get(), 1);
+            assert_eq!(format!("{stopped:#}"), original);
+            assert_eq!(std::fs::read(&path)?, bytes);
+            // The managed Runtime directory is the parent of all staging,
+            // receipts and install locks. The lifecycle directory is separate.
+            for absent in [&runtime, &root.join("runtime")] {
+                assert!(std::fs::symlink_metadata(absent)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
+            }
+            assert_eq!(std::fs::read_dir(&bin)?.count(), 1);
+            assert_eq!(std::fs::read_dir(root)?.count(), 1);
+        }
+
+        // Only the type, not the diagnostic's text, makes an error terminal.
+        for retry_allowed in [true, false] {
+            let transient = "runtime_metadata_incompatible: synthetic untyped failure";
+            let retries = Cell::new(0);
+            let result = handle_resolution_failure(
+                anyhow::anyhow!(transient),
+                || panic!("untyped failures must remain on the retry path"),
+                || { retries.set(retries.get() + 1); Ok(retry_allowed) },
+            );
+            assert_eq!(retries.get(), 1);
+            if retry_allowed {
+                result?;
+            } else {
+                assert_eq!(result.expect_err("exhausted retry must exit").to_string(), transient);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn supervisor_never_turns_resolution_failure_into_a_shim() -> Result<()> {
