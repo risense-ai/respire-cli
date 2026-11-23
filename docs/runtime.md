@@ -400,6 +400,35 @@ A missing or rejected legacy token requires the old runtime's existing
 authentication material, rather than bypassing authentication or killing an
 unverified process. HTTP redirects are disabled for the local runtime client.
 
+### If installation is blocked after the older Runtime stopped
+
+`legacy_runtime_migration_required` means the host could not verify the
+previous Runtime owner or installation state. It does not mean a process is
+still running. A stale endpoint file is not by itself evidence of a live
+owner. The host checks the recorded process and loopback port and may still
+stop the upgrade if ownership, registration, or installed package evidence
+cannot be verified.
+
+- From a normal host terminal configured for the **same installation and RPC
+  port**, inspect `rsrs --json runtime status` and `rsrs --json runtime list`.
+  The list shows installation and version information, not proof of shutdown.
+  A status result is a snapshot; it does not bind a later stop to the Runtime
+  you inspected. Do not use a generic stop or restart command, an internal
+  stop flag, or a forced process exit to clear this error. If the owner or its
+  handoff cannot be verified, leave it untouched and preserve the evidence below.
+- On a headless host, `rsrs runtime install` is the supported installation
+  command; it does not require the desktop app. Importing an older account
+  through the desktop migration screen or `rsrs migrate` is a separate data
+  operation. It does not repair or transfer Runtime ownership, and private
+  Client2 flags are not a recovery command.
+- If verification still fails, preserve the pre-upgrade backup, the previous
+  executable, and its ownership and installation records. Do not delete
+  endpoint, lock, registration, or receipt files to make the check pass.
+  Keep using the known-good installation if still available and report the
+  exact error and versions with personal paths and credentials removed.
+  An offline install can verify and select a package. It does not stop the
+  previous Runtime, resolve its ownership, or prove that startup is safe.
+
 ## Model downloads and account switches
 
 Model weights and inference engine selection are global to the installation
