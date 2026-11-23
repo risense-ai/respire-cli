@@ -104,11 +104,6 @@ fn configured_string(config: &Value, key: &str) -> Option<String> {
 }
 
 fn effective_model_mirror(client: Option<&Value>, profile: &Path) -> Result<Option<String>> {
-    if let Some(mirror) = crate::env::var("RSRS_MIRROR").ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(Some(mirror));
-    }
     // Reuse the setter's path policy. The compatibility fallback tolerates
     // ordinary missing/corrupt JSON, but never follows a redirect as authority.
     let agent_path = config::normalize_control_path(&profile.join("agent.json"))?;
@@ -129,12 +124,32 @@ fn effective_model_mirror(client: Option<&Value>, profile: &Path) -> Result<Opti
     Ok(agent.or_else(|| client.and_then(|config| configured_string(config, "model_mirror"))))
 }
 
+/// Resolve the explicit value and both mirror settings from the same validated
+/// device configuration. Profile selection and agent.json matter only when a
+/// command-line override and a nonempty environment override are both absent.
+fn model_mirror_snapshot(explicit: Option<&str>) -> Result<(Option<Value>, Option<String>)> {
+    config::control_installation_root()?;
+    let client = config::read_device_control_config()?;
+    let model = match explicit.map(str::to_owned).or_else(|| {
+        crate::env::var("RSRS_MIRROR").ok().filter(|value| !value.trim().is_empty())
+    }) {
+        Some(mirror) => Some(mirror),
+        None => {
+            let profile = config::resolve_control_profile(client.as_ref())?;
+            effective_model_mirror(client.as_ref(), &profile)?
+        }
+    };
+    Ok((client, model))
+}
+
 /// Effective Hugging Face mirror. A profile's agent.json is authoritative;
 /// device client.json is only a compatibility fallback for an unset mirror.
 pub fn mirror_from_env() -> Result<Option<String>> {
-    // Validate client.json even when the environment supplies the selected mirror.
-    let (_, profile, client) = config::read_control_config()?;
-    effective_model_mirror(client.as_ref(), &profile)
+    resolve_model_mirror(None)
+}
+
+pub fn resolve_model_mirror(explicit: Option<&str>) -> Result<Option<String>> {
+    model_mirror_snapshot(explicit).map(|(_, model)| model)
 }
 
 pub struct M3DownloadMirrors {
@@ -142,21 +157,10 @@ pub struct M3DownloadMirrors {
     pub cpu_ort: String,
 }
 
-/// Resolve M3 asset mirrors from one validated device config read. An explicit
-/// Hugging Face mirror leaves profile preferences untouched, not CPU ORT policy.
+/// An explicit Hugging Face mirror does not change the independent CPU ORT policy.
 pub fn m3_download_mirrors(explicit: Option<&str>) -> Result<M3DownloadMirrors> {
-    let (client, model) = match explicit {
-        Some(mirror) => (
-            config::read_client_config(&crate::paths::client_config_path())?,
-            mirror.to_owned(),
-        ),
-        None => {
-            let (_, profile, client) = config::read_control_config()?;
-            let model = effective_model_mirror(client.as_ref(), &profile)?
-                .unwrap_or_else(|| "auto".to_owned());
-            (client, model)
-        }
-    };
+    let (client, model) = model_mirror_snapshot(explicit)?;
+    let model = model.unwrap_or_else(|| "auto".to_owned());
     let cpu_ort = crate::env::var("RSRS_CPU_ORT_MIRROR").ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| client.as_ref().and_then(|config| configured_string(config, "model_cpu_ort_mirror")))

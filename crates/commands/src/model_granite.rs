@@ -113,8 +113,9 @@ pub fn granite_models_root() -> Result<PathBuf> {
     Ok(respire_client_host::paths::main_data_dir().join("models"))
 }
 
-fn granite_origins(mirror: Option<&str>) -> Result<Vec<String>> {
-    let setting = mirror
+fn granite_origins(explicit: Option<&str>) -> Result<Vec<String>> {
+    let mirror = respire_client_host::settings::resolve_model_mirror(explicit)?;
+    let setting = mirror.as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("auto");
@@ -136,8 +137,7 @@ pub fn install_granite(model: &str, mirror: Option<&str>) -> Result<InstallGrani
     let _operation = crate::model_progress::Operation::begin_download()?;
     let pin = pin_for(model)?;
     let dest = granite_model_dir(&granite_models_root()?, &pin);
-    let mirror_env = respire_client_host::settings::mirror_from_env()?;
-    let origins = granite_origins(mirror.or(mirror_env.as_deref()))?;
+    let origins = granite_origins(mirror)?;
     let mut skipped = true;
     for file in [pin.weights, pin.tokenizer] {
         let staged = stage_file(&pin, file, &dest, &origins)?;
@@ -246,6 +246,51 @@ fn stage_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn granite_origin_precedence_skips_profile_only_for_valid_overrides() -> Result<()> {
+        let _serial = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let scratch = tempfile::tempdir()?;
+        let root = scratch.path().canonicalize()?;
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let keys = ["RSRS_DATA_DIR", "RSRS_DEFAULT_DATA_DIR", "ONEMEMORY_DEFAULT_DATA_DIR",
+            "RESPIRE_DEFAULT_DATA_DIR", "RSRS_MIRROR", "ONEMEMORY_MIRROR", "RESPIRE_MIRROR"];
+        let _restore = Restore(keys.iter().map(|&key| (key, std::env::var_os(key))).collect());
+        for key in keys { std::env::remove_var(key); }
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        let client = root.join("client.json");
+        let agent = root.join("agent.json");
+        let auto: Vec<_> = crate::model_download::MIRRORS[1..].iter().map(|origin| (*origin).to_owned()).collect();
+        assert_eq!(granite_origins(None)?, auto);
+        assert_eq!(granite_origins(Some("   "))?, auto);
+        std::fs::write(&client, br#"{"model_mirror":"device.invalid"}"#)?;
+        assert_eq!(granite_origins(None)?, ["https://device.invalid"]);
+        std::fs::write(&agent, br#"{"model_mirror":"profile.invalid"}"#)?;
+        assert_eq!(granite_origins(None)?, ["https://profile.invalid"]);
+        std::fs::remove_file(&agent)?;
+        std::fs::create_dir(&agent)?;
+        assert!(granite_origins(None).is_err());
+        std::env::set_var("RSRS_MIRROR", "env.invalid");
+        assert_eq!(granite_origins(None)?, ["https://env.invalid"]);
+        assert_eq!(granite_origins(Some("explicit.invalid"))?, ["https://explicit.invalid"]);
+        assert_eq!(granite_origins(Some("auto"))?, auto);
+        std::fs::write(&client, b"invalid JSON")?;
+        assert!(granite_origins(Some("explicit.invalid")).is_err());
+        assert!(granite_origins(None).is_err());
+        Ok(())
+    }
 
     #[test]
     fn pin_lookup_rejects_unknown_models() -> Result<()> {
