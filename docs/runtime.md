@@ -412,9 +412,10 @@ cannot be verified.
 - From a normal host terminal configured for the **same installation and RPC
   port**, inspect `rsrs --json runtime status` and `rsrs --json runtime list`.
   The list shows installation and version information, not proof of shutdown.
-  If a positively identified older Runtime is still serving this installation,
-  use that installation's supported graceful-stop command. Do not stop another
-  installation or kill a process whose identity you cannot verify.
+  A status result is a snapshot; it does not bind a later stop to the Runtime
+  you inspected. Do not use a generic stop or restart command, an internal
+  stop flag, or a forced process exit to clear this error. If the owner or its
+  handoff cannot be verified, leave it untouched and preserve the evidence below.
 - On a headless host, `rsrs runtime install` is the supported installation
   command; it does not require the desktop app. Importing an older account
   through the desktop migration screen or `rsrs migrate` is a separate data
