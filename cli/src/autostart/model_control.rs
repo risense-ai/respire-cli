@@ -508,19 +508,11 @@ fn host_installation_plan(
 
 /// Local policy only: the Runtime supplies artifact identity, never mirror authority.
 fn local_model_sources(intent: &ModelInstallIntent, plan: &AssetsStatus) -> Result<Vec<Vec<String>>> {
-    let config = respire_client_host::config::read_client_config(
-        &respire_client_host::paths::client_config_path())?;
-    let config_value = |name: &str| config.as_ref().and_then(|config| config[name].as_str()).map(str::to_owned);
-    let mirror = intent.mirror.clone()
-        .or_else(|| respire_client_host::env::var("RSRS_MIRROR").ok().filter(|value| !value.trim().is_empty()))
-        .or_else(|| config_value("model_mirror")).unwrap_or_else(|| "auto".to_owned());
-    let origins = if mirror.trim() == "auto" {
+    let mirrors = respire_client_host::settings::m3_download_mirrors(intent.mirror.as_deref())?;
+    let origins = if mirrors.model.trim() == "auto" {
         vec!["https://hf-mirror.com".to_owned(), "https://hf-mirror.net".to_owned(), "https://huggingface.co".to_owned()]
-    } else { vec![model_mirror_origin(&mirror)?] };
-    let cpu_mirror = respire_client_host::env::var("RSRS_CPU_ORT_MIRROR").ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| config_value("model_cpu_ort_mirror").filter(|value| !value.trim().is_empty()))
-        .unwrap_or_else(|| "auto".to_owned());
+    } else { vec![model_mirror_origin(&mirrors.model)?] };
+    let cpu_mirror = mirrors.cpu_ort;
     plan.assets.iter().map(|asset| {
         let official = &asset.suggested_source;
         if asset.name.starts_with("profile-") && official.is_empty() {

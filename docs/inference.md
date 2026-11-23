@@ -102,8 +102,10 @@ The commands above remain the legacy M3 interface: `--model` on
 `model engine/load/install` continues to mean an M3 weight variant.
 The TUI download-source editor offers auto, hf-mirror.com, hf-mirror.net and the
 official Hugging Face origin, plus a custom URL. `--mirror` overrides
-`RSRS_MIRROR`, then the persisted `model_mirror` setting; default is auto. These
-settings apply to the tokenizer and ONNX file. Auto tries hf-mirror.com,
+`RSRS_MIRROR`, then the selected profile's `model_mirror` in `agent.json`.
+An older value in `client.json` is the fallback when the profile has no mirror.
+If neither file supplies a mirror, the default is auto. Saving the source does
+not stop Runtime. These settings apply to the tokenizer and ONNX file. Auto tries hf-mirror.com,
 hf-mirror.net, then huggingface.co; an explicit source fails without switching.
 
 CPU execution additionally uses `model_quantized.cpu-v1.ort`, the exact CPU ORT

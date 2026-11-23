@@ -13,6 +13,13 @@ pub fn control_roots() -> Result<(PathBuf, PathBuf)> {
 /// Keep validated roots and the selected profile tied to one client.json read.
 pub(crate) fn read_control_config() -> Result<(PathBuf, PathBuf, Option<serde_json::Value>)> {
     let root = control_installation_root()?;
+    let config = read_device_control_config()?;
+    let profile = resolve_control_profile(config.as_ref())?;
+    Ok((root, profile, config))
+}
+
+/// Read and validate the device configuration without selecting a profile.
+pub(crate) fn read_device_control_config() -> Result<Option<serde_json::Value>> {
     let config_path = absolute_control_path(crate::paths::client_config_path())?;
     let config = read_client_config(&config_path)?;
     // Validate even a configured path that legacy whole-installation isolation ignores.
@@ -20,8 +27,11 @@ pub(crate) fn read_control_config() -> Result<(PathBuf, PathBuf, Option<serde_js
         .filter(|value| !value.is_empty()) {
         absolute_control_path(crate::paths::expand_tilde(value))?;
     }
-    let profile = absolute_control_path(crate::paths::data_dir_from_config(config.as_ref()))?;
-    Ok((root, profile, config))
+    Ok(config)
+}
+
+pub(crate) fn resolve_control_profile(config: Option<&serde_json::Value>) -> Result<PathBuf> {
+    absolute_control_path(crate::paths::data_dir_from_config(config))
 }
 
 /// Resolve the installation root without reading or selecting a library.
