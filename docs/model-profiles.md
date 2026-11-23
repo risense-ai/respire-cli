@@ -30,7 +30,10 @@ replay of an unknown operation.
 This custom local profile uses the verified small model as an example. Replace
 the paths with your local files. Optional `download` resource URLs support HTTPS
 or HTTP loopback fixtures in Runtime Profile operations. The CLI file-only
-installer accepts canonical immutable Hugging Face URLs. For known public
+installer accepts canonical immutable Hugging Face URLs only for files beneath
+the installation `models` directory, the selected Profile's `models` directory,
+or an additional directory explicitly set in the local `RSRS_M3_DIR` setting.
+Runtime responses cannot add a write root. For known public
 artifacts in the built-in M3, BGE, MLX and Granite Profiles, it uses
 `--mirror`, then `RSRS_MIRROR`, then the saved setting. Automatic mode tries
 `hf-mirror.com`, `hf-mirror.net`, then `huggingface.co`. Other valid Hugging
