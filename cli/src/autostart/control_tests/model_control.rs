@@ -347,6 +347,52 @@ fn local_mirror_policy_has_explicit_environment_config_and_default_precedence() 
         ["https://config.invalid/fixture/model/resolve/fixed/model.onnx"]
     );
     assert_eq!(sources[2], [cpu]);
+    let legacy = std::fs::read(root.join("client.json"))?;
+    assert_eq!(respire_client_host::settings::mirror_from_env()?.as_deref(), Some("config.invalid"));
+
+    // This is the setter used by both the TUI and the terminal. An existing
+    // endpoint that cannot authenticate must not block a local-only preference.
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(&runtime_dir)?;
+    let locator = runtime_dir.join("endpoint.json");
+    let endpoint_bytes = b"unrelated endpoint bytes";
+    std::fs::write(&locator, endpoint_bytes)?;
+    let result = crate::autostart::control_agent_config("model_mirror=saved.invalid")?;
+    assert!(matches!(result.status, respire_commands::output::Status::Ok));
+    assert_eq!(std::fs::read(&locator)?, endpoint_bytes);
+    assert!(!runtime_dir.join("autostart/maintenance.json").exists());
+    assert_eq!(std::fs::read(root.join("client.json"))?, legacy);
+    assert_eq!(respire_client_host::settings::mirror_from_env()?.as_deref(), Some("saved.invalid"));
+    let sources = local_model_sources(&intent, &plan)?;
+    assert_eq!(sources[0], ["https://saved.invalid/fixture/model/resolve/fixed/model.onnx"]);
+    assert_eq!(sources[1], [profile_official]);
+    assert_eq!(sources[2], [cpu]);
+
+    // A pending auth transaction must still prevent writing the local setting.
+    let agent_before = std::fs::read(root.join("agent.json"))?;
+    let journal = root.join(".login-recovery.json");
+    std::fs::write(&journal, br#"{"schema_version":2,"active":{}}"#)?;
+    let blocked = crate::autostart::control_agent_config("model_mirror=not-accepted.invalid")
+        .err().context("a pending auth operation did not block the mirror save")?;
+    assert!(format!("{blocked:#}").contains("auth_recovery_pending"));
+    assert_eq!(std::fs::read(root.join("agent.json"))?, agent_before);
+    assert!(!runtime_dir.join("autostart/maintenance.json").exists());
+    std::fs::remove_file(journal)?;
+
+    // The offline keygen record is itself a fence, before a maintenance
+    // marker exists. Its contents are intentionally opaque to this setter.
+    let handoff = runtime_dir.join("autostart/offline-keygen.json");
+    std::fs::create_dir_all(handoff.parent().context("offline keygen evidence parent")?)?;
+    for record in [br#"{"phase":"Prepared"}"#.as_slice(), b"malformed"] {
+        std::fs::write(&handoff, record)?;
+        let blocked = crate::autostart::control_agent_config("model_mirror=not-accepted.invalid")
+            .err().context("offline keygen evidence did not block the mirror save")?;
+        assert!(format!("{blocked:#}").contains("offline_keygen_handoff_pending"));
+        assert_eq!(std::fs::read(root.join("agent.json"))?, agent_before);
+        assert_eq!(std::fs::read(&handoff)?, record);
+        assert!(!runtime_dir.join("autostart/maintenance.json").exists());
+    }
+    std::fs::remove_file(handoff)?;
     std::env::set_var("RSRS_MIRROR", "https://environment.invalid");
     std::env::set_var("RSRS_CPU_ORT_MIRROR", "cpu.invalid");
     let sources = local_model_sources(&intent, &plan)?;
@@ -372,8 +418,56 @@ fn local_mirror_policy_has_explicit_environment_config_and_default_precedence() 
     intent.mirror = None;
     assert_eq!(
         local_model_sources(&intent, &plan)?[0],
-        ["https://config.invalid/fixture/model/resolve/fixed/model.onnx"]
+        ["https://saved.invalid/fixture/model/resolve/fixed/model.onnx"]
     );
+    assert_eq!(respire_client_host::settings::mirror_from_env()?.as_deref(), Some("saved.invalid"));
+    crate::autostart::control_agent_config("model_mirror=auto")?;
+    assert_eq!(respire_client_host::settings::mirror_from_env()?.as_deref(), Some("auto"));
+    assert_eq!(local_model_sources(&intent, &plan)?[0][0],
+        "https://hf-mirror.com/fixture/model/resolve/fixed/model.onnx");
+    let profile_config = root.join("agent.json");
+    std::fs::write(&profile_config, b"invalid JSON")?;
+    assert_eq!(respire_client_host::settings::mirror_from_env()?.as_deref(), Some("config.invalid"));
+    std::fs::remove_file(&profile_config)?;
+    std::fs::create_dir(&profile_config)?;
+    let rejected = local_model_sources(&intent, &plan)
+        .err().context("model mirror accepted a non-regular profile config")?;
+    assert!(format!("{rejected:#}").contains("not a regular file"));
+    assert!(respire_client_host::settings::mirror_from_env().is_err());
+    std::env::set_var("RSRS_MIRROR", "https://environment.invalid");
+    assert_eq!(local_model_sources(&intent, &plan)?[0],
+        ["https://environment.invalid/fixture/model/resolve/fixed/model.onnx"]);
+    std::env::remove_var("RSRS_MIRROR");
+    intent.mirror = Some("explicit.invalid".into());
+    assert_eq!(local_model_sources(&intent, &plan)?[0],
+        ["https://explicit.invalid/fixture/model/resolve/fixed/model.onnx"]);
+    intent.mirror = None;
+    std::fs::remove_dir(&profile_config)?;
+    #[cfg(unix)]
+    {
+        let unrelated = root.join("different-agent.json");
+        std::fs::write(&unrelated, br#"{"model_mirror":"not-this-profile.invalid"}"#)?;
+        std::os::unix::fs::symlink(&unrelated, &profile_config)?;
+        let rejected = local_model_sources(&intent, &plan)
+            .err().context("model mirror accepted a redirected profile config")?;
+        assert!(format!("{rejected:#}").contains("symlink/reparse point"));
+        assert!(respire_client_host::settings::mirror_from_env().is_err());
+        std::env::set_var("RSRS_MIRROR", "https://environment.invalid");
+        assert_eq!(respire_client_host::settings::mirror_from_env()?.as_deref(), Some("https://environment.invalid"));
+        assert_eq!(local_model_sources(&intent, &plan)?[0],
+            ["https://environment.invalid/fixture/model/resolve/fixed/model.onnx"]);
+        std::env::remove_var("RSRS_MIRROR");
+        intent.mirror = Some("explicit.invalid".into());
+        assert_eq!(local_model_sources(&intent, &plan)?[0],
+            ["https://explicit.invalid/fixture/model/resolve/fixed/model.onnx"]);
+        std::fs::remove_file(&profile_config)?;
+    }
+    // An explicit source skips profile preferences, never device validation:
+    // CPU ORT still uses the separately validated configuration.
+    std::fs::write(root.join("client.json"), b"invalid JSON")?;
+    intent.mirror = Some("explicit.invalid".into());
+    assert!(local_model_sources(&intent, &plan).is_err());
+    assert!(respire_client_host::settings::mirror_from_env().is_err());
     Ok(())
 }
 

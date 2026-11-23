@@ -442,6 +442,22 @@ fn control_host_agent_config(intent: Option<respire_protocol::config_control::Ag
     let identity = metadata_identity(&profile, super::hash)?;
     let account = identity.account_id.clone().unwrap_or_else(|| super::hash(profile.display().to_string().as_bytes()));
     let saved = super::lifecycle::pending_agent_config(&root, query.is_some() || request.is_some())?;
+    // TUI and terminal mirror saves change local download policy only. Keep
+    // takeover, recovery and config CAS gates; do not inspect or cycle Runtime.
+    if saved.is_none() && query.is_none() && request.is_none()
+        && intent.as_ref().is_some_and(|intent| intent.key.trim() == "model_mirror")
+    {
+        let intent = intent.context("model mirror intent missing")?;
+        super::super::offline_keygen::reject_generic_recovery(&root)?;
+        host_config_preflight(&root, &profile)?;
+        validate_host_agent_config(&intent, &profile)?;
+        let result = ResultEnvelope::new("agent-config", Status::Ok,
+            serde_json::json!({"action":"updated", "key":intent.key, "value":intent.value()}),
+            vec![respire_commands::output::Item::new(&intent.key, Status::Ok, &intent.raw_value)]);
+        let review = crate::client_config::review_agent_config(intent, root, profile)?;
+        crate::client_config::publish_agent_config(&review, || Ok(()))?;
+        return Ok(result);
+    }
     let mut query_only = query.is_some() || request.is_some_and(|(_, query)| query);
     let requested = query.map(|(context, _)| context.operation_id.as_str())
         .or(request.map(|(id, _)| id));

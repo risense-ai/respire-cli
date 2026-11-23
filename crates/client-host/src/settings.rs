@@ -2,20 +2,23 @@
 
 use anyhow::Result;
 use serde_json::Value;
+use std::path::Path;
 
 use crate::config;
 
 fn read_settings() -> Result<(Option<Value>, Value)> {
     let (_, profile, client) = config::read_control_config()?;
-    let path = profile.join("agent.json");
+    Ok((client, read_optional_agent_config(&profile.join("agent.json"))))
+}
+
+fn read_optional_agent_config(path: &Path) -> Value {
     // Preserve the original agent reader: absent, unreadable or malformed files
     // yield an empty object. Field types remain checked by as_str/as_bool at use.
     // This compatibility behavior does not apply to the strict client reader above.
-    let agent = std::fs::read_to_string(path)
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    Ok((client, agent))
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
 pub fn read_agent_config() -> Result<Value> {
@@ -96,10 +99,67 @@ pub fn off_mode() -> Result<bool> {
     })
 }
 
+fn configured_string(config: &Value, key: &str) -> Option<String> {
+    config[key].as_str().filter(|value| !value.trim().is_empty()).map(str::to_owned)
+}
+
+fn effective_model_mirror(client: Option<&Value>, profile: &Path) -> Result<Option<String>> {
+    if let Some(mirror) = crate::env::var("RSRS_MIRROR").ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(Some(mirror));
+    }
+    // Reuse the setter's path policy. The compatibility fallback tolerates
+    // ordinary missing/corrupt JSON, but never follows a redirect as authority.
+    let agent_path = config::normalize_control_path(&profile.join("agent.json"))?;
+    let agent = match std::fs::symlink_metadata(&agent_path) {
+        Ok(metadata) => {
+            anyhow::ensure!(metadata.is_file(), "model mirror config is not a regular file");
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                anyhow::ensure!(metadata.file_attributes() & 0x400 == 0,
+                    "model mirror config is a reparse point");
+            }
+            configured_string(&read_optional_agent_config(&agent_path), "model_mirror")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(agent.or_else(|| client.and_then(|config| configured_string(config, "model_mirror"))))
+}
+
+/// Effective Hugging Face mirror. A profile's agent.json is authoritative;
+/// device client.json is only a compatibility fallback for an unset mirror.
 pub fn mirror_from_env() -> Result<Option<String>> {
     // Validate client.json even when the environment supplies the selected mirror.
-    let agent = read_agent_config()?;
-    Ok(crate::env::var("RSRS_MIRROR").ok()
+    let (_, profile, client) = config::read_control_config()?;
+    effective_model_mirror(client.as_ref(), &profile)
+}
+
+pub struct M3DownloadMirrors {
+    pub model: String,
+    pub cpu_ort: String,
+}
+
+/// Resolve M3 asset mirrors from one validated device config read. An explicit
+/// Hugging Face mirror leaves profile preferences untouched, not CPU ORT policy.
+pub fn m3_download_mirrors(explicit: Option<&str>) -> Result<M3DownloadMirrors> {
+    let (client, model) = match explicit {
+        Some(mirror) => (
+            config::read_client_config(&crate::paths::client_config_path())?,
+            mirror.to_owned(),
+        ),
+        None => {
+            let (_, profile, client) = config::read_control_config()?;
+            let model = effective_model_mirror(client.as_ref(), &profile)?
+                .unwrap_or_else(|| "auto".to_owned());
+            (client, model)
+        }
+    };
+    let cpu_ort = crate::env::var("RSRS_CPU_ORT_MIRROR").ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| agent["model_mirror"].as_str().map(str::to_owned)))
+        .or_else(|| client.as_ref().and_then(|config| configured_string(config, "model_cpu_ort_mirror")))
+        .unwrap_or_else(|| "auto".to_owned());
+    Ok(M3DownloadMirrors { model, cpu_ort })
 }
