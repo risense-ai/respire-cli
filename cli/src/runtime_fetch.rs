@@ -301,6 +301,23 @@ impl std::fmt::Display for ManagedRuntimeRepairRequired {
 
 impl std::error::Error for ManagedRuntimeRepairRequired {}
 
+/// An explicit unknown release schema is not evidence of damaged files.
+#[derive(Debug)]
+struct RuntimeMetadataIncompatible(u64);
+
+impl std::fmt::Display for RuntimeMetadataIncompatible {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "runtime_metadata_incompatible: this CLI cannot read Runtime release metadata schema {}; \
+             use a CLI that supports this schema or install a compatible verified Runtime release",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RuntimeMetadataIncompatible {}
+
 /// An automatic install must not select a new protocol for an unbound old owner.
 #[derive(Debug)]
 pub struct LegacyRuntimeMigrationRequired;
@@ -342,7 +359,7 @@ impl ManagedManifest {
                     .eq_ignore_ascii_case(&proof.metadata_sha256),
             "managed Runtime release metadata digest mismatch"
         );
-        let metadata: BuildMetadata = serde_json::from_str(&proof.metadata_json)?;
+        let metadata = BuildMetadata::parse(proof.metadata_json.as_bytes())?;
         anyhow::ensure!(
             metadata.schema_version == 2,
             "repair required: legacy release metadata does not prove the complete resource set"
@@ -458,7 +475,13 @@ fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
         metadata.verify_files(&directory)?;
         verify_stage(&directory, RUNTIME_BINARY, triple, &manifest.sha256)
     })()
-    .context(ManagedRuntimeRepairRequired)
+    .map_err(|error: anyhow::Error| {
+        if error.is::<RuntimeMetadataIncompatible>() {
+            error
+        } else {
+            error.context(ManagedRuntimeRepairRequired)
+        }
+    })
 }
 
 /// A migrated owner may still be draining from its authenticated legacy image.
@@ -630,6 +653,35 @@ where
 }
 
 impl BuildMetadata {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        match serde_json::from_slice::<Self>(bytes) {
+            Ok(metadata) => {
+                Self::check_schema(metadata.schema_version)?;
+                Ok(metadata)
+            }
+            Err(error) => {
+                // A future schema may also remove fields that this version
+                // requires. Inspect only a valid, uniquely declared numeric
+                // schema, and retain the original parser error otherwise.
+                #[derive(Deserialize)]
+                struct Schema {
+                    schema_version: u64,
+                }
+                if bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{') {
+                    if let Ok(schema) = serde_json::from_slice::<Schema>(bytes) {
+                        Self::check_schema(schema.schema_version)?;
+                    }
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    fn check_schema(schema: u64) -> Result<()> {
+        anyhow::ensure!(matches!(schema, 1 | 2), RuntimeMetadataIncompatible(schema));
+        Ok(())
+    }
+
     /// Resolve the legacy `triple` alias without mixing different values.
     fn target_triple(&self) -> Result<&str> {
         match (self.triple.as_deref(), self.target_triple.as_deref()) {
@@ -670,11 +722,7 @@ impl BuildMetadata {
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
-        anyhow::ensure!(
-            self.schema_version == 1 || self.schema_version == 2,
-            "unsupported runtime metadata schema {}",
-            self.schema_version
-        );
+        Self::check_schema(self.schema_version)?;
         anyhow::ensure!(
             valid_version(&self.runtime_version) && self.runtime_version == required,
             "release metadata targets runtime {}, expected {required}",
@@ -1883,8 +1931,13 @@ fn download_runtime_release(
         RELEASE_BASE,
         &format!("v{required}/{metadata_name}"),
     ))?;
-    let metadata: BuildMetadata =
-        serde_json::from_slice(&metadata_bytes).context("invalid runtime release metadata")?;
+    let metadata = BuildMetadata::parse(&metadata_bytes).map_err(|error| {
+        if error.is::<RuntimeMetadataIncompatible>() {
+            error
+        } else {
+            error.context("invalid runtime release metadata")
+        }
+    })?;
     metadata.validate(&required, &triple)?;
     let manifest = ManagedManifest::from_release(&metadata, &metadata_bytes)?;
     let mut failures = Vec::new();
@@ -1968,7 +2021,7 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
         bytes.len() <= MAX_METADATA_BYTES,
         "release metadata too large"
     );
-    let metadata: BuildMetadata = serde_json::from_slice(&bytes)?;
+    let metadata = BuildMetadata::parse(&bytes)?;
     metadata.validate(version, &triple)?;
     let manifest = ManagedManifest::from_release(&metadata, &bytes)?;
     anyhow::ensure!(

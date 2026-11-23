@@ -39,7 +39,7 @@ fn release_manifest(version: &str) -> Result<ManagedManifest> {
         RELEASE_BASE,
         &format!("v{version}/runtime-build-{triple}.json"),
     ))?;
-    let metadata: BuildMetadata = serde_json::from_slice(&bytes)?;
+    let metadata = BuildMetadata::parse(&bytes)?;
     metadata.validate(version, &triple)?;
     ManagedManifest::from_release(&metadata, &bytes)
 }

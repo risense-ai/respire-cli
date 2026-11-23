@@ -960,3 +960,75 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
     anyhow::ensure!(missing.validate("1.0.21-dev.1", &triple).is_err());
     Ok(())
 }
+
+#[test]
+fn release_schema_diagnosis_does_not_mask_invalid_metadata() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RUNTIME_TRIPLE"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+    let triple = release_triple()?;
+    let binary = install_lifecycle_fixture()?;
+    let archive = dir.path().join("runtime.tar.gz");
+    fs::write(&archive, b"unused synthetic archive bytes")?;
+    let adjacent_metadata = archive.with_file_name(format!("runtime-build-{triple}.json"));
+    let before = fs::read(manifest_path())?;
+    let selected = read_manifest()?.context("fixture selection missing")?;
+
+    // Intentionally omits fields required by the current schema. The current
+    // verifier must refuse before staging, rather than mislabel it as damage.
+    let future = r#"{"schema_version":3,"new_inventory":[]}"#;
+    fs::write(&adjacent_metadata, future)?;
+    let offline = install_from_file(&archive, &selected.version)
+        .expect_err("unsupported offline metadata was accepted");
+    assert!(offline.is::<RuntimeMetadataIncompatible>());
+    assert_eq!(fs::read(manifest_path())?, before);
+    assert!(!runtime_dir().join(".install.lock").exists());
+
+    for (json, valid_digest, incompatible) in [
+        (future, true, true),
+        (future, false, false),
+        (r#"{"schema_version":-1}"#, true, false),
+        (r#"{"schema_version":3.5}"#, true, false),
+        (r#"{"schema_version":"3"}"#, true, false),
+        (r#"{"schema_version":3,"schema_version":3}"#, true, false),
+        (r#"{"schema_version":3,"schema\u005fversion":3}"#, true, false),
+        (r#"{"new_inventory":[]}"#, true, false),
+        (r#"{"schema_version":3,"inventory":["#, true, false),
+        (r#"{"schema_version":2,"new_inventory":[]}"#, true, false),
+        ("[3]", true, false),
+    ] {
+        let mut manifest = selected.clone();
+        let proof = manifest.release.as_mut().context("fixture release proof missing")?;
+        proof.metadata_json = json.into();
+        if valid_digest {
+            proof.metadata_sha256 = sha256_hex(json.as_bytes());
+        }
+        fs::write(manifest_path(), serde_json::to_vec(&manifest)?)?;
+        let error = managed_runtime_path().expect_err("invalid selection was accepted");
+        assert_eq!(error.is::<RuntimeMetadataIncompatible>(), incompatible, "{json}");
+        assert_eq!(error.is::<ManagedRuntimeRepairRequired>(), !incompatible, "{json}");
+        if incompatible {
+            let (envelope, exit) = respire_commands::output_emit::command_failure(&error);
+            assert_eq!(exit, 1);
+            assert_eq!(envelope.command, "cli");
+            assert!(matches!(envelope.status, respire_commands::output::Status::Fail));
+            assert_eq!(envelope.summary, serde_json::json!({"reason":"runtime_error"}));
+            assert_eq!(envelope.details, serde_json::json!({"error_type":"runtime"}));
+            assert_eq!(envelope.errors.len(), 1);
+            assert!(envelope.errors[0].contains("runtime_metadata_incompatible:"));
+            assert!(envelope.errors[0].contains("schema 3"));
+            assert!(!envelope.errors[0].contains("repair required"));
+        }
+        if !valid_digest {
+            assert!(format!("{error:#}").contains("release metadata digest mismatch"));
+        }
+    }
+    fs::write(manifest_path(), before)?;
+    assert_eq!(managed_runtime_path()?, Some(binary.clone()));
+    fs::write(&binary, b"tampered runtime payload")?;
+    let damaged = managed_runtime_path().expect_err("damaged runtime was accepted");
+    assert!(damaged.is::<ManagedRuntimeRepairRequired>());
+    assert!(!damaged.is::<RuntimeMetadataIncompatible>());
+    Ok(())
+}
