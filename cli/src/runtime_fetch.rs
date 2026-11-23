@@ -654,32 +654,35 @@ where
 
 impl BuildMetadata {
     fn parse(bytes: &[u8]) -> Result<Self> {
-        match serde_json::from_slice::<Self>(bytes) {
-            Ok(metadata) => {
-                Self::check_schema(metadata.schema_version)?;
-                Ok(metadata)
+        let parsed = serde_json::from_slice::<Self>(bytes);
+        if !parsed.as_ref().is_ok_and(|metadata| Self::supports_schema(metadata.schema_version)) {
+            // A future schema may omit required fields. Diagnose it only when
+            // one valid JSON object explicitly declares the unknown version.
+            // Keep historical positional parsing and all existing rejections.
+            #[derive(Deserialize)]
+            struct Schema {
+                schema_version: u64,
+                // Validate ignored future members, including their strings,
+                // rather than relying on serde's syntactic IgnoredAny scan.
+                #[serde(flatten)]
+                _other: BTreeMap<String, serde_json::Value>,
             }
-            Err(error) => {
-                // A future schema may also remove fields that this version
-                // requires. Inspect only a valid, uniquely declared numeric
-                // schema, and retain the original parser error otherwise.
-                #[derive(Deserialize)]
-                struct Schema {
-                    schema_version: u64,
-                }
-                if bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace()) == Some(b'{') {
-                    if let Ok(schema) = serde_json::from_slice::<Schema>(bytes) {
-                        Self::check_schema(schema.schema_version)?;
+            if let Ok(json) = std::str::from_utf8(bytes) {
+                if json.trim_start().starts_with('{') {
+                    if let Ok(schema) = serde_json::from_str::<Schema>(json) {
+                        anyhow::ensure!(
+                            Self::supports_schema(schema.schema_version),
+                            RuntimeMetadataIncompatible(schema.schema_version)
+                        );
                     }
                 }
-                Err(error.into())
             }
         }
+        Ok(parsed?)
     }
 
-    fn check_schema(schema: u64) -> Result<()> {
-        anyhow::ensure!(matches!(schema, 1 | 2), RuntimeMetadataIncompatible(schema));
-        Ok(())
+    fn supports_schema(schema: u64) -> bool {
+        matches!(schema, 1 | 2)
     }
 
     /// Resolve the legacy `triple` alias without mixing different values.
@@ -722,7 +725,11 @@ impl BuildMetadata {
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
-        Self::check_schema(self.schema_version)?;
+        anyhow::ensure!(
+            Self::supports_schema(self.schema_version),
+            "unsupported runtime metadata schema {}",
+            self.schema_version
+        );
         anyhow::ensure!(
             valid_version(&self.runtime_version) && self.runtime_version == required,
             "release metadata targets runtime {}, expected {required}",

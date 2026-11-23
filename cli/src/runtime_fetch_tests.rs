@@ -985,8 +985,40 @@ fn release_schema_diagnosis_does_not_mask_invalid_metadata() -> Result<()> {
     assert_eq!(fs::read(manifest_path())?, before);
     assert!(!runtime_dir().join(".install.lock").exists());
 
+    let mut full_object: serde_json::Value = serde_json::from_str(
+        &selected.release.as_ref().context("fixture proof missing")?.metadata_json
+    )?;
+    full_object["schema_version"] = serde_json::json!(3);
+    let full_object = full_object.to_string();
+    assert_eq!(serde_json::from_str::<BuildMetadata>(&full_object)?.schema_version, 3);
+
+    // A complete struct can deserialize positionally with this Serde version,
+    // but it did not explicitly declare a JSON schema key.
+    let mut fields = serde_json::json!([
+        3, selected.version, format!("v{}", selected.version), triple, triple,
+        format!("rsrs-runtime-{triple}.tar.gz"), "0".repeat(64), "0".repeat(64),
+        selected.sha256, "0".repeat(40), release_binary_name(&triple),
+        {"minimum":1,"maximum":1}, {}, []
+    ]);
+    let full_array = fields.to_string();
+    assert_eq!(serde_json::from_str::<BuildMetadata>(&full_array)?.schema_version, 3);
+    fields[0] = serde_json::json!(1);
+    let old_array = BuildMetadata::parse(fields.to_string().as_bytes())?;
+    old_array.validate(&selected.version, &triple)?;
+
+    let invalid_utf8 = [br#"{"schema_version":3,"future_field":""#.as_slice(),
+        &[0xff], br#""}"#].concat();
+    fs::write(&adjacent_metadata, &invalid_utf8)?;
+    let offline = install_from_file(&archive, &selected.version)
+        .expect_err("invalid UTF-8 offline metadata was accepted");
+    assert!(!offline.is::<RuntimeMetadataIncompatible>());
+    assert_eq!(fs::read(manifest_path())?, before);
+    assert!(!runtime_dir().join(".install.lock").exists());
+
     for (json, valid_digest, incompatible) in [
         (future, true, true),
+        (&full_object, true, true),
+        (&full_array, true, false),
         (future, false, false),
         (r#"{"schema_version":-1}"#, true, false),
         (r#"{"schema_version":3.5}"#, true, false),
@@ -995,6 +1027,7 @@ fn release_schema_diagnosis_does_not_mask_invalid_metadata() -> Result<()> {
         (r#"{"schema_version":3,"schema\u005fversion":3}"#, true, false),
         (r#"{"new_inventory":[]}"#, true, false),
         (r#"{"schema_version":3,"inventory":["#, true, false),
+        (r#"{"schema_version":3,"future_field":"\uD800"}"#, true, false),
         (r#"{"schema_version":2,"new_inventory":[]}"#, true, false),
         ("[3]", true, false),
     ] {
