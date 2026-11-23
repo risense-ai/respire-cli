@@ -27,7 +27,11 @@ pub(super) fn sha256_file(path: &Path) -> Result<String> {
     let item = path.file_name().unwrap_or_default().to_string_lossy();
     let total = path.metadata()?.len();
     let mut checked = 0;
+    let mut reported = 0;
+    let mut last_report = std::time::Instant::now();
     model_progress::update("verify", &item, 0, Some(total))?;
+    #[cfg(test)]
+    tests::observe_hash_progress(0)?;
     let mut file =
         File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -41,8 +45,22 @@ pub(super) fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
         checked += n as u64;
-        model_progress::update("verify", &item, checked, Some(total))?;
+        let elapsed = || last_report.elapsed();
+        #[cfg(test)]
+        let elapsed = || tests::hash_progress_elapsed(checked, elapsed());
+        if checked - reported >= 4 * 1024 * 1024
+            || elapsed() >= std::time::Duration::from_millis(100)
+        {
+            model_progress::update("verify", &item, checked, Some(total))?;
+            #[cfg(test)]
+            tests::observe_hash_progress(checked)?;
+            reported = checked;
+            last_report = std::time::Instant::now();
+        }
     }
+    model_progress::update("verify", &item, checked, Some(total))?;
+    #[cfg(test)]
+    tests::observe_hash_progress(checked)?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -545,6 +563,106 @@ fn read_download(reader: &mut impl Read, buf: &mut [u8], url: &str) -> Result<us
 mod tests {
     use super::*;
     use anyhow::Result;
+
+    struct HashProgressProbe {
+        timed_at: u64,
+        cancel_at: Option<(u64, String)>,
+        updates: Vec<u64>,
+    }
+
+    thread_local! {
+        static HASH_PROGRESS_PROBE: std::cell::RefCell<Option<HashProgressProbe>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct ResetHashProgressProbe;
+
+    impl Drop for ResetHashProgressProbe {
+        fn drop(&mut self) {
+            HASH_PROGRESS_PROBE.with(|probe| probe.replace(None));
+        }
+    }
+
+    pub(super) fn hash_progress_elapsed(
+        checked: u64,
+        actual: std::time::Duration,
+    ) -> std::time::Duration {
+        HASH_PROGRESS_PROBE.with(|probe| match probe.borrow().as_ref() {
+            Some(probe) if probe.timed_at == checked => std::time::Duration::from_millis(100),
+            Some(_) => std::time::Duration::from_millis(99),
+            None => actual,
+        })
+    }
+
+    pub(super) fn observe_hash_progress(checked: u64) -> Result<()> {
+        HASH_PROGRESS_PROBE.with(|probe| {
+            if let Some(probe) = probe.borrow_mut().as_mut() {
+                probe.updates.push(checked);
+                assert_eq!(model_progress::status()?["done"], checked);
+                if let Some((at, id)) = &probe.cancel_at {
+                    if *at == checked {
+                        assert_eq!(model_progress::control(id, true)?["cancelled"], true);
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn hash_progress_reports_on_bytes_or_time_and_preserves_final_digest() -> Result<()> {
+        let _serial = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let id = "synthetic-hash-progress";
+        let _scope = model_progress::TaskScope::new(Some(id.to_owned()));
+        let _operation = model_progress::Operation::begin_download()?;
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("weight.bin");
+        let timed_at = 64 * 1024;
+        let byte_update = timed_at + 4 * 1024 * 1024;
+        let final_bytes = byte_update + 64 * 1024;
+        let bytes = vec![0x69; final_bytes as usize];
+        std::fs::write(&path, &bytes)?;
+        let _reset = ResetHashProgressProbe;
+        HASH_PROGRESS_PROBE.with(|probe| {
+            probe.replace(Some(HashProgressProbe {
+                timed_at,
+                cancel_at: None,
+                updates: Vec::new(),
+            }));
+        });
+
+        assert_eq!(
+            sha256_file(&path)?,
+            hex::encode(Sha256::digest(&bytes)),
+        );
+        HASH_PROGRESS_PROBE.with(|cell| -> Result<()> {
+            let mut slot = cell.borrow_mut();
+            let probe = slot.as_mut().context("hash progress observation is missing")?;
+            assert_eq!(probe.updates, [0, timed_at, byte_update, final_bytes]);
+            probe.updates.clear();
+            // Acknowledge cancellation immediately after the initial report.
+            // The next actual update (the simulated 100 ms checkpoint) must
+            // observe it through the production progress state.
+            probe.cancel_at = Some((0, id.to_owned()));
+            Ok(())
+        })?;
+        let error = sha256_file(&path)
+            .err()
+            .context("hash unexpectedly succeeded after cancellation")?;
+        assert!(matches!(
+            error.downcast_ref::<model_progress::OperationStopped>(),
+            Some(model_progress::OperationStopped::Cancelled)
+        ));
+        HASH_PROGRESS_PROBE.with(|cell| -> Result<()> {
+            let slot = cell.borrow();
+            let probe = slot.as_ref().context("hash progress observation is missing")?;
+            assert_eq!(probe.updates, [0]);
+            Ok(())
+        })?;
+        // A fast 1.13 GiB read reports once per 4 MiB, plus its initial/final
+        // reports: 291 mutex acquisitions rather than ~18,500 at 64 KiB.
+        Ok(())
+    }
 
     #[test]
     fn bounded_download_rejects_headers_stream_overflow_and_short_eof() -> Result<()> {
