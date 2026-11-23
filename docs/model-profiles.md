@@ -29,7 +29,14 @@ replay of an unknown operation.
 
 This custom local profile uses the verified small model as an example. Replace
 the paths with your local files. Optional `download` resource URLs support HTTPS
-or HTTP loopback fixtures. Downloads use resumable staging and verify size and
+or HTTP loopback fixtures in Runtime Profile operations. The CLI file-only
+installer accepts canonical immutable Hugging Face URLs. For known public
+artifacts in the built-in M3, BGE, MLX and Granite Profiles, it uses
+`--mirror`, then `RSRS_MIRROR`, then the saved setting. Automatic mode tries
+`hf-mirror.com`, `hf-mirror.net`, then `huggingface.co`. Other valid Hugging
+Face paths are not sent to mirrors; custom hosts and signed URLs are not
+accepted by the CLI file-only installer. A local Profile with no download URL
+uses its existing file. Downloads use resumable staging and verify size and
 SHA-256 before replacement. Existing corrupt resources fail explicitly.
 
 ```json
