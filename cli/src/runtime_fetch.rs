@@ -318,6 +318,12 @@ impl std::fmt::Display for RuntimeMetadataIncompatible {
 
 impl std::error::Error for RuntimeMetadataIncompatible {}
 
+/// These errors require changing the managed selection or its proof;
+/// retrying resolution with the same release will not repair it.
+pub(crate) fn is_terminal_selection_error(error: &anyhow::Error) -> bool {
+    error.is::<ManagedRuntimeRepairRequired>() || error.is::<RuntimeMetadataIncompatible>()
+}
+
 /// An automatic install must not select a new protocol for an unbound old owner.
 #[derive(Debug)]
 pub struct LegacyRuntimeMigrationRequired;
@@ -1726,7 +1732,7 @@ fn finish_install<T>(stage: &Path, outcome: Result<T>) -> Result<T> {
 
 fn is_progress_abort(error: &anyhow::Error) -> bool {
     error.is::<LegacyRuntimeMigrationRequired>()
-        || error.is::<ManagedRuntimeRepairRequired>()
+        || is_terminal_selection_error(error)
         || error
         .downcast_ref::<model_progress::OperationStopped>()
         .is_some()
