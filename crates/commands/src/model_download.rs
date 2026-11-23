@@ -635,23 +635,30 @@ mod tests {
             sha256_file(&path)?,
             hex::encode(Sha256::digest(&bytes)),
         );
-        HASH_PROGRESS_PROBE.with(|cell| {
+        HASH_PROGRESS_PROBE.with(|cell| -> Result<()> {
             let mut slot = cell.borrow_mut();
-            let probe = slot.as_mut().unwrap();
+            let probe = slot.as_mut().context("hash progress observation is missing")?;
             assert_eq!(probe.updates, [0, timed_at, byte_update, final_bytes]);
             probe.updates.clear();
             // Acknowledge cancellation immediately after the initial report.
             // The next actual update (the simulated 100 ms checkpoint) must
             // observe it through the production progress state.
             probe.cancel_at = Some((0, id.to_owned()));
-        });
+            Ok(())
+        })?;
+        let error = sha256_file(&path)
+            .err()
+            .context("hash unexpectedly succeeded after cancellation")?;
         assert!(matches!(
-            sha256_file(&path).unwrap_err().downcast_ref::<model_progress::OperationStopped>(),
+            error.downcast_ref::<model_progress::OperationStopped>(),
             Some(model_progress::OperationStopped::Cancelled)
         ));
-        HASH_PROGRESS_PROBE.with(|probe| {
-            assert_eq!(probe.borrow().as_ref().unwrap().updates, [0]);
-        });
+        HASH_PROGRESS_PROBE.with(|cell| -> Result<()> {
+            let slot = cell.borrow();
+            let probe = slot.as_ref().context("hash progress observation is missing")?;
+            assert_eq!(probe.updates, [0]);
+            Ok(())
+        })?;
         // A fast 1.13 GiB read reports once per 4 MiB, plus its initial/final
         // reports: 291 mutex acquisitions rather than ~18,500 at 64 KiB.
         Ok(())
