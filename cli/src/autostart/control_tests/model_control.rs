@@ -682,3 +682,122 @@ fn model_plan_responses_require_the_original_peer_and_private_readiness() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn profile_mirror_routes_public_pins_but_does_not_relay_unreviewed_paths() -> Result<()> {
+    let _guard = crate::TEST_ENV_LOCK.lock()
+        .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    let _restore = isolate(&root);
+    let revision = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
+    let resource = format!("Xenova/bge-small-zh-v1.5/resolve/{revision}/tokenizer.json");
+    let upstream = format!("https://huggingface.co/{resource}");
+    let private_url = format!("https://huggingface.co/example/private/resolve/{revision}/tokenizer.json");
+    let signed_url = format!("{upstream}?token=do-not-relay");
+    let mut plan = assets(&[
+        ("profile-tokenizer", &upstream),
+        ("profile-tokenizer", &private_url),
+        ("profile-tokenizer", &signed_url),
+        ("profile-tokenizer", ""),
+    ])?;
+    for asset in &mut plan.assets {
+        asset.version = Some(revision.into());
+    }
+    let mut intent = ModelInstallIntent::default();
+    let assert_routes = |intent: &ModelInstallIntent, origins: &[&str]| -> Result<()> {
+        let resolved = local_model_sources(intent, &plan)?;
+        assert_eq!(resolved[0], origins.iter().map(|origin| format!("{origin}/{resource}")).collect::<Vec<_>>());
+        assert_eq!(resolved[1], [private_url.as_str()]);
+        assert_eq!(resolved[2], [signed_url.as_str()]);
+        assert!(resolved[3].is_empty());
+        Ok(())
+    };
+    assert_routes(&intent, &["https://hf-mirror.com", "https://hf-mirror.net", "https://huggingface.co"])?;
+    std::fs::write(root.join("agent.json"), br#"{"model_mirror":"saved.invalid"}"#)?;
+    assert_routes(&intent, &["https://saved.invalid"])?;
+    std::env::set_var("RSRS_MIRROR", "env.invalid");
+    assert_routes(&intent, &["https://env.invalid"])?;
+    intent.mirror = Some("flag.invalid".into());
+    assert_routes(&intent, &["https://flag.invalid"])?;
+    Ok(())
+}
+
+#[test]
+fn profile_mirror_executes_the_selected_public_route_without_weakening_plan_pins() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
+
+    let _guard = crate::TEST_ENV_LOCK.lock()
+        .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().canonicalize()?;
+    let _restore = isolate(&root);
+    let server = tiny_http::Server::http("127.0.0.1:0").map_err(|err| anyhow::anyhow!("{err}"))?;
+    let intent = ModelInstallIntent {
+        mirror: Some(format!("http://{}", server.server_addr())),
+        ..Default::default()
+    };
+    let revision = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
+    let route = format!("/Xenova/bge-small-zh-v1.5/resolve/{revision}/tokenizer.json");
+    let official = format!("https://huggingface.co{route}");
+    let good = b"correct";
+    let good_pin = format!("{:x}", Sha256::digest(good));
+
+    for (source, version) in [
+        (format!("{official}?token=do-not-relay"), revision),
+        (format!("{official}#fragment"), revision),
+        (official.replace("tokenizer.json", "%74okenizer.json"), revision),
+        (official.replace("huggingface.co", "signed-custom.invalid"), revision),
+        (official.clone(), "ffffffffffffffffffffffffffffffffffffffff"),
+    ] {
+        let target = root.join("must-not-exist/tokenizer.json");
+        let plan = AssetsStatus::installation_plan(vec![host_asset(
+            "profile-tokenizer", version, target.clone(), good.len() as u64, &good_pin, source,
+        )?]);
+        let result = local_model_sources(&intent, &plan)
+            .and_then(|sources| respire_commands::model_asset_files::prepare_model_assets_with_sources(
+                &plan, std::slice::from_ref(&root), &sources,
+            ));
+        assert!(result.is_err());
+        assert!(!root.join("must-not-exist").exists());
+    }
+    assert!(server.recv_timeout(Duration::from_millis(50))?.is_none());
+
+    for (index, body) in [b"bad!!!!", good].into_iter().enumerate() {
+        let target = root.join(format!("test-{index}/tokenizer.json"));
+        let plan = AssetsStatus::installation_plan(vec![host_asset(
+            "profile-tokenizer", revision, target.clone(), good.len() as u64, &good_pin, official.clone(),
+        )?]);
+        let sources = local_model_sources(&intent, &plan)?;
+        let mirror = intent.mirror.as_deref().context("fixture mirror missing")?;
+        // A baseline failure exits here, before it can touch any remote server.
+        assert_eq!(sources, [vec![format!("{mirror}{route}")]]);
+        let handler = std::thread::scope(|scope| -> Result<_> {
+            let server = &server;
+            let route = &route;
+            let worker = scope.spawn(move || -> Result<()> {
+                let request = server.recv_timeout(Duration::from_secs(3))?
+                    .context("fixture mirror received no request")?;
+                let actual_route = request.url().to_owned();
+                request.respond(tiny_http::Response::from_data(body.to_vec()))?;
+                assert_eq!(actual_route, *route);
+                Ok(())
+            });
+            let result = respire_commands::model_asset_files::prepare_model_assets_with_sources(
+                &plan, std::slice::from_ref(&root), &sources,
+            );
+            worker.join().map_err(|_| anyhow::anyhow!("fixture mirror thread panicked"))??;
+            Ok(result)
+        })?;
+        if index == 0 {
+            let error = handler.err().context("same-size incorrect bytes published")?;
+            assert!(format!("{error:#}").contains("checksum failed"));
+            assert!(!target.exists());
+        } else {
+            assert!(!handler?);
+            assert_eq!(std::fs::read(target)?, good);
+        }
+    }
+    Ok(())
+}

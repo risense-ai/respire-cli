@@ -506,11 +506,41 @@ fn host_installation_plan(
     Ok(AssetsStatus::installation_plan(assets))
 }
 
+// Only these exact public artifact paths may be relayed to a mirror. A configured
+// Profile can point at a private repository even with an unsigned canonical URL.
+// Broader plan validity (including size/SHA-256) remains the installer's check.
+fn public_profile_artifact(relative: &str, pinned_revision: Option<&str>) -> bool {
+    use respire_commands::model_asset_files::{MODEL_REPO, MODEL_REVISION};
+    use respire_commands::model_granite::{GRANITE_311M, GRANITE_97M};
+
+    let mut segments = relative.splitn(5, '/');
+    let (Some(owner), Some(repo), Some("resolve"), Some(revision), Some(file)) = (
+        segments.next(), segments.next(), segments.next(), segments.next(), segments.next(),
+    ) else { return false; };
+    if pinned_revision != Some(revision) { return false; }
+    let repository = format!("{owner}/{repo}");
+    if MODEL_REPO == repository && revision == MODEL_REVISION {
+        return file == "tokenizer.json" || MODEL_VARIANTS.iter().any(|(variant, _, _)| {
+            file.strip_prefix("onnx/model_").and_then(|name| name.strip_suffix(".onnx")) == Some(*variant)
+        });
+    }
+    for pin in [GRANITE_311M, GRANITE_97M] {
+        if pin.repo == repository && revision == pin.revision {
+            return file == pin.tokenizer.relative || file == pin.weights.relative;
+        }
+    }
+    matches!((owner, repo, revision, file),
+        ("Xenova", "bge-small-zh-v1.5", "75c43b069aac4d136ba6bc1122f995fedcfd2781",
+            "tokenizer.json" | "onnx/model_quantized.onnx")
+        | ("mlx-community", "bge-m3-mlx-fp16", "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec",
+            "tokenizer.json" | "model.safetensors"))
+}
+
 /// Local policy only: the Runtime supplies artifact identity, never mirror authority.
 fn local_model_sources(intent: &ModelInstallIntent, plan: &AssetsStatus) -> Result<Vec<Vec<String>>> {
     let mirrors = respire_client_host::settings::m3_download_mirrors(intent.mirror.as_deref())?;
     let origins = if mirrors.model.trim() == "auto" {
-        vec!["https://hf-mirror.com".to_owned(), "https://hf-mirror.net".to_owned(), "https://huggingface.co".to_owned()]
+        respire_commands::model_download::MIRRORS[1..].iter().map(|origin| (*origin).to_owned()).collect()
     } else { vec![model_mirror_origin(&mirrors.model)?] };
     let cpu_mirror = mirrors.cpu_ort;
     plan.assets.iter().map(|asset| {
@@ -539,8 +569,13 @@ fn local_model_sources(intent: &ModelInstallIntent, plan: &AssetsStatus) -> Resu
         }
         let relative = official.strip_prefix("https://huggingface.co/")
             .context("model artifact lacks its official immutable source")?;
-        // Profile resources previously used their own pinned download URL, not the M3 mirror.
-        if asset.name.starts_with("profile-") { return Ok(vec![official.clone()]); }
+        if asset.name.starts_with("profile-")
+            && !public_profile_artifact(relative, asset.version.as_deref())
+        {
+            // The installer still rejects noncanonical (including signed) sources.
+            // Never generate mirror URLs for them or for unreviewed repository paths.
+            return Ok(vec![official.clone()]);
+        }
         Ok(origins.iter().map(|origin| format!("{origin}/{relative}")).collect())
     }).collect()
 }
